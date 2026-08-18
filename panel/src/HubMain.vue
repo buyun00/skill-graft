@@ -1,35 +1,10 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import {
-  NLayout,
-  NLayoutSider,
-  NLayoutContent,
-  NMenu,
-  NButton,
-  NCard,
-  NSpace,
-  NTag,
-  NDataTable,
-  NDrawer,
-  NDrawerContent,
-  NInput,
-  NAlert,
-  NStatistic,
-  NSpin,
-  NModal,
-  NSelect,
-  NRadioGroup,
-  NRadio,
-  NForm,
-  NFormItem,
-  useMessage,
-  type MenuOption,
-  type SelectOption
-} from 'naive-ui'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { NSelect, useMessage, type SelectOption } from 'naive-ui'
 import { api, type HubState, type InboxItem, type SkillNode, type WorktreeInfo } from './api'
 
 const message = useMessage()
-const page = ref('overview')
+const page = ref('sessions')
 const loading = ref(false)
 const launching = ref(false)
 const error = ref('')
@@ -41,42 +16,45 @@ const scanRoots = ref<string[]>([])
 const preview = ref('')
 const previewTitle = ref('')
 const showPreview = ref(false)
-const showLaunch = ref(false)
 const mergeTarget = ref('skills/ozdqp-development/references/testing-and-verification.md')
 const launchKind = ref<'chat' | 'edit' | 'attach'>('chat')
 const launchPath = ref('skills/ozdqp-development')
 const launchWorktree = ref('')
-const launchIntent = ref('帮我查看并修改中心仓的 Skill。')
+const launchIntent = ref('')
+const selectedRun = ref('')
 const liveLogs = ref<Record<string, string>>({})
 const liveStatus = ref<Record<string, string>>({})
 const liveBoxes = new Map<string, HTMLElement>()
 const eventSources = new Map<string, EventSource>()
 
-const menuOptions: MenuOption[] = [
-  { label: '总览', key: 'overview' },
-  { label: '结构', key: 'structure' },
-  { label: '待审', key: 'inbox' },
-  { label: '工作树', key: 'worktrees' },
-  { label: '会话', key: 'sessions' },
-  { label: '历史', key: 'history' }
+const nav = [
+  { key: 'sessions', label: '运行' },
+  { key: 'worktrees', label: '工作区' },
+  { key: 'structure', label: 'Skills' },
+  { key: 'inbox', label: '待审' },
+  { key: 'history', label: '历史' }
 ]
 
 const queuedItems = computed(() => (state.value?.items ?? []).filter((item) => ['queued', 'proposed'].includes(item.status)))
+const runningCount = computed(() => sessions.value.filter((session) => (liveStatus.value[String(session.id)] || session.status) === 'running').length)
+const orderedSessions = computed(() => [...sessions.value].reverse())
+const currentSession = computed(() => orderedSessions.value.find((session) => String(session.id) === selectedRun.value) || orderedSessions.value[0] || null)
+const allSkills = computed(() => state.value ? [...state.value.resident, ...state.value.adopted, ...state.value.inbox] : [])
 
-const skillOptions = computed<SelectOption[]>(() => {
-  if (!state.value) return []
-  return [...state.value.resident, ...state.value.adopted, ...state.value.inbox].map((node) => ({
-    label: `${node.name}  (${node.path})`,
-    value: node.path
-  }))
-})
-
-const worktreeOptions = computed<SelectOption[]>(() =>
-  worktrees.value.map((tree) => ({
-    label: `${tree.name}  ·  ${tree.path}`,
-    value: tree.path
-  }))
+const skillOptions = computed<SelectOption[]>(() =>
+  allSkills.value.map((node) => ({ label: `${node.name}  (${node.path})`, value: node.path }))
 )
+const worktreeOptions = computed<SelectOption[]>(() =>
+  worktrees.value.map((tree) => ({ label: `${tree.name}  ·  ${tree.path}`, value: tree.path }))
+)
+
+const pageCopy: Record<string, { title: string; sub: string }> = {
+  sessions: { title: '运行', sub: '在面板内部执行 Codex，日志实时出现在这里' },
+  worktrees: { title: '工作区', sub: '按目录名和最近改动排列，一键换成中心仓体系' },
+  structure: { title: 'Skills', sub: '常驻、已采用和 inbox 原料都在这里' },
+  inbox: { title: '待审', sub: '别人推上来的官方 Skill，先看再决定' },
+  history: { title: '历史', sub: '入队、拍板和执行记录' }
+}
 
 function formatChangedAt(ms: number, iso: string) {
   if (!ms) return '时间未知'
@@ -84,19 +62,19 @@ function formatChangedAt(ms: number, iso: string) {
   const minutes = Math.floor(delta / 60000)
   if (minutes < 1) return '刚刚'
   if (minutes < 60) return `${minutes} 分钟前`
-  const hours = Math.floor(minutes / 60)
+  const hours = Math.floor(hoursOf(minutes))
   if (hours < 24) return `${hours} 小时前`
   const days = Math.floor(hours / 24)
   if (days < 30) return `${days} 天前`
   return iso ? iso.replace('T', ' ').slice(0, 16) : '时间未知'
 }
 
-function statusType(status: string) {
-  if (status === 'adopted') return 'success'
-  if (status === 'rejected') return 'error'
-  if (status === 'proposed') return 'warning'
-  if (status === 'merged-into-3skill') return 'info'
-  return 'default'
+function hoursOf(minutes: number) {
+  return minutes / 60
+}
+
+function sessionStatus(session: Record<string, unknown>) {
+  return liveStatus.value[String(session.id)] || String(session.status || '')
 }
 
 function sessionLog(session: Record<string, unknown>) {
@@ -125,9 +103,6 @@ function watchSession(id: string) {
   source.addEventListener('status', (event) => {
     const data = JSON.parse((event as MessageEvent).data || '{}')
     liveStatus.value = { ...liveStatus.value, [id]: data.status || '' }
-    if (data.lastMessage) {
-      liveLogs.value = { ...liveLogs.value, [id]: `${liveLogs.value[id] || ''}` }
-    }
     if (data.status && data.status !== 'running') {
       source.close()
       eventSources.delete(id)
@@ -157,8 +132,9 @@ async function refresh(silent = false) {
     sessions.value = nextSessions.sessions
     worktrees.value = nextWorktrees.worktrees
     scanRoots.value = nextWorktrees.scanRoots || []
-    if (!launchWorktree.value && nextWorktrees.worktrees[0]) {
-      launchWorktree.value = nextWorktrees.worktrees[0].path
+    if (!launchWorktree.value && nextWorktrees.worktrees[0]) launchWorktree.value = nextWorktrees.worktrees[0].path
+    if (!selectedRun.value && nextSessions.sessions.length) {
+      selectedRun.value = String(nextSessions.sessions[nextSessions.sessions.length - 1].id)
     }
     for (const session of nextSessions.sessions) {
       if (session.status === 'running') watchSession(String(session.id))
@@ -192,7 +168,8 @@ async function decide(item: InboxItem, action: 'adopt' | 'merge' | 'reject') {
     action,
     mergeTarget: action === 'merge' ? mergeTarget.value : undefined
   })
-  await refresh()
+  await refresh(true)
+  message.success(action === 'adopt' ? '已采用' : action === 'merge' ? '已并入' : '已拒绝')
 }
 
 function openLaunch(kind: 'chat' | 'edit' | 'attach' = 'chat', preset?: { path?: string; worktree?: string; intent?: string }) {
@@ -200,7 +177,7 @@ function openLaunch(kind: 'chat' | 'edit' | 'attach' = 'chat', preset?: { path?:
   if (preset?.path) launchPath.value = preset.path
   if (preset?.worktree) launchWorktree.value = preset.worktree
   if (preset?.intent) launchIntent.value = preset.intent
-  showLaunch.value = true
+  page.value = 'sessions'
 }
 
 async function launchCodex() {
@@ -215,18 +192,12 @@ async function launchCodex() {
       started = await api.startCodex({ kind: 'chat', intent: launchIntent.value })
     }
     const id = String(started.id || '')
-    sessions.value = [
-      ...sessions.value,
-      {
-        ...started,
-        status: started.status || 'running',
-        logTail: '已启动，等待 Codex 输出…'
-      }
-    ]
+    sessions.value = [...sessions.value, { ...started, status: started.status || 'running', logTail: '已启动，等待 Codex 输出…' }]
+    selectedRun.value = id
     if (id) watchSession(id)
-    showLaunch.value = false
     page.value = 'sessions'
-    message.success('已在面板内部启动，日志会在下方实时刷出。')
+    launchIntent.value = ''
+    message.success('已开始执行')
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   } finally {
@@ -234,214 +205,190 @@ async function launchCodex() {
   }
 }
 
-onMounted(async () => {
-  await refresh()
-})
-
+onMounted(() => { void refresh() })
 onUnmounted(() => {
   for (const source of eventSources.values()) source.close()
   eventSources.clear()
 })
-
-const inboxColumns = [
-  { title: '名称', key: 'name', width: 180 },
-  { title: '状态', key: 'status', width: 140, render: (row: InboxItem) => h(NTag, { type: statusType(row.status), size: 'small' }, { default: () => row.status }) },
-  { title: '建议', key: 'suggestion', render: (row: InboxItem) => row.suggestion?.action || '—' },
-  { title: '来源', key: 'sourceRef', ellipsis: { tooltip: true } }
-]
 </script>
 
 <template>
-  <n-layout class="hub-shell" has-sider>
-    <n-layout-sider bordered :width="232" :collapsed-width="64" show-trigger content-style="padding-top: 18px">
-      <div style="padding: 0 20px 16px">
-        <div style="font-size: 18px; font-weight: 700; letter-spacing: 0.04em">Skill Hub</div>
-        <div class="muted" style="margin-top: 4px; font-size: 12px">中心仓管理面板</div>
+  <div class="app-shell">
+    <aside class="side">
+      <div class="brand">
+        <div class="brand-mark" />
+        <h1>Skill Hub</h1>
+        <p>本地中心仓</p>
       </div>
-      <n-menu v-model:value="page" :options="menuOptions" />
-    </n-layout-sider>
-    <n-layout-content content-style="padding: 28px 32px 48px" :native-scrollbar="false">
-      <div>
-        <div class="page-title">
-          <h2>{{ menuOptions.find((item) => item.key === page)?.label }}</h2>
-          <n-space>
-            <n-button secondary @click="refresh">刷新</n-button>
-            <n-button type="primary" @click="openLaunch('chat')">新开 Codex 对话</n-button>
-          </n-space>
+      <nav class="nav">
+        <button v-for="item in nav" :key="item.key" class="nav-btn" :class="{ active: page === item.key }" @click="page = item.key">
+          <span>{{ item.label }}</span>
+          <span v-if="item.key === 'inbox' && queuedItems.length" class="badge">{{ queuedItems.length }}</span>
+          <span v-else-if="item.key === 'sessions' && runningCount" class="badge">{{ runningCount }}</span>
+        </button>
+      </nav>
+      <div class="side-cta">
+        <button class="primary-btn" style="width:100%" @click="openLaunch('chat')">新任务</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h2>{{ pageCopy[page].title }}</h2>
+          <p class="sub">{{ pageCopy[page].sub }}</p>
         </div>
+        <div class="actions">
+          <button class="ghost-btn" @click="refresh()">刷新</button>
+          <button v-if="page === 'inbox'" class="ghost-btn" @click="api.analyze()">重新分析</button>
+        </div>
+      </header>
+      <p v-if="error" class="error-banner">{{ error }}</p>
 
-        <n-alert v-if="error" type="error" style="margin-bottom: 16px">{{ error }}</n-alert>
-
+      <section class="content">
         <template v-if="state">
-          <div v-if="page === 'overview'">
-            <n-card title="拉起 Codex" style="margin-bottom: 16px">
-              <p>要改 Skill、处理新签出的分支，或随便问中心仓的事，点右上角或下面的按钮。会弹出一个 Codex CLI 窗口，不是在这个网页里聊天。</p>
-              <n-space>
-                <n-button type="primary" @click="openLaunch('chat')">新开一条对话</n-button>
-                <n-button @click="openLaunch('edit', { intent: '按客户端需要改这个 Skill' })">改某个 Skill</n-button>
-                <n-button @click="openLaunch('attach', { intent: '剥官方 Skill，改挂中心仓' })">给工作树换成本地体系</n-button>
-              </n-space>
-            </n-card>
-            <div class="stat-grid">
-              <n-card><n-statistic label="常驻 Skill" :value="state.counts.resident" /></n-card>
-              <n-card><n-statistic label="已采用" :value="state.counts.adopted" /></n-card>
-              <n-card><n-statistic label="待审" :value="state.counts.queued" /></n-card>
-              <n-card><n-statistic label="已建议" :value="state.counts.proposed" /></n-card>
+          <div v-if="page === 'sessions'">
+            <div class="run-layout">
+              <div class="panel run-list">
+                <div class="kicker">任务</div>
+                <button
+                  v-for="session in orderedSessions"
+                  :key="String(session.id)"
+                  class="run-item"
+                  :class="{ active: currentSession && currentSession.id === session.id }"
+                  @click="selectedRun = String(session.id)"
+                >
+                  <div class="title">{{ session.kind }}</div>
+                  <div class="meta">{{ sessionStatus(session) }} · {{ session.worktree || session.path || '中心仓' }}</div>
+                </button>
+                <div v-if="!orderedSessions.length" class="empty">还没有任务。用下面的输入框直接开始。</div>
+              </div>
+              <div class="panel run-stage">
+                <template v-if="currentSession">
+                  <div class="kicker">实时输出</div>
+                  <div class="title" style="margin-bottom:10px">{{ currentSession.kind }} · {{ sessionStatus(currentSession) }}</div>
+                  <pre class="live-log" :ref="(el) => bindLiveBox(String(currentSession.id), el)">{{ sessionLog(currentSession) || '等待输出…' }}</pre>
+                </template>
+                <div v-else class="empty">选一个任务，或在下方描述你要做的事。</div>
+              </div>
             </div>
-            <n-card style="margin-top: 16px" title="中心仓">
-              <p>Hub：{{ state.hubRoot }}</p>
-              <p>游戏仓：{{ state.gameRepo || '未登记' }}</p>
-              <p class="muted">最近入队：{{ state.lastIngest?.at || '尚无' }} {{ state.lastIngest?.ref || '' }}</p>
-            </n-card>
-          </div>
 
-          <div v-else-if="page === 'structure'">
-            <n-card
-              v-for="group in [
-                { title: '常驻', nodes: state.resident },
-                { title: '已采用', nodes: state.adopted },
-                { title: 'Inbox', nodes: state.inbox }
-              ]"
-              :key="group.title"
-              :title="group.title"
-              style="margin-bottom: 14px"
-            >
-              <n-space vertical>
-                <div v-for="node in group.nodes" :key="node.path" style="display: flex; justify-content: space-between; gap: 12px; align-items: center">
-                  <div>
-                    <strong>{{ node.name }}</strong>
-                    <div class="muted">{{ node.path }}</div>
-                  </div>
-                  <n-space>
-                    <n-tag size="small" :type="node.attached ? 'success' : 'default'">{{ node.attached ? '已挂接' : '仅中心仓' }}</n-tag>
-                    <n-button size="small" @click="openSkill(node)">预览</n-button>
-                    <n-button size="small" type="primary" @click="openLaunch('edit', { path: node.path, intent: '按客户端需要改这个 Skill' })">用 Codex 改</n-button>
-                  </n-space>
-                </div>
-                <div v-if="group.nodes.length === 0" class="muted">空</div>
-              </n-space>
-            </n-card>
-          </div>
-
-          <div v-else-if="page === 'inbox'">
-            <n-card title="合并目标" style="margin-bottom: 14px">
-              <n-input v-model:value="mergeTarget" />
-            </n-card>
-            <n-card v-for="item in queuedItems" :key="item.id" style="margin-bottom: 12px">
-              <template #header>
-                <n-space align="center">
-                  <span>{{ item.name }}</span>
-                  <n-tag size="small" :type="statusType(item.status)">{{ item.status }}</n-tag>
-                </n-space>
-              </template>
-              <p class="muted">{{ item.unit }} · {{ item.sourceRef }}</p>
-              <p v-if="item.suggestion?.reason">建议：{{ item.suggestion.action }} / {{ item.suggestion.reason }}</p>
-              <n-space>
-                <n-button size="small" @click="openInbox(item)">预览</n-button>
-                <n-button size="small" type="primary" @click="openLaunch('edit', { path: item.inboxPath || '', intent: '按客户端改这条 inbox Skill' })">用 Codex 改</n-button>
-                <n-button size="small" type="success" @click="decide(item, 'adopt')">采用</n-button>
-                <n-button size="small" @click="decide(item, 'merge')">并进 3 Skill</n-button>
-                <n-button size="small" type="error" @click="decide(item, 'reject')">拒绝</n-button>
-              </n-space>
-            </n-card>
-            <n-card v-if="queuedItems.length === 0" title="待审为空">
-              新的官方 Skill 会在 fetch/pull 后出现在这里。
-            </n-card>
-            <n-data-table v-if="state.items.length" :columns="inboxColumns" :data="state.items" style="margin-top: 16px" />
+            <div class="composer">
+              <div class="mode-row">
+                <button class="mode" :class="{ on: launchKind === 'chat' }" @click="launchKind = 'chat'">对话</button>
+                <button class="mode" :class="{ on: launchKind === 'edit' }" @click="launchKind = 'edit'">改 Skill</button>
+                <button class="mode" :class="{ on: launchKind === 'attach' }" @click="launchKind = 'attach'">处理工作区</button>
+              </div>
+              <n-select v-if="launchKind === 'edit'" v-model:value="launchPath" :options="skillOptions" filterable style="margin-bottom:10px" />
+              <n-select v-if="launchKind === 'attach'" v-model:value="launchWorktree" :options="worktreeOptions" filterable style="margin-bottom:10px" />
+              <textarea v-model="launchIntent" placeholder="描述你要 Codex 做的事，例如：检查这棵树有没有挂上中心仓" />
+              <div class="composer-foot">
+                <span class="meta">内部执行，不弹窗。结果在上方实时刷新。</span>
+                <button class="primary-btn" :disabled="launching" @click="launchCodex">{{ launching ? '启动中' : '运行' }}</button>
+              </div>
+            </div>
           </div>
 
           <div v-else-if="page === 'worktrees'">
-            <n-card style="margin-bottom: 14px" title="扫描范围">
-              <p class="muted">不再只看当前仓的 git worktree list，会扫这些盘符下的客户端目录，并展开每个独立 clone 的全部 worktree。</p>
-              <p>范围：{{ scanRoots.join('、') || '未配置' }} · 找到 {{ worktrees.length }} 个客户端工作区</p>
-            </n-card>
-            <n-card v-for="tree in worktrees" :key="tree.path" style="margin-bottom: 12px">
-              <template #header>
-                <n-space>
-                  <span>{{ tree.name }}</span>
-                  <n-tag size="small" :type="tree.attached ? 'success' : 'warning'">{{ tree.attached ? '已用中心仓' : '仍用分支自带' }}</n-tag>
-                  <n-tag v-if="tree.doNotAuto" size="small">勿自动</n-tag>
-                  <n-tag v-if="tree.ephemeral" size="small" type="info">临时/工具树</n-tag>
-                  <n-tag v-if="tree.locked" size="small">locked</n-tag>
-                  <n-tag v-if="tree.prunable" size="small" type="error">prunable</n-tag>
-                </n-space>
-              </template>
-              <p>{{ tree.path }}</p>
-              <p class="muted">分支 {{ tree.branch }} · 最近改动 {{ formatChangedAt(tree.changedAtMs, tree.changedAt) }}</p>
-              <p class="muted">clone：{{ tree.cloneRoot }}</p>
-              <p class="muted">
-                {{ tree.officialPresent ? '官方 Skill 树还在磁盘（尚未换成中心仓）' : '官方 Skill 树已拿走（正常）' }}
-                ·
-                {{ tree.overrideLinked ? 'AGENTS.override 已接到中心仓' : 'AGENTS.override 未接到中心仓' }}
-              </p>
-              <n-button type="primary" @click="openLaunch('attach', { worktree: tree.path, intent: tree.attached ? '检查并修复这棵树与中心仓的挂接' : '剥官方 Skill，改挂中心仓' })">
-                {{ tree.attached ? '用 Codex 检查这棵树' : '用 Codex 改用本地 Skill' }}
-              </n-button>
-            </n-card>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="kicker">扫描范围</div>
+              <div class="meta">{{ scanRoots.join('、') || '未配置' }} · {{ worktrees.length }} 个工作区 · 按最近本地改动排序</div>
+            </div>
+            <div class="list">
+              <article v-for="tree in worktrees" :key="tree.path" class="row-card">
+                <div>
+                  <div class="title">{{ tree.name }}</div>
+                  <div class="chips">
+                    <span class="chip" :class="tree.attached ? 'ok' : 'warn'">{{ tree.attached ? '已用中心仓' : '仍用分支自带' }}</span>
+                    <span v-if="tree.doNotAuto" class="chip">勿自动</span>
+                    <span v-if="tree.ephemeral" class="chip info">临时</span>
+                    <span v-if="tree.locked" class="chip">locked</span>
+                    <span v-if="tree.prunable" class="chip bad">prunable</span>
+                    <span class="chip">{{ formatChangedAt(tree.changedAtMs, tree.changedAt) }}</span>
+                  </div>
+                  <div class="meta">{{ tree.path }}</div>
+                  <div class="meta">{{ tree.branch }} · {{ tree.cloneRoot }}</div>
+                  <div class="meta">
+                    {{ tree.officialPresent ? '官方 Skill 树还在磁盘' : '官方 Skill 树已拿走' }}
+                    ·
+                    {{ tree.overrideLinked ? 'override 已接通' : 'override 未接通' }}
+                  </div>
+                </div>
+                <div class="actions">
+                  <button class="primary-btn" @click="openLaunch('attach', { worktree: tree.path, intent: tree.attached ? '检查并修复这棵树与中心仓的挂接' : '剥官方 Skill，改挂中心仓' })">
+                    {{ tree.attached ? '检查' : '改用本地 Skill' }}
+                  </button>
+                </div>
+              </article>
+            </div>
           </div>
 
-          <div v-else-if="page === 'sessions'">
-            <n-card style="margin-bottom: 14px">
-              <n-button type="primary" @click="openLaunch('chat')">新开 Codex 对话</n-button>
-            </n-card>
-            <n-card v-for="session in sessions.slice().reverse()" :key="String(session.id)" style="margin-bottom: 12px">
-              <p>
-                {{ session.kind }} ·
-                <n-tag size="small" :type="(liveStatus[String(session.id)] || session.status) === 'completed' ? 'success' : (liveStatus[String(session.id)] || session.status) === 'failed' ? 'error' : 'warning'">
-                  {{ liveStatus[String(session.id)] || session.status }}
-                </n-tag>
-                · pid {{ session.pid }}
-              </p>
-              <p class="muted">{{ session.path || session.worktree || '中心仓内部执行，输出在下方实时刷新' }}</p>
-              <pre class="preview live-log" :ref="(el) => bindLiveBox(String(session.id), el)">{{ sessionLog(session) || '等待输出…' }}</pre>
-              <p v-if="session.error" class="muted">{{ session.error }}</p>
-            </n-card>
-            <n-card v-if="sessions.length === 0">还没有内部 Codex 任务。点上面的按钮即可在面板里跑。</n-card>
+          <div v-else-if="page === 'structure'">
+            <div v-for="group in [
+              { title: '常驻', nodes: state.resident },
+              { title: '已采用', nodes: state.adopted },
+              { title: 'Inbox', nodes: state.inbox }
+            ]" :key="group.title" class="list" style="margin-bottom:18px">
+              <div class="kicker">{{ group.title }}</div>
+              <article v-for="node in group.nodes" :key="node.path" class="row-card">
+                <div>
+                  <div class="title">{{ node.name }}</div>
+                  <div class="meta">{{ node.path }}</div>
+                </div>
+                <div class="actions">
+                  <span class="chip" :class="node.attached ? 'ok' : ''">{{ node.attached ? '已挂接' : '仅中心仓' }}</span>
+                  <button class="ghost-btn" @click="openSkill(node)">预览</button>
+                  <button class="primary-btn" @click="openLaunch('edit', { path: node.path, intent: '按客户端需要改这个 Skill' })">用 Codex 改</button>
+                </div>
+              </article>
+              <div v-if="group.nodes.length === 0" class="empty">这里还是空的</div>
+            </div>
+          </div>
+
+          <div v-else-if="page === 'inbox'">
+            <div class="panel" style="margin-bottom:14px">
+              <div class="kicker">并进 3 Skill 时的目标文件</div>
+              <input v-model="mergeTarget" class="ghost-btn" style="width:100%;margin-top:8px;text-align:left" />
+            </div>
+            <article v-for="item in queuedItems" :key="item.id" class="row-card">
+              <div>
+                <div class="title">{{ item.name }}</div>
+                <div class="chips"><span class="chip info">{{ item.status }}</span></div>
+                <div class="meta">{{ item.unit }} · {{ item.sourceRef }}</div>
+                <div v-if="item.suggestion?.reason" class="meta">建议：{{ item.suggestion.action }} / {{ item.suggestion.reason }}</div>
+              </div>
+              <div class="actions">
+                <button class="ghost-btn" @click="openInbox(item)">预览</button>
+                <button class="primary-btn" @click="openLaunch('edit', { path: item.inboxPath || '', intent: '按客户端改这条 inbox Skill' })">用 Codex 改</button>
+                <button class="ok-btn ghost-btn" @click="decide(item, 'adopt')">采用</button>
+                <button class="ghost-btn" @click="decide(item, 'merge')">并进</button>
+                <button class="danger-btn ghost-btn" @click="decide(item, 'reject')">拒绝</button>
+              </div>
+            </article>
+            <div v-if="queuedItems.length === 0" class="empty">没有待审项。fetch/pull 官方 Skill 后会到这里。</div>
+            <div v-if="state.items.length" class="panel" style="margin-top:16px">
+              <div class="kicker">全部记录</div>
+              <div v-for="item in state.items" :key="item.id" class="meta" style="margin-top:8px">{{ item.name }} · {{ item.status }} · {{ item.sourceRef }}</div>
+            </div>
           </div>
 
           <div v-else>
-            <n-card v-for="(record, index) in history" :key="index" style="margin-bottom: 10px">
-              <pre class="preview">{{ JSON.stringify(record, null, 2) }}</pre>
-            </n-card>
-            <n-card v-if="history.length === 0">暂无历史。</n-card>
+            <article v-for="(record, index) in history" :key="index" class="panel" style="margin-bottom:10px">
+              <pre class="live-log" style="height:auto;min-height:0;max-height:280px">{{ JSON.stringify(record, null, 2) }}</pre>
+            </article>
+            <div v-if="history.length === 0" class="empty">暂无历史</div>
           </div>
         </template>
-      </div>
-    </n-layout-content>
-  </n-layout>
+        <div v-else-if="loading" class="empty">正在载入中心仓…</div>
+      </section>
+    </main>
+  </div>
 
-  <n-drawer v-model:show="showPreview" width="640">
-    <n-drawer-content :title="previewTitle">
-      <pre class="preview">{{ preview }}</pre>
-    </n-drawer-content>
-  </n-drawer>
-
-  <n-modal v-model:show="showLaunch" preset="card" title="新开 Codex 对话" style="width: 640px">
-    <n-form label-placement="top">
-      <n-form-item label="对话类型">
-        <n-radio-group v-model:value="launchKind">
-          <n-space>
-            <n-radio value="chat">自由对话</n-radio>
-            <n-radio value="edit">改某个 Skill</n-radio>
-            <n-radio value="attach">处理工作树</n-radio>
-          </n-space>
-        </n-radio-group>
-      </n-form-item>
-      <n-form-item v-if="launchKind === 'edit'" label="Skill 路径">
-        <n-select v-model:value="launchPath" :options="skillOptions" filterable />
-      </n-form-item>
-      <n-form-item v-if="launchKind === 'attach'" label="游戏工作树">
-        <n-select v-model:value="launchWorktree" :options="worktreeOptions" filterable />
-      </n-form-item>
-      <n-form-item label="你想让 Codex 做什么">
-        <n-input v-model:value="launchIntent" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" />
-      </n-form-item>
-    </n-form>
-    <template #footer>
-      <n-space justify="end">
-        <n-button @click="showLaunch = false">取消</n-button>
-        <n-button type="primary" :loading="launching" @click="launchCodex">开始执行</n-button>
-      </n-space>
-    </template>
-  </n-modal>
+  <aside v-if="showPreview" class="preview-pane">
+    <div class="actions" style="margin-bottom:12px">
+      <div class="title">{{ previewTitle }}</div>
+      <button class="text-btn" @click="showPreview = false">关闭</button>
+    </div>
+    <pre class="live-log" style="height:calc(100vh - 90px)">{{ preview }}</pre>
+  </aside>
 </template>
