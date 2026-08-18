@@ -15,6 +15,119 @@ function readJson(file, fallback) {
   return JSON.parse(fs.readFileSync(file, 'utf8'))
 }
 
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify(value, null, 2), 'utf8')
+}
+
+function sessionsPath() {
+  return path.join(hubRoot, 'skill-review', 'sessions.json')
+}
+
+function loadSessions() {
+  return readJson(sessionsPath(), { sessions: [] })
+}
+
+function saveSessions(data) {
+  writeJson(sessionsPath(), data)
+}
+
+function upsertSession(session) {
+  const data = loadSessions()
+  const list = Array.isArray(data.sessions) ? data.sessions : []
+  const index = list.findIndex((item) => item.id === session.id)
+  if (index >= 0) list[index] = session
+  else list.push(session)
+  data.sessions = list
+  saveSessions(data)
+}
+
+function buildPrompt({ kind, skillPath, intent, worktree }) {
+  const name = kind === 'analyze-note' ? 'chat' : kind
+  const templateFile = path.join(hubRoot, 'overlay', 'prompts', `${name}.txt`)
+  let prompt = fs.existsSync(templateFile) ? fs.readFileSync(templateFile, 'utf8') : (intent || '')
+  prompt = prompt
+    .replaceAll('{{HUB}}', hubRoot)
+    .replaceAll('{{PATH}}', skillPath || '')
+    .replaceAll('{{INTENT}}', intent || '')
+    .replaceAll('{{WORKTREE}}', worktree || '')
+  return prompt.trim()
+}
+
+function startInternalCodex({ kind, skillPath, intent, worktree }) {
+  if (kind === 'edit' && !skillPath) throw new Error('edit requires path')
+  if ((kind === 'attach' || kind === 'detach') && !worktree) throw new Error(`${kind} requires worktree`)
+
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+  const prompt = buildPrompt({ kind, skillPath, intent, worktree })
+  const promptFile = path.join(hubRoot, 'skill-review', `prompt-${id}.txt`)
+  const logFile = path.join(hubRoot, 'skill-review', `session-${id}.log`)
+  const lastFile = path.join(hubRoot, 'skill-review', `session-${id}.last.txt`)
+  fs.writeFileSync(promptFile, prompt, 'utf8')
+
+  const args = [
+    'exec',
+    '-C', hubRoot,
+    '--skip-git-repo-check',
+    '--color', 'never',
+    '--sandbox', 'danger-full-access',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '-o', lastFile
+  ]
+  if (worktree) args.push('--add-dir', worktree)
+  args.push(prompt)
+
+  const session = {
+    id,
+    kind,
+    path: skillPath || '',
+    worktree: worktree || '',
+    intent: intent || '',
+    pid: 0,
+    promptFile,
+    logFile,
+    lastFile,
+    startedAt: new Date().toISOString(),
+    status: 'running',
+    exitCode: null,
+    error: ''
+  }
+  upsertSession(session)
+
+  const npmRoot = path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
+  const child = spawn(process.execPath, [npmRoot, ...args], {
+    cwd: hubRoot,
+    windowsHide: true,
+    windowsVerbatimArguments: false,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, NO_COLOR: '1' }
+  })
+  session.pid = child.pid || 0
+  upsertSession(session)
+
+  const append = (chunk) => {
+    fs.appendFileSync(logFile, chunk.toString('utf8'))
+  }
+  child.stdout.on('data', append)
+  child.stderr.on('data', append)
+  child.on('error', (error) => {
+    session.status = 'failed'
+    session.error = error.message
+    session.finishedAt = new Date().toISOString()
+    append(`\n[spawn error] ${error.message}\n`)
+    upsertSession(session)
+  })
+  child.on('close', (code) => {
+    session.exitCode = code
+    session.status = code === 0 ? 'completed' : 'failed'
+    session.finishedAt = new Date().toISOString()
+    if (fs.existsSync(lastFile)) session.lastMessage = fs.readFileSync(lastFile, 'utf8')
+    upsertSession(session)
+  })
+  return session
+}
+
 function listSkillGroup(rel, kind) {
   const abs = path.join(hubRoot, rel)
   if (!fs.existsSync(abs)) return []
@@ -307,7 +420,29 @@ async function handleApi(req, url, body) {
   }
 
   if (url.pathname === '/api/codex/sessions') {
-    return readJson(path.join(hubRoot, 'skill-review', 'sessions.json'), { sessions: [] })
+    const data = loadSessions()
+    const sessions = (data.sessions || []).map((session) => {
+      let logTail = ''
+      if (session.logFile && fs.existsSync(session.logFile)) {
+        const text = fs.readFileSync(session.logFile, 'utf8')
+        logTail = text.slice(-8000)
+      }
+      return { ...session, logTail }
+    })
+    return { sessions }
+  }
+
+  if (url.pathname === '/api/codex/session') {
+    const id = url.searchParams.get('id')
+    const session = (loadSessions().sessions || []).find((item) => item.id === id)
+    if (!session) {
+      const err = new Error('session not found')
+      err.status = 404
+      throw err
+    }
+    let log = ''
+    if (session.logFile && fs.existsSync(session.logFile)) log = fs.readFileSync(session.logFile, 'utf8')
+    return { session, log }
   }
 
   if (url.pathname === '/api/worktrees') {
@@ -334,22 +469,23 @@ async function handleApi(req, url, body) {
   }
 
   if (url.pathname === '/api/codex/start') {
-    const args = ['-Kind', body.kind || 'edit']
-    if (body.path) args.push('-Path', body.path)
-    if (body.intent) args.push('-Intent', body.intent)
-    if (body.worktree) args.push('-Worktree', body.worktree)
-    const out = await runPwsh(path.join(hubRoot, 'overlay', 'start-codex-session.ps1'), args)
-    return JSON.parse(out.trim().split(/\r?\n/).at(-1) || '{}')
+    const session = startInternalCodex({
+      kind: body.kind || 'chat',
+      skillPath: body.path,
+      intent: body.intent,
+      worktree: body.worktree
+    })
+    return session
   }
 
   if (url.pathname === '/api/worktree/attach') {
-    const out = await runPwsh(path.join(hubRoot, 'overlay', 'start-codex-session.ps1'), ['-Kind', 'attach', '-Worktree', body.path])
-    return { ok: true, output: out }
+    const session = startInternalCodex({ kind: 'attach', worktree: body.path, intent: body.intent })
+    return { ok: true, session }
   }
 
   if (url.pathname === '/api/worktree/detach') {
-    const out = await runPwsh(path.join(hubRoot, 'overlay', 'start-codex-session.ps1'), ['-Kind', 'detach', '-Worktree', body.path])
-    return { ok: true, output: out }
+    const session = startInternalCodex({ kind: 'detach', worktree: body.path, intent: body.intent })
+    return { ok: true, session }
   }
 
   const err = new Error('not found')

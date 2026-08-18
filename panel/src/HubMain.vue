@@ -164,9 +164,10 @@ async function launchCodex() {
       await api.startCodex({ kind: 'chat', intent: launchIntent.value })
     }
     showLaunch.value = false
-    message.success('已在新终端打开 Codex 对话，请看弹出的窗口。')
+    message.success('已在面板内部启动 Codex，不会弹出新窗口。可在「会话」页看进度。')
     page.value = 'sessions'
     await refresh()
+    startSessionPoll()
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   } finally {
@@ -174,7 +175,23 @@ async function launchCodex() {
   }
 }
 
-onMounted(refresh)
+let pollTimer = 0
+function startSessionPoll() {
+  if (pollTimer) window.clearInterval(pollTimer)
+  pollTimer = window.setInterval(async () => {
+    await refresh()
+    const running = sessions.value.some((session) => session.status === 'running')
+    if (!running && pollTimer) {
+      window.clearInterval(pollTimer)
+      pollTimer = 0
+    }
+  }, 3000)
+}
+
+onMounted(async () => {
+  await refresh()
+  if (sessions.value.some((session) => session.status === 'running')) startSessionPoll()
+})
 
 const inboxColumns = [
   { title: '名称', key: 'name', width: 180 },
@@ -317,11 +334,18 @@ const inboxColumns = [
             <n-card style="margin-bottom: 14px">
               <n-button type="primary" @click="openLaunch('chat')">新开 Codex 对话</n-button>
             </n-card>
-            <n-card v-for="session in sessions" :key="String(session.id)" style="margin-bottom: 12px">
-              <p>{{ session.kind }} · pid {{ session.pid }} · {{ session.status }}</p>
-              <p class="muted">{{ session.path || session.worktree }}</p>
+            <n-card v-for="session in sessions.slice().reverse()" :key="String(session.id)" style="margin-bottom: 12px">
+              <p>
+                {{ session.kind }} ·
+                <n-tag size="small" :type="session.status === 'completed' ? 'success' : session.status === 'failed' ? 'error' : 'warning'">{{ session.status }}</n-tag>
+                · pid {{ session.pid }}
+              </p>
+              <p class="muted">{{ session.path || session.worktree || '中心仓内部执行，无新窗口' }}</p>
+              <pre v-if="session.lastMessage" class="preview">{{ session.lastMessage }}</pre>
+              <pre v-else-if="session.logTail" class="preview">{{ session.logTail }}</pre>
+              <p v-if="session.error" class="muted">{{ session.error }}</p>
             </n-card>
-            <n-card v-if="sessions.length === 0">还没有由面板拉起的 Codex 对话。点上面的按钮即可开一条。</n-card>
+            <n-card v-if="sessions.length === 0">还没有内部 Codex 任务。点上面的按钮即可在面板里跑。</n-card>
           </div>
 
           <div v-else>
