@@ -521,11 +521,72 @@ function serveStatic(urlPath, res) {
   send(res, 200, fs.readFileSync(abs), types[ext] || 'application/octet-stream')
 }
 
+function findSession(id) {
+  return (loadSessions().sessions || []).find((item) => item.id === id) || null
+}
+
+function streamSession(id, req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  })
+  let lastSize = -1
+  let lastStatus = ''
+  const writeEvent = (event, payload) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
+  }
+  const tick = () => {
+    const session = findSession(id)
+    if (!session) {
+      writeEvent('status', { status: 'missing' })
+      return
+    }
+    let log = ''
+    if (session.logFile && fs.existsSync(session.logFile)) {
+      const size = fs.statSync(session.logFile).size
+      if (size !== lastSize) {
+        lastSize = size
+        log = fs.readFileSync(session.logFile, 'utf8')
+        writeEvent('log', { text: log })
+      }
+    }
+    if (session.status !== lastStatus) {
+      lastStatus = session.status
+      writeEvent('status', {
+        status: session.status,
+        lastMessage: session.lastMessage || '',
+        error: session.error || '',
+        exitCode: session.exitCode
+      })
+    }
+    if (session.status && session.status !== 'running') {
+      clearInterval(timer)
+      res.end()
+    }
+  }
+  const timer = setInterval(tick, 250)
+  tick()
+  req.on('close', () => {
+    clearInterval(timer)
+  })
+}
+
 const onRequest = async (req, res) => {
   const url = new URL(req.url || '/', `http://127.0.0.1:${port}`)
   try {
     if (url.pathname === '/api/health') {
       send(res, 200, JSON.stringify({ ok: true }))
+      return
+    }
+    if (url.pathname === '/api/codex/session/stream') {
+      const id = url.searchParams.get('id')
+      if (!id) {
+        send(res, 400, JSON.stringify({ error: 'missing id' }))
+        return
+      }
+      streamSession(id, req, res)
       return
     }
     if (url.pathname.startsWith('/api/')) {

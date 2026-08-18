@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
   NLayout,
   NLayoutSider,
@@ -47,6 +47,10 @@ const launchKind = ref<'chat' | 'edit' | 'attach'>('chat')
 const launchPath = ref('skills/ozdqp-development')
 const launchWorktree = ref('')
 const launchIntent = ref('帮我查看并修改中心仓的 Skill。')
+const liveLogs = ref<Record<string, string>>({})
+const liveStatus = ref<Record<string, string>>({})
+const liveBoxes = new Map<string, HTMLElement>()
+const eventSources = new Map<string, EventSource>()
 
 const menuOptions: MenuOption[] = [
   { label: '总览', key: 'overview' },
@@ -95,8 +99,51 @@ function statusType(status: string) {
   return 'default'
 }
 
-async function refresh() {
-  loading.value = true
+function sessionLog(session: Record<string, unknown>) {
+  const id = String(session.id || '')
+  return liveLogs.value[id] || String(session.logTail || session.lastMessage || '')
+}
+
+function bindLiveBox(id: string, el: unknown) {
+  if (el instanceof HTMLElement) liveBoxes.set(id, el)
+}
+
+function scrollLive(id: string) {
+  const box = liveBoxes.get(id)
+  if (box) box.scrollTop = box.scrollHeight
+}
+
+function watchSession(id: string) {
+  if (!id || eventSources.has(id)) return
+  const source = new EventSource(`/api/codex/session/stream?id=${encodeURIComponent(id)}`)
+  eventSources.set(id, source)
+  source.addEventListener('log', (event) => {
+    const data = JSON.parse((event as MessageEvent).data || '{}')
+    liveLogs.value = { ...liveLogs.value, [id]: data.text || '' }
+    void nextTick(() => scrollLive(id))
+  })
+  source.addEventListener('status', (event) => {
+    const data = JSON.parse((event as MessageEvent).data || '{}')
+    liveStatus.value = { ...liveStatus.value, [id]: data.status || '' }
+    if (data.lastMessage) {
+      liveLogs.value = { ...liveLogs.value, [id]: `${liveLogs.value[id] || ''}` }
+    }
+    if (data.status && data.status !== 'running') {
+      source.close()
+      eventSources.delete(id)
+      void refresh(true)
+    }
+  })
+  source.onerror = () => {
+    if (liveStatus.value[id] && liveStatus.value[id] !== 'running') {
+      source.close()
+      eventSources.delete(id)
+    }
+  }
+}
+
+async function refresh(silent = false) {
+  if (!silent) loading.value = true
   error.value = ''
   try {
     const [nextState, nextHistory, nextSessions, nextWorktrees] = await Promise.all([
@@ -112,6 +159,9 @@ async function refresh() {
     scanRoots.value = nextWorktrees.scanRoots || []
     if (!launchWorktree.value && nextWorktrees.worktrees[0]) {
       launchWorktree.value = nextWorktrees.worktrees[0].path
+    }
+    for (const session of nextSessions.sessions) {
+      if (session.status === 'running') watchSession(String(session.id))
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -156,18 +206,19 @@ function openLaunch(kind: 'chat' | 'edit' | 'attach' = 'chat', preset?: { path?:
 async function launchCodex() {
   launching.value = true
   try {
+    let started: Record<string, unknown>
     if (launchKind.value === 'edit') {
-      await api.startCodex({ kind: 'edit', path: launchPath.value, intent: launchIntent.value })
+      started = await api.startCodex({ kind: 'edit', path: launchPath.value, intent: launchIntent.value })
     } else if (launchKind.value === 'attach') {
-      await api.startCodex({ kind: 'attach', worktree: launchWorktree.value, intent: launchIntent.value })
+      started = await api.startCodex({ kind: 'attach', worktree: launchWorktree.value, intent: launchIntent.value })
     } else {
-      await api.startCodex({ kind: 'chat', intent: launchIntent.value })
+      started = await api.startCodex({ kind: 'chat', intent: launchIntent.value })
     }
     showLaunch.value = false
-    message.success('已在面板内部启动 Codex，不会弹出新窗口。可在「会话」页看进度。')
+    message.success('已在面板内部启动，输出会实时出现在「会话」页。')
     page.value = 'sessions'
-    await refresh()
-    startSessionPoll()
+    if (started.id) watchSession(String(started.id))
+    await refresh(true)
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   } finally {
@@ -175,22 +226,13 @@ async function launchCodex() {
   }
 }
 
-let pollTimer = 0
-function startSessionPoll() {
-  if (pollTimer) window.clearInterval(pollTimer)
-  pollTimer = window.setInterval(async () => {
-    await refresh()
-    const running = sessions.value.some((session) => session.status === 'running')
-    if (!running && pollTimer) {
-      window.clearInterval(pollTimer)
-      pollTimer = 0
-    }
-  }, 3000)
-}
-
 onMounted(async () => {
   await refresh()
-  if (sessions.value.some((session) => session.status === 'running')) startSessionPoll()
+})
+
+onUnmounted(() => {
+  for (const source of eventSources.values()) source.close()
+  eventSources.clear()
 })
 
 const inboxColumns = [
@@ -337,12 +379,13 @@ const inboxColumns = [
             <n-card v-for="session in sessions.slice().reverse()" :key="String(session.id)" style="margin-bottom: 12px">
               <p>
                 {{ session.kind }} ·
-                <n-tag size="small" :type="session.status === 'completed' ? 'success' : session.status === 'failed' ? 'error' : 'warning'">{{ session.status }}</n-tag>
+                <n-tag size="small" :type="(liveStatus[String(session.id)] || session.status) === 'completed' ? 'success' : (liveStatus[String(session.id)] || session.status) === 'failed' ? 'error' : 'warning'">
+                  {{ liveStatus[String(session.id)] || session.status }}
+                </n-tag>
                 · pid {{ session.pid }}
               </p>
-              <p class="muted">{{ session.path || session.worktree || '中心仓内部执行，无新窗口' }}</p>
-              <pre v-if="session.lastMessage" class="preview">{{ session.lastMessage }}</pre>
-              <pre v-else-if="session.logTail" class="preview">{{ session.logTail }}</pre>
+              <p class="muted">{{ session.path || session.worktree || '中心仓内部执行，输出在下方实时刷新' }}</p>
+              <pre class="preview live-log" :ref="(el) => bindLiveBox(String(session.id), el)">{{ sessionLog(session) || '等待输出…' }}</pre>
               <p v-if="session.error" class="muted">{{ session.error }}</p>
             </n-card>
             <n-card v-if="sessions.length === 0">还没有内部 Codex 任务。点上面的按钮即可在面板里跑。</n-card>

@@ -47,6 +47,13 @@ body,
   white-space: pre-wrap;
 }
 
+.live-log {
+  max-height: min(62vh, 640px);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
