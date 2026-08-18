@@ -47,9 +47,9 @@ $promptFile = Join-Path $hubRoot ('skill-review\prompt-{0}.txt' -f [guid]::NewGu
 
 $id = [guid]::NewGuid().ToString('N').Substring(0, 12)
 $runnerFile = Join-Path $hubRoot ('skill-review\run-codex-{0}.ps1' -f $id)
-$addDirLine = ''
+$worktreePath = ''
 if (-not [string]::IsNullOrWhiteSpace($Worktree)) {
-    $addDirLine = "    --add-dir '$(Get-NormalizedPath $Worktree)' ``"
+    $worktreePath = Get-NormalizedPath $Worktree
 }
 
 $runnerLines = @(
@@ -57,12 +57,19 @@ $runnerLines = @(
     '$ErrorActionPreference = ''Stop''',
     "Set-Location -LiteralPath '$hubRoot'",
     "Write-Host 'Starting Codex ($Kind) in $hubRoot'",
-    "Get-Content -LiteralPath '$promptFile' -Raw -Encoding UTF8 | codex ``",
-    "    -C '$hubRoot' ``",
-    '    --sandbox workspace-write `'
+    " `$promptText = Get-Content -LiteralPath '$promptFile' -Raw -Encoding UTF8",
+    ' $codexArgs = @(',
+    "    '-C', '$hubRoot',",
+    "    '--sandbox', 'workspace-write'"
 )
-if ($addDirLine) { $runnerLines += $addDirLine }
-$runnerLines += '    -'
+if ($worktreePath) {
+    $runnerLines += "    , '--add-dir', '$worktreePath'"
+}
+$runnerLines += @(
+    ' )',
+    ' $codexArgs += @(''--'', $promptText)',
+    ' & codex @codexArgs'
+)
 [System.IO.File]::WriteAllLines($runnerFile, $runnerLines, [System.Text.UTF8Encoding]::new($false))
 
 $powershellExe = Join-Path $PSHOME 'powershell.exe'
