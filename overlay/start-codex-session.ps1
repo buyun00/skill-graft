@@ -58,7 +58,8 @@ $runnerLines = @(
     "Set-Location -LiteralPath '$hubRoot'",
     "Write-Host 'Starting Codex ($Kind) in $hubRoot'",
     "Get-Content -LiteralPath '$promptFile' -Raw -Encoding UTF8 | codex ``",
-    "    -C '$hubRoot' ``"
+    "    -C '$hubRoot' ``",
+    '    --sandbox workspace-write `'
 )
 if ($addDirLine) { $runnerLines += $addDirLine }
 $runnerLines += '    -'
