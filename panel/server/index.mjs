@@ -330,6 +330,16 @@ function collectWorktrees() {
   return { worktrees, scanRoots }
 }
 
+let worktreeCache = { at: 0, data: null }
+
+function collectWorktreesCached() {
+  const now = Date.now()
+  if (worktreeCache.data && now - worktreeCache.at < 30000) return worktreeCache.data
+  const data = collectWorktrees()
+  worktreeCache = { at: now, data }
+  return data
+}
+
 function fileTimeMs(filePath) {
   try {
     return fs.statSync(filePath).mtimeMs || 0
@@ -446,7 +456,7 @@ async function handleApi(req, url, body) {
   }
 
   if (url.pathname === '/api/worktrees') {
-    return collectWorktrees()
+    return collectWorktreesCached()
   }
 
   if (req.method !== 'POST') {
@@ -619,3 +629,7 @@ for (const bindHost of ['127.0.0.1', '::1']) {
     if (bindHost === '127.0.0.1') process.exit(1)
   })
 }
+
+setTimeout(() => {
+  try { collectWorktreesCached() } catch (error) { console.error(error) }
+}, 300)

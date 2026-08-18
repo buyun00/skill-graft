@@ -214,11 +214,19 @@ async function launchCodex() {
     } else {
       started = await api.startCodex({ kind: 'chat', intent: launchIntent.value })
     }
+    const id = String(started.id || '')
+    sessions.value = [
+      ...sessions.value,
+      {
+        ...started,
+        status: started.status || 'running',
+        logTail: '已启动，等待 Codex 输出…'
+      }
+    ]
+    if (id) watchSession(id)
     showLaunch.value = false
-    message.success('已在面板内部启动，输出会实时出现在「会话」页。')
     page.value = 'sessions'
-    if (started.id) watchSession(String(started.id))
-    await refresh(true)
+    message.success('已在面板内部启动，日志会在下方实时刷出。')
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   } finally {
@@ -253,7 +261,7 @@ const inboxColumns = [
       <n-menu v-model:value="page" :options="menuOptions" />
     </n-layout-sider>
     <n-layout-content content-style="padding: 28px 32px 48px" :native-scrollbar="false">
-      <n-spin :show="loading">
+      <div>
         <div class="page-title">
           <h2>{{ menuOptions.find((item) => item.key === page)?.label }}</h2>
           <n-space>
@@ -398,7 +406,7 @@ const inboxColumns = [
             <n-card v-if="history.length === 0">暂无历史。</n-card>
           </div>
         </template>
-      </n-spin>
+      </div>
     </n-layout-content>
   </n-layout>
 
@@ -432,7 +440,7 @@ const inboxColumns = [
     <template #footer>
       <n-space justify="end">
         <n-button @click="showLaunch = false">取消</n-button>
-        <n-button type="primary" :loading="launching" @click="launchCodex">打开 Codex 窗口</n-button>
+        <n-button type="primary" :loading="launching" @click="launchCodex">开始执行</n-button>
       </n-space>
     </template>
   </n-modal>
