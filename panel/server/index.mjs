@@ -174,13 +174,18 @@ function collectWorktrees() {
   const addTree = (info, cloneRoot, requireClient) => {
     if (!info.path || !fs.existsSync(info.path) || samePath(info.path, hubRoot)) return
     if (requireClient && !isClientCheckout(info.path)) return
-    const key = path.resolve(info.path).toLowerCase()
+    const resolved = path.resolve(info.path)
+    const key = resolved.toLowerCase()
     if (byPath.has(key)) return
+    const changedAtMs = latestLocalChangeMs(resolved)
     byPath.set(key, {
+      name: path.basename(resolved),
       path: info.path,
       branch: info.branch || gitOut(info.path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() || '(unknown)',
       head: info.head || gitOut(info.path, ['rev-parse', 'HEAD']).trim(),
       cloneRoot,
+      changedAt: changedAtMs ? new Date(changedAtMs).toISOString() : '',
+      changedAtMs,
       attached: attached.some((item) => samePath(item, info.path)),
       doNotAuto: blocked.some((item) => samePath(item, info.path)),
       officialPresent: fs.existsSync(path.join(info.path, '.claude', 'skills')) || fs.existsSync(path.join(info.path, '.codex', 'skills')),
@@ -208,8 +213,25 @@ function collectWorktrees() {
     addTree({ path: dir, branch: '', head: '' }, cloneRootFromCommonDir(common), true)
   }
 
-  const worktrees = [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path, undefined, { sensitivity: 'base' }))
+  const worktrees = [...byPath.values()].sort((left, right) => (right.changedAtMs || 0) - (left.changedAtMs || 0))
   return { worktrees, scanRoots }
+}
+
+function fileTimeMs(filePath) {
+  try {
+    return fs.statSync(filePath).mtimeMs || 0
+  } catch {
+    return 0
+  }
+}
+
+function latestLocalChangeMs(dir) {
+  const times = [fileTimeMs(dir), fileTimeMs(path.join(dir, '.git')), fileTimeMs(path.join(dir, 'AGENTS.override.md'))]
+  const gitDir = gitOut(dir, ['rev-parse', '--absolute-git-dir']).trim()
+  if (gitDir) {
+    times.push(fileTimeMs(gitDir), fileTimeMs(path.join(gitDir, 'HEAD')), fileTimeMs(path.join(gitDir, 'index')))
+  }
+  return Math.max(0, ...times)
 }
 
 function samePath(left, right) {

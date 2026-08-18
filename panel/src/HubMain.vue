@@ -69,10 +69,23 @@ const skillOptions = computed<SelectOption[]>(() => {
 
 const worktreeOptions = computed<SelectOption[]>(() =>
   worktrees.value.map((tree) => ({
-    label: `${tree.branch}  ·  ${tree.path}`,
+    label: `${tree.name}  ·  ${tree.path}`,
     value: tree.path
   }))
 )
+
+function formatChangedAt(ms: number, iso: string) {
+  if (!ms) return '时间未知'
+  const delta = Date.now() - ms
+  const minutes = Math.floor(delta / 60000)
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days} 天前`
+  return iso ? iso.replace('T', ' ').slice(0, 16) : '时间未知'
+}
 
 function statusType(status: string) {
   if (status === 'adopted') return 'success'
@@ -278,7 +291,7 @@ const inboxColumns = [
             <n-card v-for="tree in worktrees" :key="tree.path" style="margin-bottom: 12px">
               <template #header>
                 <n-space>
-                  <span>{{ tree.branch }}</span>
+                  <span>{{ tree.name }}</span>
                   <n-tag size="small" :type="tree.attached ? 'success' : 'warning'">{{ tree.attached ? '已用中心仓' : '仍用分支自带' }}</n-tag>
                   <n-tag v-if="tree.doNotAuto" size="small">勿自动</n-tag>
                   <n-tag v-if="tree.ephemeral" size="small" type="info">临时/工具树</n-tag>
@@ -287,6 +300,7 @@ const inboxColumns = [
                 </n-space>
               </template>
               <p>{{ tree.path }}</p>
+              <p class="muted">分支 {{ tree.branch }} · 最近改动 {{ formatChangedAt(tree.changedAtMs, tree.changedAt) }}</p>
               <p class="muted">clone：{{ tree.cloneRoot }}</p>
               <p class="muted">
                 {{ tree.officialPresent ? '官方 Skill 树还在磁盘（尚未换成中心仓）' : '官方 Skill 树已拿走（正常）' }}

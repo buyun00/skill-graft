@@ -45,10 +45,13 @@ export type HubState = {
 }
 
 export type WorktreeInfo = {
+  name: string
   path: string
   branch: string
   head: string
   cloneRoot: string
+  changedAt: string
+  changedAtMs: number
   attached: boolean
   doNotAuto: boolean
   officialPresent: boolean
