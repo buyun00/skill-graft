@@ -1,29 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { useToast } from 'primevue/usetoast'
-import Button from 'primevue/button'
-import Card from 'primevue/card'
-import Select from 'primevue/select'
-import Textarea from 'primevue/textarea'
-import InputText from 'primevue/inputtext'
-import Tag from 'primevue/tag'
-import Badge from 'primevue/badge'
-import Drawer from 'primevue/drawer'
-import DataTable from 'primevue/datatable'
-import Column from 'primevue/column'
-import Splitter from 'primevue/splitter'
-import SplitterPanel from 'primevue/splitterpanel'
-import ScrollPanel from 'primevue/scrollpanel'
-import SelectButton from 'primevue/selectbutton'
-import Message from 'primevue/message'
-import Divider from 'primevue/divider'
 import { api, type HubState, type InboxItem, type SkillNode, type WorktreeInfo } from './api'
 
-const toast = useToast()
 const page = ref('sessions')
 const loading = ref(false)
 const launching = ref(false)
 const error = ref('')
+const toast = ref('')
 const state = ref<HubState | null>(null)
 const history = ref<Array<Record<string, unknown>>>([])
 const sessions = ref<Array<Record<string, unknown>>>([])
@@ -43,17 +26,11 @@ const liveStatus = ref<Record<string, string>>({})
 const eventSources = new Map<string, EventSource>()
 
 const navItems = [
-  { key: 'sessions', label: '运行', icon: 'pi pi-play' },
-  { key: 'worktrees', label: '工作区', icon: 'pi pi-sitemap' },
-  { key: 'structure', label: 'Skills', icon: 'pi pi-code' },
-  { key: 'inbox', label: '待审', icon: 'pi pi-inbox' },
-  { key: 'history', label: '历史', icon: 'pi pi-clock' }
-]
-
-const kindOptions = [
-  { label: '对话', value: 'chat' },
-  { label: '改 Skill', value: 'edit' },
-  { label: '处理工作区', value: 'attach' }
+  { key: 'sessions', label: '运行' },
+  { key: 'worktrees', label: '工作区' },
+  { key: 'structure', label: 'Skills' },
+  { key: 'inbox', label: '待审' },
+  { key: 'history', label: '历史' }
 ]
 
 const queuedItems = computed(() => (state.value?.items ?? []).filter((item) => ['queued', 'proposed'].includes(item.status)))
@@ -61,8 +38,6 @@ const runningCount = computed(() => sessions.value.filter((session) => sessionSt
 const orderedSessions = computed(() => [...sessions.value].reverse())
 const currentSession = computed(() => orderedSessions.value.find((session) => String(session.id) === selectedRun.value) || orderedSessions.value[0] || null)
 const allSkills = computed(() => (state.value ? [...state.value.resident, ...state.value.adopted, ...state.value.inbox] : []))
-const skillOptions = computed(() => allSkills.value.map((node) => ({ label: `${node.name}  (${node.path})`, value: node.path })))
-const worktreeOptions = computed(() => worktrees.value.map((tree) => ({ label: `${tree.name}  ·  ${tree.path}`, value: tree.path })))
 
 const pageMeta: Record<string, { title: string; subtitle: string }> = {
   sessions: { title: '运行', subtitle: '在面板内部执行 Codex，日志实时出现在这里' },
@@ -70,6 +45,11 @@ const pageMeta: Record<string, { title: string; subtitle: string }> = {
   structure: { title: 'Skills', subtitle: '常驻、已采用和 inbox 原料' },
   inbox: { title: '待审', subtitle: '别人推上来的官方 Skill，先看再决定' },
   history: { title: '历史', subtitle: '入队、拍板和执行记录' }
+}
+
+function notify(text: string) {
+  toast.value = text
+  window.setTimeout(() => { if (toast.value === text) toast.value = '' }, 2200)
 }
 
 function formatChangedAt(ms: number, iso: string) {
@@ -94,12 +74,12 @@ function sessionLog(session: Record<string, unknown>) {
   return liveLogs.value[id] || String(session.logTail || session.lastMessage || '')
 }
 
-function statusSeverity(status: string) {
-  if (status === 'adopted' || status === 'completed') return 'success'
-  if (status === 'rejected' || status === 'failed') return 'danger'
-  if (status === 'proposed' || status === 'running') return 'warn'
-  if (status === 'merged-into-3skill') return 'info'
-  return 'secondary'
+function statusClass(status: string) {
+  if (status === 'adopted' || status === 'completed') return 'badge-success'
+  if (status === 'rejected' || status === 'failed') return 'badge-error'
+  if (status === 'proposed' || status === 'running') return 'badge-warning'
+  if (status === 'merged-into-3skill') return 'badge-info'
+  return 'badge-ghost'
 }
 
 function watchSession(id: string) {
@@ -180,7 +160,7 @@ async function decide(item: InboxItem, action: 'adopt' | 'merge' | 'reject') {
     mergeTarget: action === 'merge' ? mergeTarget.value : undefined
   })
   await refresh(true)
-  toast.add({ severity: 'success', summary: action === 'adopt' ? '已采用' : action === 'merge' ? '已并入' : '已拒绝', life: 2200 })
+  notify(action === 'adopt' ? '已采用' : action === 'merge' ? '已并入' : '已拒绝')
 }
 
 function openLaunch(kind: 'chat' | 'edit' | 'attach' = 'chat', preset?: { path?: string; worktree?: string; intent?: string }) {
@@ -208,9 +188,9 @@ async function launchCodex() {
     if (id) watchSession(id)
     page.value = 'sessions'
     launchIntent.value = ''
-    toast.add({ severity: 'success', summary: '已开始执行', life: 1800 })
+    notify('已开始执行')
   } catch (err) {
-    toast.add({ severity: 'error', summary: err instanceof Error ? err.message : String(err), life: 4000 })
+    notify(err instanceof Error ? err.message : String(err))
   } finally {
     launching.value = false
   }
@@ -224,292 +204,217 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="shell">
-    <aside class="sider">
-      <div class="brand">
-        <i class="pi pi-sparkles" />
+  <div class="relative min-h-screen">
+    <div class="ambient"><span class="a" /><span class="b" /></div>
+
+    <div v-if="toast" class="toast toast-top toast-end z-50">
+      <div class="alert alert-info glass">{{ toast }}</div>
+    </div>
+
+    <div class="relative z-10 flex min-h-screen">
+      <aside class="w-60 shrink-0 border-r border-white/10 p-4 flex flex-col gap-5">
         <div>
-          <div class="brand-title">Skill Hub</div>
-          <div class="brand-sub">本地中心仓</div>
+          <div class="text-lg font-bold tracking-wide">Skill Hub</div>
+          <div class="text-xs opacity-60">本地中心仓</div>
         </div>
-      </div>
-      <nav class="nav">
-        <Button
-          v-for="item in navItems"
-          :key="item.key"
-          :label="item.label"
-          :icon="item.icon"
-          :severity="page === item.key ? 'primary' : 'secondary'"
-          :text="page !== item.key"
-          :outlined="page === item.key"
-          class="nav-btn"
-          @click="page = item.key"
-        >
-          <template #default>
-            <span class="nav-label">
-              <i :class="item.icon" />
+        <ul class="menu gap-1 p-0">
+          <li v-for="item in navItems" :key="item.key">
+            <button :class="{ 'menu-active': page === item.key }" @click="page = item.key">
               <span>{{ item.label }}</span>
-            </span>
-            <Badge v-if="item.key === 'inbox' && queuedItems.length" :value="queuedItems.length" />
-            <Badge v-else-if="item.key === 'sessions' && runningCount" :value="runningCount" />
-          </template>
-        </Button>
-      </nav>
-      <Button label="新任务" icon="pi pi-plus" class="w-full" @click="openLaunch('chat')" />
-    </aside>
+              <span v-if="item.key === 'inbox' && queuedItems.length" class="badge badge-primary badge-sm">{{ queuedItems.length }}</span>
+              <span v-else-if="item.key === 'sessions' && runningCount" class="badge badge-secondary badge-sm">{{ runningCount }}</span>
+            </button>
+          </li>
+        </ul>
+        <button class="btn btn-primary mt-auto" @click="openLaunch('chat')">新任务</button>
+      </aside>
 
-    <section class="main">
-      <header class="top">
-        <div>
-          <h2>{{ pageMeta[page].title }}</h2>
-          <p>{{ pageMeta[page].subtitle }}</p>
+      <main class="min-w-0 flex-1 p-6">
+        <div class="mb-5 flex items-start justify-between gap-4">
+          <div>
+            <h1 class="text-2xl font-semibold">{{ pageMeta[page].title }}</h1>
+            <p class="mt-1 text-sm opacity-60">{{ pageMeta[page].subtitle }}</p>
+          </div>
+          <div class="flex gap-2">
+            <button class="btn btn-ghost btn-sm" @click="refresh()">刷新</button>
+            <button v-if="page === 'inbox'" class="btn btn-ghost btn-sm" @click="api.analyze()">重新分析</button>
+          </div>
         </div>
-        <div class="top-actions">
-          <Button label="刷新" icon="pi pi-refresh" severity="secondary" outlined @click="refresh()" />
-          <Button v-if="page === 'inbox'" label="重新分析" severity="secondary" outlined @click="api.analyze()" />
-        </div>
-      </header>
 
-      <Message v-if="error" severity="error" class="mb">{{ error }}</Message>
+        <div v-if="error" class="alert alert-error glass mb-4">{{ error }}</div>
 
-      <div v-if="state" class="body">
-        <div v-if="page === 'sessions'">
-          <Splitter style="height: 520px">
-            <SplitterPanel :size="28" :min-size="20">
-              <ScrollPanel style="height: 100%">
-                <div v-if="!orderedSessions.length" class="empty">还没有任务，用下方输入框开始</div>
-                <button
-                  v-for="session in orderedSessions"
-                  :key="String(session.id)"
-                  class="run"
-                  :class="{ on: currentSession && currentSession.id === session.id }"
-                  @click="selectedRun = String(session.id)"
-                >
-                  <div class="run-title">{{ session.kind }}</div>
-                  <div class="run-meta">{{ session.worktree || session.path || '中心仓' }}</div>
-                  <Tag :value="sessionStatus(session)" :severity="statusSeverity(sessionStatus(session))" />
-                </button>
-              </ScrollPanel>
-            </SplitterPanel>
-            <SplitterPanel :size="72">
-              <Card class="fill">
-                <template #title>{{ currentSession ? `${currentSession.kind} · ${sessionStatus(currentSession)}` : '实时输出' }}</template>
-                <template #content>
-                  <ScrollPanel style="height: 420px">
-                    <pre class="log">{{ currentSession ? (sessionLog(currentSession) || '等待输出…') : '选一个任务，或在下方描述你要做的事。' }}</pre>
-                  </ScrollPanel>
-                </template>
-              </Card>
-            </SplitterPanel>
-          </Splitter>
-
-          <Card class="composer">
-            <template #title>下达任务</template>
-            <template #content>
-              <SelectButton v-model="launchKind" :options="kindOptions" option-label="label" option-value="value" class="mb" />
-              <Select v-if="launchKind === 'edit'" v-model="launchPath" :options="skillOptions" option-label="label" option-value="value" filter placeholder="选择 Skill" class="mb w-full" />
-              <Select v-if="launchKind === 'attach'" v-model="launchWorktree" :options="worktreeOptions" option-label="label" option-value="value" filter placeholder="选择工作区" class="mb w-full" />
-              <Textarea v-model="launchIntent" auto-resize rows="3" placeholder="描述你要 Codex 做的事" class="w-full mb" />
-              <div class="composer-foot">
-                <span class="hint">内部执行，不弹窗。结果在上方实时刷新。</span>
-                <Button label="运行" icon="pi pi-send" :loading="launching" @click="launchCodex" />
+        <template v-if="state">
+          <div v-if="page === 'sessions'" class="space-y-4">
+            <div class="grid min-h-[28rem] grid-cols-1 gap-4 lg:grid-cols-[17rem_minmax(0,1fr)]">
+              <div class="card glass">
+                <div class="card-body p-3">
+                  <h2 class="card-title text-sm">任务</h2>
+                  <p v-if="!orderedSessions.length" class="py-8 text-center text-sm opacity-60">还没有任务，用下方输入框开始</p>
+                  <button
+                    v-for="session in orderedSessions"
+                    :key="String(session.id)"
+                    class="rounded-xl p-3 text-left transition hover:bg-white/5"
+                    :class="{ 'bg-white/10': currentSession && currentSession.id === session.id }"
+                    @click="selectedRun = String(session.id)"
+                  >
+                    <div class="font-medium">{{ session.kind }}</div>
+                    <div class="mt-1 text-xs opacity-60">{{ session.worktree || session.path || '中心仓' }}</div>
+                    <div class="badge badge-sm mt-2" :class="statusClass(sessionStatus(session))">{{ sessionStatus(session) }}</div>
+                  </button>
+                </div>
               </div>
-            </template>
-          </Card>
-        </div>
-
-        <div v-else-if="page === 'worktrees'">
-          <Message severity="info" class="mb">扫描 {{ scanRoots.join('、') || '未配置' }} · 共 {{ worktrees.length }} 个工作区 · 按最近本地改动排序</Message>
-          <Card v-for="tree in worktrees" :key="tree.path" class="mb">
-            <template #title>{{ tree.name }}</template>
-            <template #subtitle>{{ tree.path }}</template>
-            <template #content>
-              <div class="tags">
-                <Tag :value="tree.attached ? '已用中心仓' : '仍用分支自带'" :severity="tree.attached ? 'success' : 'warn'" />
-                <Tag v-if="tree.doNotAuto" value="勿自动" severity="secondary" />
-                <Tag v-if="tree.ephemeral" value="临时" severity="info" />
-                <Tag v-if="tree.locked" value="locked" />
-                <Tag v-if="tree.prunable" value="prunable" severity="danger" />
-                <Tag :value="formatChangedAt(tree.changedAtMs, tree.changedAt)" severity="secondary" />
+              <div class="card glass">
+                <div class="card-body">
+                  <h2 class="card-title text-base">{{ currentSession ? `${currentSession.kind} · ${sessionStatus(currentSession)}` : '实时输出' }}</h2>
+                  <pre class="min-h-80 overflow-auto rounded-xl bg-base-300/40 p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap">{{ currentSession ? (sessionLog(currentSession) || '等待输出…') : '选一个任务，或在下方描述你要做的事。' }}</pre>
+                </div>
               </div>
-              <p class="hint">{{ tree.branch }} · {{ tree.cloneRoot }}</p>
-              <p class="hint">
-                {{ tree.officialPresent ? '官方 Skill 树还在磁盘' : '官方 Skill 树已拿走' }}
-                ·
-                {{ tree.overrideLinked ? 'override 已接通' : 'override 未接通' }}
-              </p>
-            </template>
-            <template #footer>
-              <Button
-                :label="tree.attached ? '检查' : '改用本地 Skill'"
-                @click="openLaunch('attach', { worktree: tree.path, intent: tree.attached ? '检查并修复这棵树与中心仓的挂接' : '剥官方 Skill，改挂中心仓' })"
-              />
-            </template>
-          </Card>
-        </div>
+            </div>
 
-        <div v-else-if="page === 'structure'">
-          <Card
-            v-for="group in [
+            <div class="card glass">
+              <div class="card-body gap-3">
+                <h2 class="card-title text-base">下达任务</h2>
+                <div class="join">
+                  <button class="btn join-item btn-sm" :class="{ 'btn-primary': launchKind === 'chat' }" @click="launchKind = 'chat'">对话</button>
+                  <button class="btn join-item btn-sm" :class="{ 'btn-primary': launchKind === 'edit' }" @click="launchKind = 'edit'">改 Skill</button>
+                  <button class="btn join-item btn-sm" :class="{ 'btn-primary': launchKind === 'attach' }" @click="launchKind = 'attach'">处理工作区</button>
+                </div>
+                <select v-if="launchKind === 'edit'" v-model="launchPath" class="select select-bordered w-full">
+                  <option v-for="node in allSkills" :key="node.path" :value="node.path">{{ node.name }} ({{ node.path }})</option>
+                </select>
+                <select v-if="launchKind === 'attach'" v-model="launchWorktree" class="select select-bordered w-full">
+                  <option v-for="tree in worktrees" :key="tree.path" :value="tree.path">{{ tree.name }} · {{ tree.path }}</option>
+                </select>
+                <textarea v-model="launchIntent" class="textarea textarea-bordered min-h-24" placeholder="描述你要 Codex 做的事" />
+                <div class="flex items-center justify-between gap-3">
+                  <span class="text-xs opacity-60">内部执行，不弹窗。结果在上方实时刷新。</span>
+                  <button class="btn btn-primary" :class="{ loading: launching }" :disabled="launching" @click="launchCodex">运行</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-else-if="page === 'worktrees'" class="space-y-4">
+            <div class="alert glass">扫描 {{ scanRoots.join('、') || '未配置' }} · 共 {{ worktrees.length }} 个工作区 · 按最近本地改动排序</div>
+            <div v-for="tree in worktrees" :key="tree.path" class="card glass">
+              <div class="card-body">
+                <div class="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <h3 class="card-title">{{ tree.name }}</h3>
+                    <p class="text-sm opacity-70">{{ tree.path }}</p>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      <span class="badge" :class="tree.attached ? 'badge-success' : 'badge-warning'">{{ tree.attached ? '已用中心仓' : '仍用分支自带' }}</span>
+                      <span v-if="tree.doNotAuto" class="badge badge-ghost">勿自动</span>
+                      <span v-if="tree.ephemeral" class="badge badge-info">临时</span>
+                      <span v-if="tree.locked" class="badge">locked</span>
+                      <span v-if="tree.prunable" class="badge badge-error">prunable</span>
+                      <span class="badge badge-ghost">{{ formatChangedAt(tree.changedAtMs, tree.changedAt) }}</span>
+                    </div>
+                    <p class="mt-2 text-xs opacity-60">{{ tree.branch }} · {{ tree.cloneRoot }}</p>
+                    <p class="text-xs opacity-60">
+                      {{ tree.officialPresent ? '官方 Skill 树还在磁盘' : '官方 Skill 树已拿走' }}
+                      ·
+                      {{ tree.overrideLinked ? 'override 已接通' : 'override 未接通' }}
+                    </p>
+                  </div>
+                  <button class="btn btn-primary" @click="openLaunch('attach', { worktree: tree.path, intent: tree.attached ? '检查并修复这棵树与中心仓的挂接' : '剥官方 Skill，改挂中心仓' })">
+                    {{ tree.attached ? '检查' : '改用本地 Skill' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-else-if="page === 'structure'" class="space-y-4">
+            <div v-for="group in [
               { title: '常驻', nodes: state.resident },
               { title: '已采用', nodes: state.adopted },
               { title: 'Inbox', nodes: state.inbox }
-            ]"
-            :key="group.title"
-            :title="group.title"
-            class="mb"
-          >
-            <template #content>
-              <p v-if="!group.nodes.length" class="empty">这里还是空的</p>
-              <div v-for="node in group.nodes" :key="node.path" class="skill-row">
-                <div>
-                  <div class="run-title">{{ node.name }}</div>
-                  <div class="hint">{{ node.path }}</div>
-                </div>
-                <div class="row-actions">
-                  <Tag :value="node.attached ? '已挂接' : '仅中心仓'" :severity="node.attached ? 'success' : 'secondary'" />
-                  <Button label="预览" size="small" severity="secondary" outlined @click="openSkill(node)" />
-                  <Button label="用 Codex 改" size="small" @click="openLaunch('edit', { path: node.path, intent: '按客户端需要改这个 Skill' })" />
+            ]" :key="group.title" class="card glass">
+              <div class="card-body">
+                <h2 class="card-title">{{ group.title }}</h2>
+                <p v-if="!group.nodes.length" class="py-6 text-center text-sm opacity-60">这里还是空的</p>
+                <div v-for="node in group.nodes" :key="node.path" class="flex flex-wrap items-center justify-between gap-3 border-t border-white/5 py-3">
+                  <div>
+                    <div class="font-medium">{{ node.name }}</div>
+                    <div class="text-xs opacity-60">{{ node.path }}</div>
+                  </div>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="badge" :class="node.attached ? 'badge-success' : 'badge-ghost'">{{ node.attached ? '已挂接' : '仅中心仓' }}</span>
+                    <button class="btn btn-ghost btn-sm" @click="openSkill(node)">预览</button>
+                    <button class="btn btn-primary btn-sm" @click="openLaunch('edit', { path: node.path, intent: '按客户端需要改这个 Skill' })">用 Codex 改</button>
+                  </div>
                 </div>
               </div>
-            </template>
-          </Card>
-        </div>
+            </div>
+          </div>
 
-        <div v-else-if="page === 'inbox'">
-          <Card title="并进 3 Skill 时的目标文件" class="mb">
-            <template #content>
-              <InputText v-model="mergeTarget" class="w-full" />
-            </template>
-          </Card>
-          <p v-if="!queuedItems.length" class="empty">没有待审项。fetch/pull 官方 Skill 后会到这里。</p>
-          <Card v-for="item in queuedItems" :key="item.id" class="mb">
-            <template #title>{{ item.name }}</template>
-            <template #subtitle>{{ item.unit }} · {{ item.sourceRef }}</template>
-            <template #content>
-              <Tag :value="item.status" :severity="statusSeverity(item.status)" />
-              <p v-if="item.suggestion?.reason" class="hint">建议：{{ item.suggestion.action }} / {{ item.suggestion.reason }}</p>
-            </template>
-            <template #footer>
-              <div class="row-actions">
-                <Button label="预览" size="small" severity="secondary" outlined @click="openInbox(item)" />
-                <Button label="用 Codex 改" size="small" @click="openLaunch('edit', { path: item.inboxPath || '', intent: '按客户端改这条 inbox Skill' })" />
-                <Button label="采用" size="small" severity="success" @click="decide(item, 'adopt')" />
-                <Button label="并进" size="small" severity="secondary" @click="decide(item, 'merge')" />
-                <Button label="拒绝" size="small" severity="danger" @click="decide(item, 'reject')" />
+          <div v-else-if="page === 'inbox'" class="space-y-4">
+            <div class="card glass">
+              <div class="card-body">
+                <h2 class="card-title text-base">并进 3 Skill 时的目标文件</h2>
+                <input v-model="mergeTarget" class="input input-bordered w-full" />
               </div>
-            </template>
-          </Card>
-          <Card v-if="state.items.length" title="全部记录">
-            <template #content>
-              <DataTable :value="state.items" size="small" striped-rows>
-                <Column field="name" header="名称" />
-                <Column field="status" header="状态" />
-                <Column field="sourceRef" header="来源" />
-              </DataTable>
-            </template>
-          </Card>
-        </div>
+            </div>
+            <div v-if="!queuedItems.length" class="empty-state py-10 text-center opacity-60">没有待审项。fetch/pull 官方 Skill 后会到这里。</div>
+            <div v-for="item in queuedItems" :key="item.id" class="card glass">
+              <div class="card-body">
+                <div class="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <h3 class="card-title">{{ item.name }}</h3>
+                    <div class="badge mt-1" :class="statusClass(item.status)">{{ item.status }}</div>
+                    <p class="mt-2 text-sm opacity-70">{{ item.unit }} · {{ item.sourceRef }}</p>
+                    <p v-if="item.suggestion?.reason" class="text-xs opacity-60">建议：{{ item.suggestion.action }} / {{ item.suggestion.reason }}</p>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <button class="btn btn-ghost btn-sm" @click="openInbox(item)">预览</button>
+                    <button class="btn btn-primary btn-sm" @click="openLaunch('edit', { path: item.inboxPath || '', intent: '按客户端改这条 inbox Skill' })">用 Codex 改</button>
+                    <button class="btn btn-success btn-sm" @click="decide(item, 'adopt')">采用</button>
+                    <button class="btn btn-ghost btn-sm" @click="decide(item, 'merge')">并进</button>
+                    <button class="btn btn-error btn-sm" @click="decide(item, 'reject')">拒绝</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-if="state.items.length" class="card glass">
+              <div class="card-body overflow-x-auto">
+                <h2 class="card-title">全部记录</h2>
+                <table class="table table-sm">
+                  <thead><tr><th>名称</th><th>状态</th><th>来源</th></tr></thead>
+                  <tbody>
+                    <tr v-for="item in state.items" :key="item.id">
+                      <td>{{ item.name }}</td>
+                      <td>{{ item.status }}</td>
+                      <td>{{ item.sourceRef }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
 
-        <div v-else>
-          <p v-if="!history.length" class="empty">暂无历史</p>
-          <Card v-for="(record, index) in history" :key="index" class="mb">
-            <template #content>
-              <pre class="log">{{ JSON.stringify(record, null, 2) }}</pre>
-            </template>
-          </Card>
+          <div v-else class="space-y-4">
+            <div v-if="!history.length" class="py-10 text-center opacity-60">暂无历史</div>
+            <div v-for="(record, index) in history" :key="index" class="card glass">
+              <div class="card-body">
+                <pre class="overflow-auto font-mono text-xs whitespace-pre-wrap">{{ JSON.stringify(record, null, 2) }}</pre>
+              </div>
+            </div>
+          </div>
+        </template>
+        <div v-else-if="loading" class="py-16 text-center opacity-60">正在载入中心仓…</div>
+      </main>
+    </div>
+
+    <dialog class="modal" :class="{ 'modal-open': showPreview }">
+      <div class="modal-box glass max-w-3xl">
+        <h3 class="text-lg font-bold">{{ previewTitle }}</h3>
+        <pre class="mt-4 max-h-[70vh] overflow-auto font-mono text-xs whitespace-pre-wrap">{{ preview }}</pre>
+        <div class="modal-action">
+          <button class="btn" @click="showPreview = false">关闭</button>
         </div>
       </div>
-      <p v-else-if="loading" class="empty">正在载入中心仓…</p>
-    </section>
+      <form method="dialog" class="modal-backdrop" @click="showPreview = false"><button>close</button></form>
+    </dialog>
   </div>
-
-  <Drawer v-model:visible="showPreview" position="right" :header="previewTitle" style="width: 42rem">
-    <pre class="log">{{ preview }}</pre>
-  </Drawer>
 </template>
-
-<style scoped>
-.shell {
-  display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  min-height: 100vh;
-}
-.sider {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-  padding: 1.25rem 1rem;
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(10, 10, 16, 0.42);
-  backdrop-filter: blur(26px) saturate(140%);
-  -webkit-backdrop-filter: blur(26px) saturate(140%);
-}
-.brand {
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-}
-.brand i {
-  font-size: 1.4rem;
-  color: var(--p-primary-color);
-  animation: icon-breathe 4.8s ease-in-out infinite;
-}
-@keyframes icon-breathe {
-  0%, 100% { opacity: 0.7; filter: drop-shadow(0 0 0 rgba(99, 226, 183, 0)); }
-  50% { opacity: 1; filter: drop-shadow(0 0 10px rgba(99, 226, 183, 0.45)); }
-}
-.brand-title { font-weight: 700; }
-.brand-sub { font-size: 0.75rem; color: var(--p-text-muted-color); }
-.nav { display: flex; flex-direction: column; gap: 0.35rem; flex: 1; }
-.nav-btn { justify-content: space-between; }
-.nav-label { display: flex; align-items: center; gap: 0.5rem; }
-.main { min-width: 0; }
-.top {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 1rem;
-  padding: 1.25rem 1.5rem 0.5rem;
-}
-.top h2 { margin: 0; }
-.top p { margin: 0.35rem 0 0; color: var(--p-text-muted-color); }
-.top-actions, .row-actions, .tags { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-.body { padding: 0.75rem 1.5rem 1.5rem; }
-.mb { margin-bottom: 1rem; }
-.w-full { width: 100%; }
-.fill { height: 100%; }
-.empty, .hint, .run-meta { color: var(--p-text-muted-color); }
-.empty { padding: 2rem 0; text-align: center; }
-.run {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 0.8rem;
-  border: 0;
-  border-radius: 0.75rem;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-.run.on { background: var(--p-content-hover-background); }
-.run-title { font-weight: 650; margin-bottom: 0.25rem; }
-.composer { margin-top: 1rem; }
-.composer-foot { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
-.skill-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.75rem 0;
-  border-bottom: 1px solid var(--p-content-border-color);
-}
-.log {
-  margin: 0;
-  white-space: pre-wrap;
-  font: 12.5px/1.55 ui-monospace, Consolas, monospace;
-}
-@media (max-width: 900px) {
-  .shell { grid-template-columns: 1fr; }
-  .sider { display: none; }
-}
-</style>
