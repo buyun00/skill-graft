@@ -440,14 +440,25 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 1.25rem;
   padding: 1.25rem 1rem;
-  border-right: 1px solid var(--p-content-border-color);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(10, 10, 16, 0.42);
+  backdrop-filter: blur(26px) saturate(140%);
+  -webkit-backdrop-filter: blur(26px) saturate(140%);
 }
 .brand {
   display: flex;
   gap: 0.75rem;
   align-items: center;
 }
-.brand i { font-size: 1.4rem; color: var(--p-primary-color); }
+.brand i {
+  font-size: 1.4rem;
+  color: var(--p-primary-color);
+  animation: icon-breathe 4.8s ease-in-out infinite;
+}
+@keyframes icon-breathe {
+  0%, 100% { opacity: 0.7; filter: drop-shadow(0 0 0 rgba(99, 226, 183, 0)); }
+  50% { opacity: 1; filter: drop-shadow(0 0 10px rgba(99, 226, 183, 0.45)); }
+}
 .brand-title { font-weight: 700; }
 .brand-sub { font-size: 0.75rem; color: var(--p-text-muted-color); }
 .nav { display: flex; flex-direction: column; gap: 0.35rem; flex: 1; }
