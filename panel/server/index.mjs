@@ -79,7 +79,14 @@ function samePath(left, right) {
 
 function isLinked(linkPath, expected) {
   try {
-    return samePath(fs.realpathSync(linkPath), expected)
+    if (samePath(fs.realpathSync(linkPath), expected)) return true
+  } catch {
+    // fall through to inode compare
+  }
+  try {
+    const left = fs.statSync(linkPath)
+    const right = fs.statSync(expected)
+    return Boolean(left.ino && right.ino && left.ino === right.ino && left.dev === right.dev)
   } catch {
     return false
   }

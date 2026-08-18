@@ -247,7 +247,11 @@ const inboxColumns = [
                   </n-space>
                 </template>
                 <p>{{ tree.path }}</p>
-                <p class="muted">官方目录 {{ tree.officialPresent ? '仍在磁盘' : '已剥离' }} · override {{ tree.overrideLinked ? '已链接' : '未链接' }}</p>
+                <p class="muted">
+                  {{ tree.officialPresent ? '官方 Skill 树还在磁盘（尚未换成中心仓）' : '官方 Skill 树已拿走（正常）' }}
+                  ·
+                  {{ tree.overrideLinked ? 'AGENTS.override 已接到中心仓' : 'AGENTS.override 未接到中心仓' }}
+                </p>
                 <n-button v-if="!tree.attached" type="primary" @click="attachTree(tree.path)">用 Codex 改用本地 Skill</n-button>
               </n-card>
             </div>
