@@ -46,22 +46,34 @@ $promptFile = Join-Path $hubRoot ('skill-review\prompt-{0}.txt' -f [guid]::NewGu
 [System.IO.File]::WriteAllText($promptFile, $prompt, [System.Text.UTF8Encoding]::new($false))
 
 $id = [guid]::NewGuid().ToString('N').Substring(0, 12)
-$codexCmd = "Get-Content -LiteralPath '$promptFile' -Raw -Encoding UTF8 | codex -C '$hubRoot'"
+$runnerFile = Join-Path $hubRoot ('skill-review\run-codex-{0}.ps1' -f $id)
+$addDirLine = ''
 if (-not [string]::IsNullOrWhiteSpace($Worktree)) {
-    $codexCmd += " --add-dir '$(Get-NormalizedPath $Worktree)'"
+    $addDirLine = "    --add-dir '$(Get-NormalizedPath $Worktree)' ``"
 }
 
-$wt = Get-Command wt.exe -ErrorAction SilentlyContinue
-if ($wt) {
-    $proc = Start-Process -FilePath $wt.Source -PassThru -ArgumentList @(
-        'new-tab', '--title', "ozdqp-skill-hub $Kind", '-d', $hubRoot,
-        'powershell', '-NoExit', '-Command', $codexCmd
-    )
-} else {
-    $proc = Start-Process -FilePath 'powershell.exe' -PassThru -ArgumentList @(
-        '-NoExit', '-Command', "Set-Location -LiteralPath '$hubRoot'; $codexCmd"
-    )
+$runnerLines = @(
+    'Set-StrictMode -Version Latest',
+    '$ErrorActionPreference = ''Stop''',
+    "Set-Location -LiteralPath '$hubRoot'",
+    "Write-Host 'Starting Codex ($Kind) in $hubRoot'",
+    "Get-Content -LiteralPath '$promptFile' -Raw -Encoding UTF8 | codex ``",
+    "    -C '$hubRoot' ``"
+)
+if ($addDirLine) { $runnerLines += $addDirLine }
+$runnerLines += '    -'
+[System.IO.File]::WriteAllLines($runnerFile, $runnerLines, [System.Text.UTF8Encoding]::new($false))
+
+$powershellExe = Join-Path $PSHOME 'powershell.exe'
+if (-not (Test-Path -LiteralPath $powershellExe)) {
+    $powershellExe = 'powershell.exe'
 }
+$proc = Start-Process -FilePath $powershellExe -WorkingDirectory $hubRoot -PassThru -ArgumentList @(
+    '-NoExit',
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', $runnerFile
+)
 
 $session = [pscustomobject]@{
     id = $id
@@ -71,6 +83,7 @@ $session = [pscustomobject]@{
     intent = $Intent
     pid = $proc.Id
     promptFile = $promptFile
+    runnerFile = $runnerFile
     startedAt = [DateTimeOffset]::Now.ToString('o')
     status = 'running'
 }

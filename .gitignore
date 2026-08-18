@@ -4,6 +4,7 @@ skill-review/hub-codex.lock
 skill-review/panel.pid
 skill-review/start-panel-run.cmd
 skill-review/prompt-*.txt
+skill-review/run-codex-*.ps1
 skill-review/*.log
 .DS_Store
 *.pre-hub-*
