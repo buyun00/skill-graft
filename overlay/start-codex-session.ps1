@@ -15,66 +15,52 @@ $ErrorActionPreference = 'Stop'
 $hubRoot = Get-HubRoot
 $sessionsPath = Join-Path $hubRoot 'skill-review\sessions.json'
 $state = Read-JsonFile $sessionsPath ([pscustomobject]@{ sessions = @() })
-if ($null -eq $state.sessions) { $state | Add-Member -NotePropertyName sessions -NotePropertyValue @() }
-
-$prompt = switch ($Kind) {
-    'edit' {
-        if ([string]::IsNullOrWhiteSpace($Path)) { throw 'edit requires -Path' }
-        @"
-你在中心仓 $hubRoot 中工作。只改 ``$Path``。
-面板意图：$Intent
-不要写游戏仓业务代码。改完在本仓 git commit，并在 skill-review/history 记一条。
-"@
-    }
-    'attach' {
-        if ([string]::IsNullOrWhiteSpace($Worktree)) { throw 'attach requires -Worktree' }
-        @"
-你在中心仓 $hubRoot 工作，目标游戏 worktree 是 $Worktree（已通过 --add-dir 可写）。
-任务：剥掉该树自带的官方 Skill 体系，改挂本中心仓本地体系。不要把跑一遍脚本当成完成。
-
-固定步骤：
-1. 侦察：分支、git status、官方 .agents/.claude/.codex/skills 是否在磁盘、是否已有 hub 链接、与 hub 的 3 Skill 是否内容冲突。
-2. 先向用户汇报将剥哪些路径、将挂哪些链接、冲突怎么处理，等确认。
-3. 确认后再调用 overlay/manage-skill-visibility.ps1 -Workspace '$Worktree' -Mode Disable，以及 overlay/attach-library.ps1 -TargetWorktree '$Worktree' -ConfigureGit。
-4. 验收：官方树不在磁盘、3 Skill 与 AGENTS.override.md 指向 hub、游戏仓 git status 没有误删、该树能读到 hub 文件。
-5. 写入 skill-review/history，确认 overlay/attached-worktrees.txt 含该路径。
-有未提交改动、重名但内容不同、或验收失败：停手，不要 -Force。
-"@
-    }
-    'detach' {
-        if ([string]::IsNullOrWhiteSpace($Worktree)) { throw 'detach requires -Worktree' }
-        @"
-你在中心仓 $hubRoot 工作，目标游戏 worktree 是 $Worktree。
-任务：拆掉 hub 链接并 Restore 官方 Skill 树。先侦察再动手，等用户确认。
-可用 overlay/manage-skill-visibility.ps1 -Workspace '$Worktree' -Mode Restore。
-不要删除用户未提交的业务改动。
-"@
-    }
-    'chat' {
-        @"
-你在中心仓 $hubRoot 工作。这是从管理面板拉起的 Codex 对话。
-用户意图：$Intent
-可以改本中心仓的 Skill、inbox、adopted、override 和 overlay。不要写游戏仓业务代码。改完在本仓提交，并在 skill-review/history 记一条。
-"@
-    }
-    default { if ([string]::IsNullOrWhiteSpace($Intent)) { '你在中心仓工作，等待用户说明要改哪个 Skill。' } else { $Intent } }
+if ($null -eq $state.sessions) {
+    $state | Add-Member -NotePropertyName sessions -NotePropertyValue @()
 }
 
-$addDir = @()
-if (-not [string]::IsNullOrWhiteSpace($Worktree)) {
-    $addDir = @('--add-dir', (Get-NormalizedPath $Worktree))
+if ($Kind -eq 'edit' -and [string]::IsNullOrWhiteSpace($Path)) {
+    throw 'edit requires -Path'
 }
+if (($Kind -eq 'attach' -or $Kind -eq 'detach') -and [string]::IsNullOrWhiteSpace($Worktree)) {
+    throw "$Kind requires -Worktree"
+}
+
+$templateName = $Kind
+if ($Kind -eq 'analyze-note') { $templateName = 'chat' }
+$templatePath = Join-Path $PSScriptRoot ("prompts\$templateName.txt")
+if (-not (Test-Path -LiteralPath $templatePath)) {
+    throw "Missing prompt template: $templatePath"
+}
+
+$prompt = [System.IO.File]::ReadAllText($templatePath, [System.Text.UTF8Encoding]::new($false))
+$prompt = $prompt.Replace('{{HUB}}', [string]$hubRoot)
+$prompt = $prompt.Replace('{{PATH}}', [string]$Path)
+$prompt = $prompt.Replace('{{INTENT}}', [string]$Intent)
+$prompt = $prompt.Replace('{{WORKTREE}}', [string]$Worktree)
+if ([string]::IsNullOrWhiteSpace($prompt)) {
+    $prompt = [string]$Intent
+}
+
+$promptFile = Join-Path $hubRoot ('skill-review\prompt-{0}.txt' -f [guid]::NewGuid().ToString('N'))
+[System.IO.File]::WriteAllText($promptFile, $prompt, [System.Text.UTF8Encoding]::new($false))
 
 $id = [guid]::NewGuid().ToString('N').Substring(0, 12)
-$quotedPrompt = $prompt.Replace('"', '`"')
-$codexArgs = @('-C', $hubRoot) + $addDir + @('--', $quotedPrompt)
-$argLine = ($codexArgs | ForEach-Object { if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ } }) -join ' '
+$codexCmd = "Get-Content -LiteralPath '$promptFile' -Raw -Encoding UTF8 | codex -C '$hubRoot'"
+if (-not [string]::IsNullOrWhiteSpace($Worktree)) {
+    $codexCmd += " --add-dir '$(Get-NormalizedPath $Worktree)'"
+}
 
 $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
 if ($wt) {
-    $proc = Start-Process -FilePath $wt.Source -ArgumentList @('new-tab', '--title', "ozdqp-skill-hub $Kind", '-d', $hubRoot, 'powershell', '-NoExit', '-Command', "codex $argLine") -PassThru
+    $proc = Start-Process -FilePath $wt.Source -PassThru -ArgumentList @(
+        'new-tab', '--title', "ozdqp-skill-hub $Kind", '-d', $hubRoot,
+        'powershell', '-NoExit', '-Command', $codexCmd
+    )
 } else {
-    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoExit', '-Command', "Set-Location -LiteralPath '$hubRoot'; codex $argLine") -PassThru
+    $proc = Start-Process -FilePath 'powershell.exe' -PassThru -ArgumentList @(
+        '-NoExit', '-Command', "Set-Location -LiteralPath '$hubRoot'; $codexCmd"
+    )
 }
 
 $session = [pscustomobject]@{
@@ -84,6 +70,7 @@ $session = [pscustomobject]@{
     worktree = $Worktree
     intent = $Intent
     pid = $proc.Id
+    promptFile = $promptFile
     startedAt = [DateTimeOffset]::Now.ToString('o')
     status = 'running'
 }

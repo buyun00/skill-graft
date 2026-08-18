@@ -1,0 +1,4 @@
+你在中心仓 {{HUB}} 工作，目标游戏 worktree 是 {{WORKTREE}}。
+任务：拆掉 hub 链接并 Restore 官方 Skill 树。先侦察再动手，等用户确认。
+可用 overlay/manage-skill-visibility.ps1 -Workspace '{{WORKTREE}}' -Mode Restore。
+不要删除用户未提交的业务改动。

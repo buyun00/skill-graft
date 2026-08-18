@@ -1,0 +1,9 @@
+你在中心仓 {{HUB}} 工作，目标游戏 worktree 是 {{WORKTREE}}（已通过 --add-dir 可写）。
+任务：剥掉该树自带的官方 Skill 体系，改挂本中心仓本地体系。不要把跑一遍脚本当成完成。
+固定步骤：
+1. 侦察：分支、git status、官方 .agents/.claude/.codex/skills 是否在磁盘、是否已有 hub 链接、与 hub 的 3 Skill 是否内容冲突。
+2. 先向用户汇报将剥哪些路径、将挂哪些链接、冲突怎么处理，等确认。
+3. 确认后再调用 overlay/manage-skill-visibility.ps1 -Workspace '{{WORKTREE}}' -Mode Disable，以及 overlay/attach-library.ps1 -TargetWorktree '{{WORKTREE}}' -ConfigureGit。
+4. 验收：官方树不在磁盘、3 Skill 与 AGENTS.override.md 指向 hub、游戏仓 git status 没有误删、该树能读到 hub 文件。
+5. 写入 skill-review/history，确认 overlay/attached-worktrees.txt 含该路径。
+有未提交改动、重名但内容不同、或验收失败：停手，不要 -Force。
