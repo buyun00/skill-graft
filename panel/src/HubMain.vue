@@ -37,6 +37,7 @@ const state = ref<HubState | null>(null)
 const history = ref<Array<Record<string, unknown>>>([])
 const sessions = ref<Array<Record<string, unknown>>>([])
 const worktrees = ref<WorktreeInfo[]>([])
+const scanRoots = ref<string[]>([])
 const preview = ref('')
 const previewTitle = ref('')
 const showPreview = ref(false)
@@ -95,6 +96,7 @@ async function refresh() {
     history.value = nextHistory.records
     sessions.value = nextSessions.sessions
     worktrees.value = nextWorktrees.worktrees
+    scanRoots.value = nextWorktrees.scanRoots || []
     if (!launchWorktree.value && nextWorktrees.worktrees[0]) {
       launchWorktree.value = nextWorktrees.worktrees[0].path
     }
@@ -269,15 +271,23 @@ const inboxColumns = [
           </div>
 
           <div v-else-if="page === 'worktrees'">
+            <n-card style="margin-bottom: 14px" title="扫描范围">
+              <p class="muted">不再只看当前仓的 git worktree list，会扫这些盘符下的客户端目录，并展开每个独立 clone 的全部 worktree。</p>
+              <p>范围：{{ scanRoots.join('、') || '未配置' }} · 找到 {{ worktrees.length }} 个客户端工作区</p>
+            </n-card>
             <n-card v-for="tree in worktrees" :key="tree.path" style="margin-bottom: 12px">
               <template #header>
                 <n-space>
                   <span>{{ tree.branch }}</span>
                   <n-tag size="small" :type="tree.attached ? 'success' : 'warning'">{{ tree.attached ? '已用中心仓' : '仍用分支自带' }}</n-tag>
                   <n-tag v-if="tree.doNotAuto" size="small">勿自动</n-tag>
+                  <n-tag v-if="tree.ephemeral" size="small" type="info">临时/工具树</n-tag>
+                  <n-tag v-if="tree.locked" size="small">locked</n-tag>
+                  <n-tag v-if="tree.prunable" size="small" type="error">prunable</n-tag>
                 </n-space>
               </template>
               <p>{{ tree.path }}</p>
+              <p class="muted">clone：{{ tree.cloneRoot }}</p>
               <p class="muted">
                 {{ tree.officialPresent ? '官方 Skill 树还在磁盘（尚未换成中心仓）' : '官方 Skill 树已拿走（正常）' }}
                 ·

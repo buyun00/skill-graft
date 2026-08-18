@@ -1,0 +1,5 @@
+# Directories scanned for ozdqp client checkouts (one level).
+# Each independent clone found here also contributes its git worktree list.
+E:\
+F:\
+C:\Users\win11

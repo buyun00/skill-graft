@@ -73,6 +73,145 @@ function readList(file) {
   return fs.readFileSync(file, 'utf8').split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'))
 }
 
+function gitOut(cwd, args) {
+  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true })
+  if (result.status !== 0) return ''
+  return result.stdout || ''
+}
+
+function isClientCheckout(dir) {
+  if (!dir || !fs.existsSync(dir)) return false
+  if (samePath(dir, hubRoot)) return false
+  const name = path.basename(dir).toLowerCase()
+  if (name === 'ozdqp-skill-hub' || name === 'ozdqp-skill-overlay-kit') return false
+  if (name.includes('.partial-')) return false
+  return fs.existsSync(path.join(dir, 'AGENTS.md')) && fs.existsSync(path.join(dir, 'baloot_client'))
+}
+
+function isEphemeralPath(dir) {
+  const normalized = dir.replaceAll('\\', '/').toLowerCase()
+  return (
+    normalized.includes('/temp/') ||
+    normalized.includes('/appdata/local/temp/') ||
+    normalized.includes('/.codex/worktrees/') ||
+    normalized.includes('/.config/cursor/worktrees/')
+  )
+}
+
+function parseWorktreePorcelain(text) {
+  const trees = []
+  let current = {}
+  const flush = () => {
+    if (!current.path) return
+    trees.push({
+      path: current.path,
+      branch: current.branch || (current.detached ? '(detached)' : ''),
+      head: current.head || '',
+      locked: Boolean(current.locked),
+      prunable: Boolean(current.prunable)
+    })
+    current = {}
+  }
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith('worktree ')) {
+      flush()
+      current.path = line.slice(9)
+    } else if (line.startsWith('HEAD ')) current.head = line.slice(5)
+    else if (line.startsWith('branch ')) current.branch = line.slice(7).replace('refs/heads/', '')
+    else if (line === 'detached') current.detached = true
+    else if (line.startsWith('locked')) current.locked = true
+    else if (line.startsWith('prunable')) current.prunable = true
+    else if (line === '') flush()
+  }
+  flush()
+  return trees
+}
+
+function discoverClientDirs(roots) {
+  const found = []
+  for (const root of roots) {
+    if (!root || !fs.existsSync(root)) continue
+    let entries = []
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+      const full = path.join(root, entry.name)
+      if (isClientCheckout(full)) found.push(full)
+    }
+  }
+  return found
+}
+
+function cloneRootFromCommonDir(commonDir) {
+  const resolved = path.resolve(commonDir)
+  const base = path.basename(resolved)
+  const parent = path.dirname(resolved)
+  if (base === '.git') return parent
+  if (path.basename(parent) === 'worktrees' && path.basename(path.dirname(parent)) === '.git') {
+    return path.dirname(path.dirname(parent))
+  }
+  return parent
+}
+
+function collectWorktrees() {
+  const scanRoots = readList(path.join(hubRoot, 'overlay', 'scan-roots.txt'))
+  const discovered = discoverClientDirs(scanRoots)
+  const cloneSeeds = new Map()
+  for (const dir of discovered) {
+    const raw = gitOut(dir, ['rev-parse', '--git-common-dir']).trim()
+    const common = raw ? path.resolve(dir, raw) : path.resolve(dir, '.git')
+    if (!cloneSeeds.has(common.toLowerCase())) cloneSeeds.set(common.toLowerCase(), { seed: dir, common })
+  }
+
+  const attached = readList(path.join(hubRoot, 'overlay', 'attached-worktrees.txt'))
+  const blocked = readList(path.join(hubRoot, 'overlay', 'do-not-auto-attach.txt'))
+  const byPath = new Map()
+
+  const addTree = (info, cloneRoot, requireClient) => {
+    if (!info.path || !fs.existsSync(info.path) || samePath(info.path, hubRoot)) return
+    if (requireClient && !isClientCheckout(info.path)) return
+    const key = path.resolve(info.path).toLowerCase()
+    if (byPath.has(key)) return
+    byPath.set(key, {
+      path: info.path,
+      branch: info.branch || gitOut(info.path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() || '(unknown)',
+      head: info.head || gitOut(info.path, ['rev-parse', 'HEAD']).trim(),
+      cloneRoot,
+      attached: attached.some((item) => samePath(item, info.path)),
+      doNotAuto: blocked.some((item) => samePath(item, info.path)),
+      officialPresent: fs.existsSync(path.join(info.path, '.claude', 'skills')) || fs.existsSync(path.join(info.path, '.codex', 'skills')),
+      overrideLinked: isLinked(path.join(info.path, 'AGENTS.override.md'), path.join(hubRoot, 'AGENTS.override.md')),
+      ephemeral: isEphemeralPath(info.path),
+      locked: Boolean(info.locked),
+      prunable: Boolean(info.prunable)
+    })
+  }
+
+  for (const { seed, common } of cloneSeeds.values()) {
+    const porcelain = gitOut(seed, ['worktree', 'list', '--porcelain'])
+    const listed = parseWorktreePorcelain(porcelain)
+    const cloneRoot = cloneRootFromCommonDir(common)
+    if (listed.length === 0) {
+      addTree({ path: seed, branch: '', head: '' }, cloneRoot, true)
+      continue
+    }
+    for (const tree of listed) addTree(tree, cloneRoot, false)
+  }
+
+  for (const dir of discovered) {
+    const raw = gitOut(dir, ['rev-parse', '--git-common-dir']).trim()
+    const common = raw ? path.resolve(dir, raw) : path.resolve(dir, '.git')
+    addTree({ path: dir, branch: '', head: '' }, cloneRootFromCommonDir(common), true)
+  }
+
+  const worktrees = [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path, undefined, { sensitivity: 'base' }))
+  return { worktrees, scanRoots }
+}
+
 function samePath(left, right) {
   return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase()
 }
@@ -150,32 +289,7 @@ async function handleApi(req, url, body) {
   }
 
   if (url.pathname === '/api/worktrees') {
-    if (!repo) return { worktrees: [] }
-    const porcelain = await runGit(repo, ['worktree', 'list', '--porcelain'])
-    const attached = readList(path.join(hubRoot, 'overlay', 'attached-worktrees.txt'))
-    const blocked = readList(path.join(hubRoot, 'overlay', 'do-not-auto-attach.txt'))
-    const trees = []
-    let current = {}
-    for (const line of porcelain.split(/\r?\n/)) {
-      if (line.startsWith('worktree ')) current.path = line.slice(9)
-      else if (line.startsWith('HEAD ')) current.head = line.slice(5)
-      else if (line.startsWith('branch ')) current.branch = line.slice(7).replace('refs/heads/', '')
-      else if (line === '') {
-        if (current.path) {
-          trees.push({
-            path: current.path,
-            branch: current.branch || '(detached)',
-            head: current.head || '',
-            attached: attached.some((item) => samePath(item, current.path)),
-            doNotAuto: blocked.some((item) => samePath(item, current.path)),
-            officialPresent: fs.existsSync(path.join(current.path, '.claude', 'skills')) || fs.existsSync(path.join(current.path, '.codex', 'skills')),
-            overrideLinked: isLinked(path.join(current.path, 'AGENTS.override.md'), path.join(hubRoot, 'AGENTS.override.md'))
-          })
-        }
-        current = {}
-      }
-    }
-    return { worktrees: trees }
+    return collectWorktrees()
   }
 
   if (req.method !== 'POST') {

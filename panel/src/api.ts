@@ -48,10 +48,14 @@ export type WorktreeInfo = {
   path: string
   branch: string
   head: string
+  cloneRoot: string
   attached: boolean
   doNotAuto: boolean
   officialPresent: boolean
   overrideLinked: boolean
+  ephemeral: boolean
+  locked: boolean
+  prunable: boolean
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -77,7 +81,7 @@ export const api = {
   startCodex: (body: { path?: string; intent?: string; kind?: string; worktree?: string }) =>
     request('/api/codex/start', { method: 'POST', body: JSON.stringify(body) }),
   sessions: () => request<{ sessions: Array<Record<string, unknown>> }>('/api/codex/sessions'),
-  worktrees: () => request<{ worktrees: WorktreeInfo[] }>('/api/worktrees'),
+  worktrees: () => request<{ worktrees: WorktreeInfo[]; scanRoots: string[] }>('/api/worktrees'),
   attachWorktree: (path: string) =>
     request('/api/worktree/attach', { method: 'POST', body: JSON.stringify({ path }) }),
   detachWorktree: (path: string) =>
