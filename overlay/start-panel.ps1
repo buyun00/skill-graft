@@ -58,9 +58,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $panelRoot 'node_modules'))) {
 }
 
 if ($Dev) {
-    $proc = Start-Process -FilePath 'npm.cmd' -WorkingDirectory $panelRoot -PassThru `
-        -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog `
-        -ArgumentList @('run', 'dev')
+    $commandLine = 'cmd.exe /c npm.cmd run dev'
 } else {
     if (-not (Test-Path -LiteralPath (Join-Path $panelRoot 'dist\index.html'))) {
         Push-Location $panelRoot
@@ -71,21 +69,36 @@ if ($Dev) {
             Pop-Location
         }
     }
-    foreach ($oldLog in @($stdoutLog, $stderrLog)) {
-        if (Test-Path -LiteralPath $oldLog) { Remove-Item -LiteralPath $oldLog -Force }
-    }
-    $proc = Start-Process -FilePath $node.Source -WorkingDirectory $panelRoot -PassThru `
-        -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog `
-        -ArgumentList @('server/index.mjs')
+    $runner = Join-Path $logDir 'start-panel-run.cmd'
+    $runnerLines = @(
+        '@echo off',
+        ('cd /d "' + $panelRoot + '"'),
+        ('"' + $node.Source + '" server/index.mjs >> "' + $stdoutLog + '" 2>> "' + $stderrLog + '"')
+    )
+    Set-Content -LiteralPath $runner -Value $runnerLines -Encoding ASCII
+    $commandLine = 'cmd.exe /c "' + $runner + '"'
 }
 
-[System.IO.File]::WriteAllText($pidFile, [string]$proc.Id)
+$startArgs = @{
+    CommandLine = $commandLine
+    CurrentDirectory = $panelRoot
+}
+$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments $startArgs
+if ([int]$created.ReturnValue -ne 0 -or -not $created.ProcessId) {
+    throw "Failed to start panel via WMI (code $($created.ReturnValue))"
+}
+
+$startedId = [int]$created.ProcessId
+[System.IO.File]::WriteAllText($pidFile, [string]$startedId)
 $deadline = [DateTime]::UtcNow.AddSeconds(8)
 while (-not (Test-PanelUp)) {
-    if ($proc.HasExited) {
-        $err = if (Test-Path $stderrLog) { Get-Content -Raw $stderrLog } else { '' }
-        $out = if (Test-Path $stdoutLog) { Get-Content -Raw $stdoutLog } else { '' }
-        throw "Panel process exited (pid $($proc.Id)). stderr=$err stdout=$out"
+    $alive = Get-Process -Id $startedId -ErrorAction SilentlyContinue
+    if (-not $alive) {
+        $err = ''
+        $out = ''
+        if (Test-Path $stderrLog) { $err = Get-Content -Raw $stderrLog }
+        if (Test-Path $stdoutLog) { $out = Get-Content -Raw $stdoutLog }
+        throw "Panel process exited (pid $startedId). stderr=$err stdout=$out"
     }
     if ([DateTime]::UtcNow -gt $deadline) {
         throw "Panel did not start listening on $port within 8s. See $stderrLog"
@@ -93,4 +106,4 @@ while (-not (Test-PanelUp)) {
     Start-Sleep -Milliseconds 200
 }
 
-Write-Output "Panel started (pid $($proc.Id)). Open http://127.0.0.1:$port/ or http://localhost:$port/"
+Write-Output "Panel started (pid $startedId). Open http://127.0.0.1:$port/ or http://localhost:$port/"

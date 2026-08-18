@@ -2,6 +2,7 @@ panel/node_modules/
 panel/dist/
 skill-review/hub-codex.lock
 skill-review/panel.pid
+skill-review/start-panel-run.cmd
 skill-review/*.log
 .DS_Store
 *.pre-hub-*
