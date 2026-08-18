@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('edit', 'attach', 'detach', 'analyze-note')]
+    [ValidateSet('edit', 'attach', 'detach', 'analyze-note', 'chat')]
     [string]$Kind,
     [string]$Path,
     [string]$Intent,
@@ -50,7 +50,14 @@ $prompt = switch ($Kind) {
 不要删除用户未提交的业务改动。
 "@
     }
-    default { $Intent }
+    'chat' {
+        @"
+你在中心仓 $hubRoot 工作。这是从管理面板拉起的 Codex 对话。
+用户意图：$Intent
+可以改本中心仓的 Skill、inbox、adopted、override 和 overlay。不要写游戏仓业务代码。改完在本仓提交，并在 skill-review/history 记一条。
+"@
+    }
+    default { if ([string]::IsNullOrWhiteSpace($Intent)) { '你在中心仓工作，等待用户说明要改哪个 Skill。' } else { $Intent } }
 }
 
 $addDir = @()
