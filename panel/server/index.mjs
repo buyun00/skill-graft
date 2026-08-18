@@ -54,6 +54,84 @@ function buildPrompt({ kind, skillPath, intent, worktree }) {
   return prompt.trim()
 }
 
+function codexJs() {
+  return path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
+}
+
+function extractCodexSessionId(text) {
+  const match = String(text || '').match(/session id:\s*([0-9a-fA-F-]{16,})/i)
+  return match ? match[1] : ''
+}
+
+function hydrateSession(session) {
+  if (!session) return session
+  if (!session.codexSessionId && session.logFile && fs.existsSync(session.logFile)) {
+    session.codexSessionId = extractCodexSessionId(fs.readFileSync(session.logFile, 'utf8'))
+  }
+  if (!session.lastMessage && session.lastFile && fs.existsSync(session.lastFile)) {
+    session.lastMessage = fs.readFileSync(session.lastFile, 'utf8')
+  }
+  if (session.status === 'completed' && session.exitCode === 0 && session.codexSessionId) {
+    session.status = 'waiting'
+  }
+  session.canResume = Boolean(session.codexSessionId) && session.status !== 'running'
+  return session
+}
+
+function loadAndHydrateSessions() {
+  const data = loadSessions()
+  let dirty = false
+  for (const session of data.sessions || []) {
+    const before = `${session.codexSessionId || ''}|${session.status}|${session.lastMessage || ''}`
+    hydrateSession(session)
+    const after = `${session.codexSessionId || ''}|${session.status}|${session.lastMessage || ''}`
+    if (before !== after) dirty = true
+  }
+  if (dirty) saveSessions(data)
+  return data
+}
+
+function spawnCodex(session, args) {
+  const child = spawn(process.execPath, [codexJs(), ...args], {
+    cwd: hubRoot,
+    windowsHide: true,
+    windowsVerbatimArguments: false,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, NO_COLOR: '1' }
+  })
+  session.pid = child.pid || 0
+  session.status = 'running'
+  session.error = ''
+  upsertSession(session)
+
+  const append = (chunk) => {
+    const text = chunk.toString('utf8')
+    fs.appendFileSync(session.logFile, text)
+    const found = extractCodexSessionId(text)
+    if (found) session.codexSessionId = found
+  }
+  child.stdout.on('data', append)
+  child.stderr.on('data', append)
+  child.on('error', (error) => {
+    session.status = 'failed'
+    session.error = error.message
+    session.finishedAt = new Date().toISOString()
+    fs.appendFileSync(session.logFile, `\n[spawn error] ${error.message}\n`)
+    upsertSession(session)
+  })
+  child.on('close', (code) => {
+    session.exitCode = code
+    if (fs.existsSync(session.lastFile)) session.lastMessage = fs.readFileSync(session.lastFile, 'utf8')
+    if (fs.existsSync(session.logFile) && !session.codexSessionId) {
+      session.codexSessionId = extractCodexSessionId(fs.readFileSync(session.logFile, 'utf8'))
+    }
+    session.status = code === 0 ? 'waiting' : 'failed'
+    session.finishedAt = new Date().toISOString()
+    upsertSession(session)
+  })
+}
+
 function startInternalCodex({ kind, skillPath, intent, worktree }) {
   if (kind === 'edit' && !skillPath) throw new Error('edit requires path')
   if ((kind === 'attach' || kind === 'detach') && !worktree) throw new Error(`${kind} requires worktree`)
@@ -65,17 +143,7 @@ function startInternalCodex({ kind, skillPath, intent, worktree }) {
   const lastFile = path.join(hubRoot, 'skill-review', `session-${id}.last.txt`)
   fs.writeFileSync(promptFile, prompt, 'utf8')
 
-  const args = [
-    'exec',
-    '-C', hubRoot,
-    '--skip-git-repo-check',
-    '--color', 'never',
-    '--sandbox', 'danger-full-access',
-    '--dangerously-bypass-approvals-and-sandbox',
-    '-o', lastFile
-  ]
-  if (worktree) args.push('--add-dir', worktree)
-  args.push(prompt)
+  const args = execArgs({ worktree, lastFile, prompt })
 
   const session = {
     id,
@@ -90,41 +158,46 @@ function startInternalCodex({ kind, skillPath, intent, worktree }) {
     startedAt: new Date().toISOString(),
     status: 'running',
     exitCode: null,
-    error: ''
+    error: '',
+    codexSessionId: ''
   }
   upsertSession(session)
+  spawnCodex(session, args)
+  return session
+}
 
-  const npmRoot = path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
-  const child = spawn(process.execPath, [npmRoot, ...args], {
-    cwd: hubRoot,
-    windowsHide: true,
-    windowsVerbatimArguments: false,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, NO_COLOR: '1' }
-  })
-  session.pid = child.pid || 0
-  upsertSession(session)
+function execArgs({ resumeId, worktree, lastFile, prompt }) {
+  const args = [
+    'exec',
+    '-C', hubRoot,
+    '--skip-git-repo-check',
+    '--color', 'never',
+    '--sandbox', 'danger-full-access',
+    '--dangerously-bypass-approvals-and-sandbox'
+  ]
+  if (worktree) args.push('--add-dir', worktree)
+  if (resumeId) args.push('resume', resumeId)
+  args.push('-o', lastFile, prompt)
+  return args
+}
 
-  const append = (chunk) => {
-    fs.appendFileSync(logFile, chunk.toString('utf8'))
-  }
-  child.stdout.on('data', append)
-  child.stderr.on('data', append)
-  child.on('error', (error) => {
-    session.status = 'failed'
-    session.error = error.message
-    session.finishedAt = new Date().toISOString()
-    append(`\n[spawn error] ${error.message}\n`)
-    upsertSession(session)
-  })
-  child.on('close', (code) => {
-    session.exitCode = code
-    session.status = code === 0 ? 'completed' : 'failed'
-    session.finishedAt = new Date().toISOString()
-    if (fs.existsSync(lastFile)) session.lastMessage = fs.readFileSync(lastFile, 'utf8')
-    upsertSession(session)
-  })
+function resumeInternalCodex({ id, message }) {
+  const session = findSession(id)
+  if (!session) throw new Error('session not found')
+  if (session.status === 'running') throw new Error('session still running')
+  if (!session.codexSessionId) throw new Error('missing Codex session id, cannot continue')
+  const prompt = String(message || '').trim()
+  if (!prompt) throw new Error('message required')
+
+  session.status = 'running'
+  session.error = ''
+  fs.appendFileSync(session.logFile, `\n\n--------\nuser\n${prompt}\n`)
+  spawnCodex(session, execArgs({
+    resumeId: session.codexSessionId,
+    worktree: session.worktree,
+    lastFile: session.lastFile,
+    prompt
+  }))
   return session
 }
 
@@ -430,21 +503,21 @@ async function handleApi(req, url, body) {
   }
 
   if (url.pathname === '/api/codex/sessions') {
-    const data = loadSessions()
+    const data = loadAndHydrateSessions()
     const sessions = (data.sessions || []).map((session) => {
       let logTail = ''
       if (session.logFile && fs.existsSync(session.logFile)) {
         const text = fs.readFileSync(session.logFile, 'utf8')
         logTail = text.slice(-8000)
       }
-      return { ...session, logTail }
+      return { ...hydrateSession(session), logTail }
     })
     return { sessions }
   }
 
   if (url.pathname === '/api/codex/session') {
     const id = url.searchParams.get('id')
-    const session = (loadSessions().sessions || []).find((item) => item.id === id)
+    const session = hydrateSession((loadAndHydrateSessions().sessions || []).find((item) => item.id === id))
     if (!session) {
       const err = new Error('session not found')
       err.status = 404
@@ -484,6 +557,14 @@ async function handleApi(req, url, body) {
       skillPath: body.path,
       intent: body.intent,
       worktree: body.worktree
+    })
+    return session
+  }
+
+  if (url.pathname === '/api/codex/resume') {
+    const session = resumeInternalCodex({
+      id: body.id,
+      message: body.message
     })
     return session
   }
@@ -532,7 +613,8 @@ function serveStatic(urlPath, res) {
 }
 
 function findSession(id) {
-  return (loadSessions().sessions || []).find((item) => item.id === id) || null
+  const session = (loadAndHydrateSessions().sessions || []).find((item) => item.id === id) || null
+  return session ? hydrateSession(session) : null
 }
 
 function streamSession(id, req, res) {
@@ -568,7 +650,8 @@ function streamSession(id, req, res) {
         status: session.status,
         lastMessage: session.lastMessage || '',
         error: session.error || '',
-        exitCode: session.exitCode
+        exitCode: session.exitCode,
+        codexSessionId: session.codexSessionId || ''
       })
     }
     if (session.status && session.status !== 'running') {

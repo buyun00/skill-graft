@@ -20,10 +20,12 @@ const launchKind = ref<'chat' | 'edit' | 'attach'>('chat')
 const launchPath = ref('skills/ozdqp-development')
 const launchWorktree = ref('')
 const launchIntent = ref('')
+const followUp = ref('')
 const selectedRun = ref('')
 const liveLogs = ref<Record<string, string>>({})
 const liveStatus = ref<Record<string, string>>({})
 const eventSources = new Map<string, EventSource>()
+const resuming = ref(false)
 
 const navItems = [
   { key: 'sessions', label: '运行' },
@@ -37,10 +39,16 @@ const queuedItems = computed(() => (state.value?.items ?? []).filter((item) => [
 const runningCount = computed(() => sessions.value.filter((session) => sessionStatus(session) === 'running').length)
 const orderedSessions = computed(() => [...sessions.value].reverse())
 const currentSession = computed(() => orderedSessions.value.find((session) => String(session.id) === selectedRun.value) || orderedSessions.value[0] || null)
+const canContinue = computed(() => {
+  const session = currentSession.value
+  if (!session) return false
+  const status = sessionStatus(session)
+  return Boolean(session.codexSessionId) && status !== 'running' && status !== 'failed'
+})
 const allSkills = computed(() => (state.value ? [...state.value.resident, ...state.value.adopted, ...state.value.inbox] : []))
 
 const pageMeta: Record<string, { title: string; subtitle: string }> = {
-  sessions: { title: '运行', subtitle: '在面板内部执行 Codex，日志实时出现在这里' },
+  sessions: { title: '运行', subtitle: '在面板内部执行 Codex。一轮结束后可以继续同一条会话' },
   worktrees: { title: '工作区', subtitle: '按目录名和最近改动排列，一键换成中心仓体系' },
   structure: { title: 'Skills', subtitle: '常驻、已采用和 inbox 原料' },
   inbox: { title: '待审', subtitle: '别人推上来的官方 Skill，先看再决定' },
@@ -75,11 +83,19 @@ function sessionLog(session: Record<string, unknown>) {
 }
 
 function statusClass(status: string) {
-  if (status === 'adopted' || status === 'completed') return 'badge-success'
+  if (status === 'adopted' || status === 'completed' || status === 'waiting') return 'badge-success'
   if (status === 'rejected' || status === 'failed') return 'badge-error'
   if (status === 'proposed' || status === 'running') return 'badge-warning'
   if (status === 'merged-into-3skill') return 'badge-info'
   return 'badge-ghost'
+}
+
+function statusLabel(status: string) {
+  if (status === 'waiting') return '可续聊'
+  if (status === 'running') return '执行中'
+  if (status === 'completed') return '已完成'
+  if (status === 'failed') return '失败'
+  return status
 }
 
 function watchSession(id: string) {
@@ -94,6 +110,9 @@ function watchSession(id: string) {
   source.addEventListener('status', (event) => {
     const data = JSON.parse((event as MessageEvent).data || '{}')
     liveStatus.value = { ...liveStatus.value, [id]: data.status || '' }
+    if (data.codexSessionId) {
+      sessions.value = sessions.value.map((item) => item.id === id ? { ...item, ...data } : item)
+    }
     if (data.status && data.status !== 'running') {
       source.close()
       eventSources.delete(id)
@@ -196,6 +215,25 @@ async function launchCodex() {
   }
 }
 
+async function continueCodex() {
+  const session = currentSession.value
+  const id = session ? String(session.id || '') : ''
+  if (!id || !followUp.value.trim()) return
+  resuming.value = true
+  try {
+    const started = await api.resumeCodex({ id, message: followUp.value.trim() })
+    sessions.value = sessions.value.map((item) => item.id === id ? { ...item, ...started, status: 'running' } : item)
+    liveStatus.value = { ...liveStatus.value, [id]: 'running' }
+    watchSession(id)
+    followUp.value = ''
+    notify('已继续同一条会话')
+  } catch (err) {
+    notify(err instanceof Error ? err.message : String(err))
+  } finally {
+    resuming.value = false
+  }
+}
+
 onMounted(() => { void refresh() })
 onUnmounted(() => {
   for (const source of eventSources.values()) source.close()
@@ -259,21 +297,29 @@ onUnmounted(() => {
                   >
                     <div class="font-medium">{{ session.kind }}</div>
                     <div class="mt-1 text-xs opacity-60">{{ session.worktree || session.path || '中心仓' }}</div>
-                    <div class="badge badge-sm mt-2" :class="statusClass(sessionStatus(session))">{{ sessionStatus(session) }}</div>
+                    <div class="badge badge-sm mt-2" :class="statusClass(sessionStatus(session))">{{ statusLabel(sessionStatus(session)) }}</div>
                   </button>
                 </div>
               </div>
               <div class="card glass">
                 <div class="card-body">
-                  <h2 class="card-title text-base">{{ currentSession ? `${currentSession.kind} · ${sessionStatus(currentSession)}` : '实时输出' }}</h2>
+                  <h2 class="card-title text-base">{{ currentSession ? `${currentSession.kind} · ${statusLabel(sessionStatus(currentSession))}` : '实时输出' }}</h2>
                   <pre class="min-h-80 overflow-auto rounded-xl bg-base-300/40 p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap">{{ currentSession ? (sessionLog(currentSession) || '等待输出…') : '选一个任务，或在下方描述你要做的事。' }}</pre>
+                  <div v-if="canContinue" class="space-y-3 border-t border-white/10 pt-3">
+                    <p class="text-sm opacity-70">这一轮已经结束，但会话还在。继续说下一句即可，不必再开新任务。</p>
+                    <textarea v-model="followUp" class="textarea textarea-bordered min-h-20" placeholder="继续对这条 Codex 会话说话" />
+                    <div class="flex items-center justify-between gap-3">
+                      <span class="text-xs opacity-60">沿用同一 session id，不会另开一条对话。</span>
+                      <button class="btn btn-primary" :class="{ loading: resuming }" :disabled="resuming || !followUp.trim()" @click="continueCodex">继续</button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
 
             <div class="card glass">
               <div class="card-body gap-3">
-                <h2 class="card-title text-base">下达任务</h2>
+                <h2 class="card-title text-base">新开一条任务</h2>
                 <div class="join">
                   <button class="btn join-item btn-sm" :class="{ 'btn-primary': launchKind === 'chat' }" @click="launchKind = 'chat'">对话</button>
                   <button class="btn join-item btn-sm" :class="{ 'btn-primary': launchKind === 'edit' }" @click="launchKind = 'edit'">改 Skill</button>

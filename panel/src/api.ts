@@ -83,6 +83,8 @@ export const api = {
   analyze: () => request('/api/analyze', { method: 'POST', body: '{}' }),
   startCodex: (body: { path?: string; intent?: string; kind?: string; worktree?: string }) =>
     request('/api/codex/start', { method: 'POST', body: JSON.stringify(body) }),
+  resumeCodex: (body: { id: string; message: string }) =>
+    request('/api/codex/resume', { method: 'POST', body: JSON.stringify(body) }),
   sessions: () => request<{ sessions: Array<Record<string, unknown>> }>('/api/codex/sessions'),
   worktrees: () => request<{ worktrees: WorktreeInfo[]; scanRoots: string[] }>('/api/worktrees'),
   attachWorktree: (path: string) =>

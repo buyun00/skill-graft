@@ -1,0 +1,18 @@
+{
+  "type": "hub-change",
+  "at": "2026-08-18T17:54:00+08:00",
+  "title": "面板 Codex 会话可续聊",
+  "summary": "codex exec 一轮结束后不再当成任务结束。面板解析 session id，状态改为 waiting，并提供同一会话的 resume。已用 PONG 会话续出 PING 验证。",
+  "files": [
+    "panel/server/index.mjs",
+    "panel/src/api.ts",
+    "panel/src/HubMain.vue"
+  ],
+  "verified": {
+    "session": "msyg8713yuitqi",
+    "codexSessionId": "01a01429-0121-7822-aa19-54d14c696482",
+    "first": "PONG",
+    "followUp": "PING",
+    "statusAfter": "waiting"
+  }
+}
