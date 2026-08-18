@@ -56,8 +56,15 @@ function Test-KeptAgentSkillPath([string]$relativePath) {
 }
 
 function Get-LegacyTrackedPaths {
-    $lines = @(& git -C $workspace -c core.quotepath=false ls-files .agents .claude .codex)
-    if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed' }
+    $previous = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $blob = & git -C $workspace -c core.quotepath=false -c i18n.logOutputEncoding=utf-8 ls-files -z .agents .claude .codex
+        if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed' }
+    } finally {
+        [Console]::OutputEncoding = $previous
+    }
+    $lines = @("$blob" -split "`0" | Where-Object { $_ })
     return @($lines | Where-Object {
         $path = $_
         if ($path.StartsWith('.claude/', [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
@@ -74,11 +81,24 @@ function Get-LegacyTrackedPaths {
 }
 
 function Invoke-ChunkedGit([string[]]$prefixArguments, [string[]]$paths) {
-    $chunkSize = 50
+    if ($paths.Count -eq 0) { return }
+    $useStdin = $prefixArguments -contains 'update-index' -or $prefixArguments -contains 'checkout-index'
+    if ($useStdin) {
+        $temp = Join-Path $env:TEMP ("ozdqp-hub-index-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+        try {
+            [System.IO.File]::WriteAllLines($temp, $paths, [System.Text.UTF8Encoding]::new($false))
+            Get-Content -LiteralPath $temp -Encoding UTF8 | & git -C $workspace -c i18n.filesEncoding=utf-8 @prefixArguments --stdin
+            if ($LASTEXITCODE -ne 0) { throw "git $($prefixArguments -join ' ') failed" }
+        } finally {
+            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        }
+        return
+    }
+    $chunkSize = 20
     for ($offset = 0; $offset -lt $paths.Count; $offset += $chunkSize) {
         $last = [Math]::Min($offset + $chunkSize - 1, $paths.Count - 1)
         $chunk = @($paths[$offset..$last])
-        & git -C $workspace @prefixArguments -- @chunk
+        & git -C $workspace -c core.quotepath=false @prefixArguments -- @chunk
         if ($LASTEXITCODE -ne 0) { throw "git $($prefixArguments -join ' ') failed" }
     }
 }

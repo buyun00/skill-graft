@@ -75,17 +75,24 @@ foreach ($name in $skillNames) {
     Assert-SafeToReplace (Join-Path $targetRoot ".agents\skills\$name") (Join-Path $hubRoot "skills\$name") $name
 }
 
+if ($ConfigureGit) {
+    & git -C $targetRoot config core.hooksPath (Join-Path $hubRoot 'overlay\hooks')
+}
+
 $overlayTarget = Join-Path $targetRoot '.codex\local-overlay'
 $hubOverlay = Join-Path $hubRoot 'overlay'
 if (Test-Path -LiteralPath $overlayTarget) {
-    $overlayItem = Get-Item -LiteralPath $overlayTarget -Force
     $alreadyLinked = Test-PointsTo $overlayTarget $hubOverlay
     if (-not $alreadyLinked) {
+        $overlayItem = Get-Item -LiteralPath $overlayTarget -Force
         $isLink = ($overlayItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
         if (-not $isLink) {
             $backup = Join-Path $targetRoot ('.codex\local-overlay.pre-hub-{0}' -f [DateTime]::Now.ToString('yyyyMMdd-HHmmss'))
-            Rename-Item -LiteralPath $overlayTarget -NewName (Split-Path -Leaf $backup)
-            Write-Output "Moved existing local-overlay to $backup"
+            [void](New-Item -ItemType Directory -Force -Path $backup)
+            & robocopy $overlayTarget $backup /E /NFL /NDL /NJH /NJS /nc /ns /np
+            if ($LASTEXITCODE -ge 8) { throw "Failed to backup local-overlay to $backup" }
+            Remove-Item -LiteralPath $overlayTarget -Recurse -Force
+            Write-Output "Backed up existing local-overlay to $backup"
         } else {
             Remove-Item -LiteralPath $overlayTarget -Force
         }
