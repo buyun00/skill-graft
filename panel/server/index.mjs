@@ -242,9 +242,13 @@ function serveStatic(urlPath, res) {
   send(res, 200, fs.readFileSync(abs), types[ext] || 'application/octet-stream')
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url || '/', `http://${host}:${port}`)
+const onRequest = async (req, res) => {
+  const url = new URL(req.url || '/', `http://127.0.0.1:${port}`)
   try {
+    if (url.pathname === '/api/health') {
+      send(res, 200, JSON.stringify({ ok: true }))
+      return
+    }
     if (url.pathname.startsWith('/api/')) {
       let body = {}
       if (req.method === 'POST') {
@@ -261,8 +265,17 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     send(res, error.status || 500, JSON.stringify({ error: error.message || String(error) }))
   }
-})
+}
 
-server.listen(port, host, () => {
-  console.log(`skill hub panel http://${host}:${port}/`)
-})
+for (const bindHost of ['127.0.0.1', '::1']) {
+  const server = http.createServer(onRequest)
+  server.listen(port, bindHost, () => {
+    const label = bindHost === '::1' ? 'localhost' : bindHost
+    console.log(`skill hub panel http://${label}:${port}/`)
+  })
+  server.on('error', (error) => {
+    if (bindHost === '::1' && error && error.code === 'EADDRINUSE') return
+    console.error(`listen ${bindHost}:${port} failed`, error)
+    if (bindHost === '127.0.0.1') process.exit(1)
+  })
+}
