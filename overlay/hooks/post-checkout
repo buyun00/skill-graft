@@ -1,0 +1,32 @@
+#!/bin/sh
+
+hub="$(git config --get ozdqp.skillWatchWorkspace 2>/dev/null)"
+if [ -z "$hub" ]; then
+    exit 0
+fi
+
+game="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$game" ]; then
+    exit 0
+fi
+
+auto="$(git config --get --bool ozdqp.skillHubAutoAttach 2>/dev/null)"
+list="${hub%/}/overlay/do-not-auto-attach.txt"
+attached="${hub%/}/overlay/attached-worktrees.txt"
+
+if grep -Fqx "$game" "$list" 2>/dev/null; then
+    exit 0
+fi
+
+if grep -Fqx "$game" "$attached" 2>/dev/null; then
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${hub%/}/overlay/attach-library.ps1" -TargetWorktree "$game"
+    exit 0
+fi
+
+if [ "$auto" != "true" ]; then
+    exit 0
+fi
+
+echo "[OZDQP Skill Hub] new worktree detected; launching Codex attach session (no silent strip)."
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${hub%/}/overlay/start-codex-session.ps1" -Kind attach -Worktree "$game"
+exit 0

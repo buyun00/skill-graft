@@ -1,0 +1,20 @@
+role: client
+deny:
+  - 飞书*
+  - 轻羽*
+  - goserver-dev
+  - Go语言专家
+  - 集群日志调试
+  - local-server-management
+allow:
+  - hall-ui-dev
+  - 多语言*
+  - UI*
+  - 预制体*
+  - 红点系统
+  - 协议同步
+resident:
+  - ozdqp-development
+  - ozdqp-ui-development
+  - ozdqp-git-workflow
+adopt_new: matching
