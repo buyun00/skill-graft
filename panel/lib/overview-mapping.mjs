@@ -110,14 +110,29 @@ export function overviewPrimary(attention) {
   return (attention && attention.length) ? '需要你处理' : '一切正常'
 }
 
-export function queuedSessionView(session) {
-  if (!session || typeof session !== 'object') {
+export function sessionFromEnvelope(payload) {
+  if (!payload || typeof payload !== 'object') return null
+  const nested = payload.session
+  if (nested && typeof nested === 'object') return nested
+  if (payload.id || payload.status) return payload
+  return null
+}
+
+export function queuedSessionView(payload) {
+  const session = sessionFromEnvelope(payload)
+  if (!session) {
     return { id: '', status: '', label: '', attachedUnchanged: true }
   }
   const id = session.id || ''
   const status = session.status || ''
   const label = id || status === 'running' || status ? '已入队' : ''
   return { id, status, label, attachedUnchanged: true }
+}
+
+export function codexSessionHref(payload) {
+  const session = sessionFromEnvelope(payload)
+  if (!session || !session.id) return ''
+  return `${HUB_PATHS.codex}?id=${encodeURIComponent(session.id)}`
 }
 
 export function mapOverview(input = {}) {

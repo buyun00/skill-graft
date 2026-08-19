@@ -4,7 +4,7 @@ import http from 'node:http'
 import path from 'node:path'
 import test from 'node:test'
 import { createPanelApi } from '../panel/lib/api.mjs'
-import { queuedSessionView } from '../panel/lib/overview-mapping.mjs'
+import { codexSessionHref, queuedSessionView } from '../panel/lib/overview-mapping.mjs'
 import { buildPaletteEntries, filterPaletteEntries } from '../panel/lib/palette.mjs'
 import { hubRoot } from './helpers.mjs'
 
@@ -40,10 +40,38 @@ async function listenRecorder() {
       body = raw ? JSON.parse(raw) : {}
     }
     seen.push({ method: req.method, path: url.pathname, search: url.search, body })
-    const sessionish = ['/api/worktree/attach', '/api/worktree/detach', '/api/analyze', '/api/codex/start', '/api/codex/resume']
-    const payload = sessionish.includes(url.pathname)
-      ? { id: 'sess-1', status: 'running', kind: 'attach' }
-      : { ok: true }
+    const envelopes = {
+      '/api/worktree/attach': {
+        ok: true,
+        action: 'attach',
+        session: { id: 'sess-attach', status: 'running', kind: 'attach' },
+        applied: null
+      },
+      '/api/worktree/detach': {
+        ok: true,
+        action: 'detach',
+        session: { id: 'sess-detach', status: 'running', kind: 'detach' },
+        applied: null
+      },
+      '/api/analyze': {
+        ok: true,
+        action: 'chat',
+        session: { id: 'sess-analyze', status: 'running', kind: 'chat' },
+        applied: null
+      },
+      '/api/codex/start': {
+        ok: true,
+        action: 'chat',
+        session: { id: 'sess-start', status: 'running', kind: 'chat' },
+        applied: null
+      },
+      '/api/codex/resume': {
+        ok: true,
+        action: 'resume',
+        session: { id: 'sess-1', status: 'running', kind: 'chat' }
+      }
+    }
+    const payload = envelopes[url.pathname] || { ok: true }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
     res.end(JSON.stringify(payload))
   })
@@ -61,11 +89,11 @@ test('shipped API client posts decide/analyze/attach/detach/codex as documented'
   const api = createPanelApi({ base })
 
   await api.decide('inbox-1', 'reject')
-  await api.analyze()
+  const analyzed = await api.analyze()
   const attach = await api.attachWorktree('E:\\ozdqp-cli-attach-probe', 'contract-attach')
   const detach = await api.detachWorktree('E:\\ozdqp-cli-attach-probe', 'contract-detach')
-  await api.startCodex({ kind: 'chat', intent: 'hello' })
-  await api.resumeCodex('sess-1', 'continue')
+  const started = await api.startCodex({ kind: 'chat', intent: 'hello' })
+  const resumed = await api.resumeCodex('sess-1', 'continue')
 
   const byPath = Object.fromEntries(seen.map((item) => [item.path, item]))
   assert.equal(byPath['/api/decide'].method, 'POST')
@@ -78,12 +106,28 @@ test('shipped API client posts decide/analyze/attach/detach/codex as documented'
   assert.equal(byPath['/api/codex/resume'].body.id, 'sess-1')
   assert.equal(byPath['/api/codex/resume'].body.message, 'continue')
 
+  const rawEnvelope = {
+    ok: true,
+    action: 'attach',
+    session: { id: 'sess-attach', status: 'running', kind: 'attach' },
+    applied: null
+  }
+  assert.equal(queuedSessionView(rawEnvelope).label, '已入队')
+  assert.equal(queuedSessionView(rawEnvelope).id, 'sess-attach')
+
   const queued = queuedSessionView(attach)
+  assert.equal(attach.id, 'sess-attach')
   assert.equal(queued.label, '已入队')
+  assert.equal(queued.id, 'sess-attach')
   assert.equal(queued.status, 'running')
   assert.equal(queued.attachedUnchanged, true)
   assert.equal(Object.prototype.hasOwnProperty.call(attach, 'attached'), false)
   assert.equal(queuedSessionView(detach).label, '已入队')
+  assert.equal(queuedSessionView(analyzed).id, 'sess-analyze')
+  assert.equal(started.id, 'sess-start')
+  assert.equal(codexSessionHref(started), '/codex?id=sess-start')
+  assert.equal(codexSessionHref(rawEnvelope), '/codex?id=sess-attach')
+  assert.equal(resumed.id, 'sess-1')
   assert.equal(api.sessionStreamUrl('abc'), `${base}/api/codex/session/stream?id=abc`)
 })
 

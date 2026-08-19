@@ -1,4 +1,4 @@
-import { API_PATHS } from './overview-mapping.mjs'
+import { API_PATHS, sessionFromEnvelope } from './overview-mapping.mjs'
 
 function joinUrl(base, path) {
   if (!base) return path
@@ -40,6 +40,11 @@ export function createPanelApi(options = {}) {
     })
   }
 
+  async function postSession(path, body) {
+    const data = await post(path, body)
+    return sessionFromEnvelope(data) || data
+  }
+
   return {
     getHealth: () => request(API_PATHS.health),
     getState: () => request(API_PATHS.state),
@@ -49,12 +54,12 @@ export function createPanelApi(options = {}) {
     getHistory: () => request(API_PATHS.history),
     getSessions: () => request(API_PATHS.sessions),
     getSession: (id) => request(`${API_PATHS.session}?id=${encodeURIComponent(id || '')}`),
-    analyze: () => post(API_PATHS.analyze, {}),
+    analyze: () => postSession(API_PATHS.analyze, {}),
     decide: (id, action, extra = {}) => post(API_PATHS.decide, { id, action, ...extra }),
-    attachWorktree: (worktreePath, intent) => post(API_PATHS.attach, { path: worktreePath, intent }),
-    detachWorktree: (worktreePath, intent) => post(API_PATHS.detach, { path: worktreePath, intent }),
-    startCodex: (body = {}) => post(API_PATHS.start, body),
-    resumeCodex: (id, message) => post(API_PATHS.resume, { id, message }),
+    attachWorktree: (worktreePath, intent) => postSession(API_PATHS.attach, { path: worktreePath, intent }),
+    detachWorktree: (worktreePath, intent) => postSession(API_PATHS.detach, { path: worktreePath, intent }),
+    startCodex: (body = {}) => postSession(API_PATHS.start, body),
+    resumeCodex: (id, message) => postSession(API_PATHS.resume, { id, message }),
     sessionStreamUrl: (id) => joinUrl(base, `${API_PATHS.stream}?id=${encodeURIComponent(id || '')}`)
   }
 }

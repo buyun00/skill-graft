@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  codexSessionHref,
   mapOverview,
   overviewPrimary,
   queuedSessionView,
+  sessionFromEnvelope,
   versionParts
 } from '../panel/lib/overview-mapping.mjs'
+import { spawnHub } from './helpers.mjs'
 
 const busyState = {
   hubRoot: 'E:\\hub',
@@ -181,11 +184,42 @@ test('git / codex / username / storage rules follow API fields only', () => {
   assert.equal(noGit.skillCount, 0)
 })
 
-test('queuedSessionView is 已入队 and does not flip attached', () => {
-  const view = queuedSessionView({ id: 'sess-1', status: 'running' })
+test('queuedSessionView unwraps the real CLI {ok,action,session} envelope', () => {
+  const envelope = {
+    ok: true,
+    action: 'attach',
+    session: { id: 'sess-1', status: 'running', kind: 'attach' },
+    applied: null
+  }
+  assert.equal(sessionFromEnvelope(envelope).id, 'sess-1')
+  const view = queuedSessionView(envelope)
   assert.equal(view.label, '已入队')
   assert.equal(view.id, 'sess-1')
   assert.equal(view.status, 'running')
   assert.equal(view.attachedUnchanged, true)
   assert.notEqual(view.attached, true)
+  assert.equal(codexSessionHref(envelope), '/codex?id=sess-1')
+  assert.equal(codexSessionHref({ ok: true, action: 'chat', session: { id: 'abc', status: 'running' } }), '/codex?id=abc')
+})
+
+test('queuedSessionView reads a real CLI attach --no-spawn envelope', () => {
+  const cli = spawnHub([
+    'attach',
+    '--worktree',
+    'E:\\ozdqp-cli-attach-probe',
+    '--intent',
+    'unwrap-session-envelope',
+    '--no-spawn'
+  ])
+  assert.equal(cli.status, 0, cli.stderr)
+  const payload = JSON.parse(cli.stdout)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.action, 'attach')
+  assert.ok(payload.session && payload.session.id, 'CLI session.id')
+  assert.equal(sessionFromEnvelope(payload).id, payload.session.id)
+  const view = queuedSessionView(payload)
+  assert.equal(view.label, '已入队')
+  assert.equal(view.id, payload.session.id)
+  assert.equal(view.attachedUnchanged, true)
+  assert.equal(codexSessionHref(payload), `/codex?id=${encodeURIComponent(payload.session.id)}`)
 })

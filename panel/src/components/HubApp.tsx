@@ -12,6 +12,7 @@ import {
 } from "graft-glass-ui/src/components";
 import { createPanelApi } from "../../lib/api.mjs";
 import {
+  codexSessionHref,
   hrefForNav,
   mapOverview,
   navFromPath,
@@ -322,7 +323,8 @@ export function HubApp() {
             try {
               const session = await api.startCodex(body);
               showQueued(session);
-              if (session && session.id) push(`/codex?id=${encodeURIComponent(session.id)}`);
+              const href = codexSessionHref(session);
+              if (href) push(href);
               await load();
             } catch (err) {
               toast({ type: "error", title: "start 失败", description: String((err as Error).message || err) });
