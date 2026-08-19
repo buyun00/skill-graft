@@ -24,15 +24,17 @@ skill-graft 把「本地工作流的权威源」放到**另一个仓库**里。�
 
 | 能力 | 入口 | 说明 |
 |---|---|---|
-| 查库存 | `hub status` / `GET /api/state` | 常驻 / 已采用 / inbox、计数、关联仓 |
-| 扫工作树 | `hub list-worktrees` / `GET /api/worktrees` | 是否已挂、override 是否接通、官方树是否还在盘上 |
-| 列 Skill | `hub list-skills` | 三类节点；`attached` 表示游戏树上的链接是否指向 hub |
-| 第一次挂接 | `hub attach --worktree <path>` | **后台 Codex 对话**（默认 `gpt-5.6-luna` + max），不是 CLI 直接跑脚本 |
-| 已挂树断链 | `hub repair-links --worktree <path>` | 幂等修链接；内容与 hub 不一致会报错，避免悄悄覆盖 |
-| 官方更新入队 | hook → `hub ingest` | `fetch`/`pull` 只吞进 inbox，不在功能树里做语义归类 |
-| 拍板 inbox | `hub decide --id … --action adopt\|merge\|reject` | 采用 / 并入 / 拒绝 |
-| 改 Skill / 闲聊 / 剥离 | `hub edit` / `chat` / `detach` / `resume` | 同样入队 Codex 会话 |
-| HTTP | `npm run api` → :18765 | 查询与会话接口，只转发 CLI；网页已撤，以后重做 |
+| 一键安装 | `setup.cmd` / `sg setup` | 配环境、把 `sg` 放进 PATH、静默守护、开机（登录）自启 |
+| 查库存 | `sg status` / `GET /api/state` | 常驻 / 已采用 / inbox、计数、关联仓 |
+| 扫工作树 | `sg list-worktrees` / `GET /api/worktrees` | 是否已挂、override 是否接通、官方树是否还在盘上 |
+| 列 Skill | `sg list-skills` | 三类节点；`attached` 表示游戏树上的链接是否指向 hub |
+| 第一次挂接 | `sg attach --worktree <path>` | **后台 Codex 对话**（默认 `gpt-5.6-luna` + max），不是 CLI 直接跑脚本 |
+| 已挂树断链 | `sg repair-links --worktree <path>` | 幂等修链接；内容与 hub 不一致会报错，避免悄悄覆盖 |
+| 官方更新入队 | hook → `sg ingest` | `fetch`/`pull` 只吞进 inbox，不在功能树里做语义归类 |
+| 拍板 inbox | `sg decide --id … --action adopt\|merge\|reject` | 采用 / 并入 / 拒绝 |
+| 改 Skill / 闲聊 / 剥离 | `sg edit` / `chat` / `detach` / `resume` | 同样入队 Codex 会话 |
+| 保活 | `sg daemon status` / `GET /api/daemon` | 无窗口守护本地 HTTP API（:18765），挂了会拉起来 |
+| HTTP | 守护进程自动起；也可 `npm run api` | 查询与会话接口，只转发 CLI；网页已撤，以后重做 |
 
 控制面漏斗：
 
@@ -40,7 +42,7 @@ skill-graft 把「本地工作流的权威源」放到**另一个仓库**里。�
 人 / HTTP / Git hook
         │
         ▼
-   ozdqp-hub（CLI）     ← 对外唯一命令面
+   sg / ozdqp-hub（CLI）  ← 对外唯一命令面
         ▼
       core
         ▼
@@ -55,16 +57,35 @@ HTTP 和 hook **不** `import` 核心函数，只执行 `dist/control/cli.js`。
 
 ## 怎么用
 
-### 准备
+### 一键配置
+
+本机需要 Node.js 和 Git。要跑 `attach` 对话，还要已登录的 [Codex CLI](https://github.com/openai/codex)。
 
 ```text
 git clone https://github.com/buyun00/skill-graft.git
 cd skill-graft
-npm install
-npm run build
+setup.cmd
 ```
 
-本机还需要：Node.js、Git。要跑 `attach` 对话：已登录的 [Codex CLI](https://github.com/openai/codex)。
+也可以：`npm run setup`，或源码构建之后 `node dist/control/cli.js setup`。
+
+这一步会：
+
+1. 安装依赖并构建 CLI（若还没有）
+2. 补齐 `skills/`、`overlay/`、`skill-review/` 布局
+3. 把 `sg`（以及旧名 `ozdqp-hub`）写进 `%LOCALAPPDATA%\skill-graft\bin`，加入当前用户 PATH；若本机已有 `%APPDATA%\npm`，再放一份进去，已经打开的终端往往立刻就能用
+4. 注册登录时自启的计划任务 `SkillGraft`（隐藏窗口）
+5. 拉起静默守护进程，保活 `http://127.0.0.1:18765/api/health`
+
+然后**新开一个终端**：
+
+```text
+sg status
+sg doctor
+sg --help
+```
+
+编辑器里已经打开的终端如果找不到 `sg`，重启编辑器。卸载：`sg uninstall`（只拆命令、PATH、守护和自启，不删这份仓库，也不动 `skills/`）。
 
 把你的 Skill 放进本机 `skills/`（该目录不进 git）。典型布局：
 
@@ -81,18 +102,18 @@ overlay/scan-roots.txt   # 扫盘根，一行一个目录
 ### 查询
 
 ```text
-npm run hub -- status
-npm run hub -- list-worktrees
-npm run hub -- list-skills
-npm run hub -- --help
+sg status
+sg list-worktrees
+sg list-skills
+sg --help
 ```
 
-成功时 stdout 是 UTF-8 JSON。也可以设 `HUB_ROOT` 指向另一份 hub 数据根。
+成功时 stdout 是 UTF-8 JSON。也可以设 `HUB_ROOT` 指向另一份 hub 数据根。还没装 `sg` 时可以用 `npm run hub -- status`。
 
 ### 把一棵树改挂中心方案
 
 ```text
-npm run hub -- attach --worktree D:\your-checkout
+sg attach --worktree D:\your-checkout
 ```
 
 CLI 立刻返回 session（`status: running`、带 pid），Codex 在后台做剥离和链接。可选：
@@ -109,7 +130,7 @@ CLI 立刻返回 session（`status: running`、带 pid），Codex 在后台做�
 已挂树链接断了，不要再走第一次 attach：
 
 ```text
-npm run hub -- repair-links --worktree D:\your-checkout
+sg repair-links --worktree D:\your-checkout
 ```
 
 若有人改过树上的 override 且和 hub 内容不同，这条命令会失败并说明原因，避免悄悄用 hub 盖掉或反过来污染权威源。
@@ -119,18 +140,26 @@ npm run hub -- repair-links --worktree D:\your-checkout
 工作树若配了 hub 的 hook，`fetch`/`pull` 官方 Skill 只会 `ingest` 进中心仓 inbox。人再决定：
 
 ```text
-npm run hub -- decide --id <id> --action adopt
-npm run hub -- decide --id <id> --action merge --merge-target skills/ozdqp-development
-npm run hub -- decide --id <id> --action reject
+sg decide --id <id> --action adopt
+sg decide --id <id> --action merge --merge-target skills/ozdqp-development
+sg decide --id <id> --action reject
 ```
 
 ### HTTP（无网页）
+
+配置器会把 API 交给守护进程保活。也可以前台起一份：
 
 ```text
 npm run api
 ```
 
-`GET http://127.0.0.1:18765/api/health`、`/api/state`、`/api/worktrees`。管理页已删除，以后重做。
+`GET http://127.0.0.1:18765/api/health`、`/api/state`、`/api/worktrees`、`/api/daemon`。管理页已删除，以后重做。
+
+```text
+sg daemon status
+sg daemon stop
+sg daemon start
+```
 
 ### 测试
 

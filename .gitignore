@@ -7,6 +7,10 @@ dist/
 
 skill-review/hub-codex.lock
 skill-review/panel.pid
+skill-review/daemon.pid
+skill-review/api.pid
+skill-review/daemon-heartbeat.json
+skill-review/daemon.log.old
 skill-review/start-panel-run.cmd
 skill-review/prompt-*.txt
 skill-review/run-codex-*.ps1

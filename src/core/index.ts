@@ -12,6 +12,34 @@ export { repairPlan } from './repair.js'
 export { emptyIngestResult, parseIngestTransactions } from './ingest.js'
 export { decide } from './decide.js'
 export { enqueueSession, findSession, markSessionSpawned, resumeSession, saveSession } from './sessions.js'
+export {
+  API_PORT,
+  evaluateDoctor,
+  formatDoctorReport,
+  formatSetupReport,
+  formatUninstallReport,
+  layoutSpec,
+  mergeUserPath,
+  pathHasDir,
+  PRODUCT_ALIAS,
+  PRODUCT_COMMAND,
+  PRODUCT_NAME,
+  removeFromUserPath,
+  renderShims,
+  resolveInstallDir,
+  resolveInstallPaths,
+  TASK_NAME,
+  toGitBashPath
+} from './install.js'
+export type {
+  DaemonStatus,
+  DoctorFacts,
+  DoctorReport,
+  InstallPaths,
+  SetupFlags,
+  SetupResult,
+  UninstallResult
+} from './install.js'
 export type { HubContext } from './ports.js'
 export type { DecideAction } from './decide.js'
 export type {

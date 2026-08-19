@@ -18,6 +18,9 @@ import {
   saveSession
 } from '../core/index.js'
 import type { DecideAction, HubContext, HubSession } from '../core/index.js'
+import { formatDoctorReport, formatSetupReport, formatUninstallReport, PRODUCT_ALIAS, PRODUCT_COMMAND } from '../core/install.js'
+import { runDaemon, stopDaemon } from './daemon.js'
+import { daemonStatus, doctorHub, setupHub, startDaemonDetached, uninstallHub } from './install.js'
 
 function print(value: unknown) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
@@ -30,7 +33,14 @@ function fail(message: string, code = 1): never {
 
 function usage(): string {
   return [
-    'ozdqp-hub <command>',
+    `${PRODUCT_COMMAND} <command>          (also: ${PRODUCT_ALIAS})`,
+    '',
+    'Install:',
+    '  setup [--dry-run] [--json] [--no-daemon] [--no-path] [--no-task] [--rebuild]',
+    '                                 One-click: env, sg on PATH, silent keep-alive, logon autostart',
+    '  uninstall [--json]             Remove sg, PATH entry, logon task, and the daemon',
+    '  doctor [--json]                Check Node/Git/Codex, sg, autostart, and API health',
+    '  daemon start|stop|status|run   Keep-alive supervisor for the local HTTP API',
     '',
     'Query:',
     '  status                         Hub inventory, inbox counts, linked game repo',
@@ -169,14 +179,74 @@ const argv = rawArgv.slice(1)
 const packageRoot = findHubRoot()
 const hub = createHub(process.env.HUB_ROOT || packageRoot)
 
-try {
+async function main() {
+  if (command === 'setup' || command === 'install') {
+    const flags = {
+      dryRun: takeSwitch(argv, '--dry-run'),
+      json: takeSwitch(argv, '--json'),
+      noDaemon: takeSwitch(argv, '--no-daemon'),
+      noPath: takeSwitch(argv, '--no-path'),
+      noTask: takeSwitch(argv, '--no-task'),
+      rebuild: takeSwitch(argv, '--rebuild')
+    }
+    const result = await setupHub(packageRoot, flags)
+    if (flags.json) print(result)
+    else process.stdout.write(`${formatSetupReport(result)}\n`)
+    if (!result.ok) process.exit(1)
+    return
+  }
+  if (command === 'uninstall') {
+    const json = takeSwitch(argv, '--json')
+    const result = await uninstallHub(packageRoot)
+    if (json) print(result)
+    else process.stdout.write(`${formatUninstallReport(result)}\n`)
+    if (!result.ok) process.exit(1)
+    return
+  }
+  if (command === 'doctor') {
+    const json = takeSwitch(argv, '--json')
+    const report = await doctorHub(packageRoot)
+    if (json) print(report)
+    else process.stdout.write(`${formatDoctorReport(report)}\n`)
+    if (!report.ok) process.exit(1)
+    return
+  }
+  if (command === 'daemon') {
+    const sub = argv[0] || 'status'
+    if (sub === 'run') {
+      await runDaemon({ hubRoot: packageRoot })
+      return
+    }
+    if (sub === 'start') {
+      const started = await startDaemonDetached(packageRoot)
+      print({ action: 'daemon-start', ...started })
+      if (!started.ok) process.exit(1)
+      return
+    }
+    if (sub === 'stop') {
+      const stopped = stopDaemon(packageRoot)
+      print({ ok: true, action: 'daemon-stop', stopped })
+      return
+    }
+    if (sub === 'status') {
+      print(await daemonStatus(packageRoot))
+      return
+    }
+    fail(`unknown daemon command: ${sub}\n${usage()}`)
+  }
   if (command === 'status') {
     print(getStatus(hub))
-  } else if (command === 'list-worktrees') {
+    return
+  }
+  if (command === 'list-worktrees') {
     print(listWorktrees(hub))
-  } else if (command === 'list-skills') {
+    return
+  }
+  if (command === 'list-skills') {
     print(listSkills(hub, getStatus(hub).gameRepo))
-  } else if (command === 'repair-links') {
+    return
+  }
+  if (command === 'repair-links') {
     const worktree = takeFlag(argv, '--worktree')
     if (!worktree) fail('repair-links requires --worktree')
     const plan = repairPlan(hub, worktree)
@@ -187,7 +257,9 @@ try {
       if (ran.status !== 0) fail(ran.stderr || ran.stdout || 'repair-links failed')
       print({ ok: true, ...plan, repaired: true, output: ran.stdout })
     }
-  } else if (command === 'ingest') {
+    return
+  }
+  if (command === 'ingest') {
     const gameRepo = takeFlag(argv, '--game-repo') || hub.git.configGet(hub.hubRoot, 'ozdqp.gameRepo')
     const dispatch = takeSwitch(argv, '--dispatch')
     const payload = readStdin()
@@ -202,14 +274,18 @@ try {
       if (ran.status !== 0) fail(ran.stderr || ran.stdout || 'ingest failed')
       print({ ok: true, action: 'ingest', gameRepo, dispatched: dispatch, output: ran.stdout })
     }
-  } else if (command === 'decide') {
+    return
+  }
+  if (command === 'decide') {
     const id = takeFlag(argv, '--id')
     const action = takeFlag(argv, '--action') as DecideAction | undefined
     const note = takeFlag(argv, '--note')
     const mergeTarget = takeFlag(argv, '--merge-target')
     if (!id || !action) fail('decide requires --id and --action')
     print(decide(hub, { id, action, note, mergeTarget }))
-  } else if (command === 'attach' || command === 'detach' || command === 'edit' || command === 'chat') {
+    return
+  }
+  if (command === 'attach' || command === 'detach' || command === 'edit' || command === 'chat') {
     const worktree = takeFlag(argv, '--worktree')
     const skillPath = takeFlag(argv, '--path')
     const intent = takeFlag(argv, '--intent')
@@ -230,7 +306,9 @@ try {
       }
     }
     print({ ok: true, action: command, session, applied: null })
-  } else if (command === 'resume') {
+    return
+  }
+  if (command === 'resume') {
     const id = takeFlag(argv, '--id')
     const message = takeFlag(argv, '--message')
     const noSpawn = takeSwitch(argv, '--no-spawn')
@@ -243,9 +321,11 @@ try {
       }))
     }
     print({ ok: true, action: 'resume', session })
-  } else {
-    fail(`unknown command: ${command}\n${usage()}`)
+    return
   }
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error))
+  fail(`unknown command: ${command}\n${usage()}`)
 }
+
+main().catch((error) => {
+  fail(error instanceof Error ? error.message : String(error))
+})

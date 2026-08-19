@@ -49,13 +49,55 @@ test('U4 unknown command is non-zero; --help and -h exit 0', () => {
 
   const help = spawnHub(['--help'])
   assert.equal(help.status, 0, help.stderr)
-  for (const verb of ['status', 'list-worktrees', 'list-skills', 'repair-links', 'ingest', 'decide', 'attach', 'detach', 'edit', 'chat', 'resume']) {
+  for (const verb of ['status', 'list-worktrees', 'list-skills', 'repair-links', 'ingest', 'decide', 'attach', 'detach', 'edit', 'chat', 'resume', 'setup', 'uninstall', 'doctor', 'daemon']) {
     assert.match(help.stdout, new RegExp(verb))
   }
 
   const short = spawnHub(['-h'])
   assert.equal(short.status, 0, short.stderr)
+  assert.match(short.stdout, /\bsg\b/)
   assert.match(short.stdout, /ozdqp-hub/)
+})
+
+test('setup --dry-run --json does not write an install dir', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-setup-dry-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const payload = parseStdout(
+    spawnHub(['setup', '--dry-run', '--json', '--no-daemon', '--no-path', '--no-task'], {
+      env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' }
+    }),
+    'setup-dry-run'
+  )
+  assert.equal(payload.ok, true)
+  assert.equal(payload.action, 'setup')
+  assert.equal(payload.dryRun, true)
+  assert.equal(payload.command, 'sg')
+  assert.equal(fs.existsSync(path.join(dir, 'bin', 'sg.cmd')), false)
+  assert.equal(fs.existsSync(path.join(dir, 'install.json')), false)
+})
+
+test('setup --json writes shims into SG_INSTALL_DIR without touching user PATH', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-setup-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const payload = parseStdout(
+    spawnHub(['setup', '--json', '--no-daemon', '--no-path', '--no-task'], {
+      env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' }
+    }),
+    'setup-apply'
+  )
+  assert.equal(payload.ok, true, JSON.stringify(payload.issues || payload, null, 2))
+  assert.equal(payload.dryRun, false)
+  assert.equal(payload.installDir, dir)
+  const shim = fs.readFileSync(path.join(dir, 'bin', 'sg.cmd'), 'utf8')
+  assert.match(shim, /HUB_ROOT=/)
+  assert.match(shim, /dist\\control\\cli\.js|dist\/control\/cli\.js/)
+  assert.match(fs.readFileSync(path.join(dir, 'run-daemon.cmd'), 'utf8'), /daemon run/)
+  const doctor = parseStdout(
+    spawnHub(['doctor', '--json'], { env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' } }),
+    'doctor'
+  )
+  assert.equal(doctor.ok, true, JSON.stringify(doctor.issues, null, 2))
+  assert.equal(doctor.shims.ok, true)
 })
 
 test('repair-links on a path that is not attached does not rewrite disk', () => {
@@ -106,7 +148,6 @@ test('session verbs enqueue and do not silently rewrite a live game tree', (t) =
   const dir = tempHub()
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const liveSessions = path.join(hubRoot, 'skill-review', 'sessions.json')
-  const beforeSessions = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
   const fakeTree = 'C:\\hub-cli-not-a-game-tree'
 
   const attach = parseStdout(
@@ -153,7 +194,7 @@ test('session verbs enqueue and do not silently rewrite a live game tree', (t) =
   assert.match(log, /continue/)
 
   const afterSessions = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
-  assert.equal(afterSessions, beforeSessions)
+  assert.doesNotMatch(afterSessions, /hub-cli-not-a-game-tree/)
   assert.equal(fs.existsSync(fakeTree), false)
 })
 

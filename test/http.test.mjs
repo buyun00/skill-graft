@@ -51,6 +51,7 @@ test('HTTP query handlers invoke the shipped CLI and do not import core commands
   assert.doesNotMatch(source, /\bgetStatus\b/)
   assert.doesNotMatch(source, /\blistWorktrees\b/)
   assert.match(source, /runHub\(\['status'\]\)/)
+  assert.match(source, /runHub\(\['daemon', 'status'\]\)/)
   assert.match(source, /runHub\(\['list-worktrees'\]\)/)
   assert.match(source, /\['decide'/)
   assert.match(source, /sessionFromHub\('attach'/)

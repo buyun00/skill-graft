@@ -4,10 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "bin": {
+    "sg": "dist/control/cli.js",
     "ozdqp-hub": "dist/control/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "setup": "npm run build && node dist/control/cli.js setup",
     "hub": "node dist/control/cli.js",
     "test": "npm run build && node --test test/*.test.mjs",
     "test:adapter": "npm run build && node --test test/adapter.test.mjs",

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const hubRoot = path.resolve(__dirname, '..')
 const cliPath = path.join(hubRoot, 'dist', 'control', 'cli.js')
-const port = 18765
+const port = Number(process.env.HUB_API_PORT || 18765)
 
 function runHub(args, options = {}) {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
@@ -103,6 +103,10 @@ function sessionFromHub(kind, body) {
 export async function handleApi(req, url, body) {
   if (url.pathname === '/api/state') {
     return runHub(['status'])
+  }
+
+  if (url.pathname === '/api/daemon') {
+    return runHub(['daemon', 'status'])
   }
 
   if (url.pathname === '/api/skill') {
