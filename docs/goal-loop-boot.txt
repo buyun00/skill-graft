@@ -1,0 +1,3 @@
+/goal 完成 E:\ozdqp-skill-hub\docs\开发清单.md 第1至第9项。每一项：先 git fetch 并 git pull --rebase origin master（失败再 merge，仍失败就停），只实现当前指针那一项，跑 npm test 和该步真实冒烟，勾选清单并下移指针，提交且 push 到 origin/master，再做下一项。第0项不要重做，第10项不要做。硬规则和循环步骤以 docs/goal-loop-prompt.md 为准。不要进入 plan 模式。独立验收必须能看到对应提交、测试绿、清单勾选一致。
+
+立刻读取 docs/开发清单.md 和 docs/goal-loop-prompt.md，从文首「当前指针」开始执行，不要等人确认。
