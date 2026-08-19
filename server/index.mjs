@@ -5,8 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const panelRoot = path.resolve(__dirname, '..')
-const hubRoot = path.resolve(panelRoot, '..')
+const hubRoot = path.resolve(__dirname, '..')
 const cliPath = path.join(hubRoot, 'dist', 'control', 'cli.js')
 const port = 18765
 
@@ -199,29 +198,6 @@ function send(res, status, payload, contentType = 'application/json; charset=utf
   res.end(payload)
 }
 
-function serveStatic(urlPath, res) {
-  const dist = path.join(panelRoot, 'dist')
-  let rel = urlPath === '/' ? '/index.html' : urlPath
-  const abs = path.normalize(path.join(dist, rel))
-  if (!abs.startsWith(dist)) {
-    send(res, 403, 'forbidden', 'text/plain')
-    return
-  }
-  if (!fs.existsSync(abs) || fs.statSync(abs).isDirectory()) {
-    send(res, 200, fs.readFileSync(path.join(dist, 'index.html')), 'text/html; charset=utf-8')
-    return
-  }
-  const ext = path.extname(abs)
-  const types = {
-    '.html': 'text/html; charset=utf-8',
-    '.js': 'text/javascript; charset=utf-8',
-    '.css': 'text/css; charset=utf-8',
-    '.svg': 'image/svg+xml',
-    '.json': 'application/json; charset=utf-8'
-  }
-  send(res, 200, fs.readFileSync(abs), types[ext] || 'application/octet-stream')
-}
-
 function findSession(id) {
   const session = (loadAndHydrateSessions().sessions || []).find((item) => item.id === id) || null
   return session ? hydrateSession(session) : null
@@ -304,7 +280,7 @@ export const onRequest = async (req, res) => {
       send(res, 200, JSON.stringify(data))
       return
     }
-    serveStatic(url.pathname, res)
+    send(res, 404, JSON.stringify({ error: 'not found' }))
   } catch (error) {
     send(res, error.status || 500, JSON.stringify({ error: error.message || String(error) }))
   }
@@ -316,12 +292,12 @@ function isMainModule() {
   return path.resolve(fileURLToPath(import.meta.url)).toLowerCase() === path.resolve(entry).toLowerCase()
 }
 
-function startPanelListeners() {
+function startApiListeners() {
   for (const bindHost of ['127.0.0.1', '::1']) {
     const server = http.createServer(onRequest)
     server.listen(port, bindHost, () => {
       const label = bindHost === '::1' ? 'localhost' : bindHost
-      console.log(`skill hub panel http://${label}:${port}/`)
+      console.log(`skill-graft api http://${label}:${port}/`)
     })
     server.on('error', (error) => {
       if (bindHost === '::1' && error && error.code === 'EADDRINUSE') return
@@ -329,10 +305,6 @@ function startPanelListeners() {
       if (bindHost === '127.0.0.1') process.exit(1)
     })
   }
-
-  setTimeout(() => {
-    try { collectWorktreesCached() } catch (error) { console.error(error) }
-  }, 300)
 }
 
-if (isMainModule()) startPanelListeners()
+if (isMainModule()) startApiListeners()

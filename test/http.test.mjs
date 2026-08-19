@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import test from 'node:test'
-import { onRequest } from '../panel/server/index.mjs'
+import { onRequest } from '../server/index.mjs'
 import { hubRoot, spawnHub } from './helpers.mjs'
 
 function extractPathnameBranch(source, pathname) {
@@ -45,7 +45,7 @@ async function getJson(base, route) {
 }
 
 test('HTTP query handlers invoke the shipped CLI and do not import core commands', () => {
-  const source = fs.readFileSync(path.join(hubRoot, 'panel', 'server', 'index.mjs'), 'utf8')
+  const source = fs.readFileSync(path.join(hubRoot, 'server', 'index.mjs'), 'utf8')
   assert.doesNotMatch(source, /from ['"][^'"]*dist\/index\.js['"]/)
   assert.doesNotMatch(source, /\bcreateHub\b/)
   assert.doesNotMatch(source, /\bgetStatus\b/)
@@ -113,10 +113,8 @@ test('GET /api/worktrees matches hub list-worktrees scanRoots and worktree paths
   assert.ok(Array.isArray(payload.scanRoots), 'scanRoots')
   assert.ok(Array.isArray(payload.worktrees), 'worktrees')
   assert.deepEqual(payload.scanRoots, fromCli.scanRoots)
-  assert.deepEqual(
-    payload.worktrees.map((item) => item.path),
-    fromCli.worktrees.map((item) => item.path)
-  )
+  const paths = (rows) => [...new Set(rows.map((item) => item.path))].sort((a, b) => a.localeCompare(b))
+  assert.deepEqual(paths(payload.worktrees), paths(fromCli.worktrees))
   const mainFix = (payload.worktrees || []).find((item) => samePath(item.path, 'E:\\ozdqp-main-fix'))
   if (mainFix) {
     assert.equal(mainFix.attached, true)

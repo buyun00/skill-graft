@@ -32,12 +32,12 @@ skill-graft 把「本地工作流的权威源」放到**另一个仓库**里。�
 | 官方更新入队 | hook → `hub ingest` | `fetch`/`pull` 只吞进 inbox，不在功能树里做语义归类 |
 | 拍板 inbox | `hub decide --id … --action adopt\|merge\|reject` | 采用 / 并入 / 拒绝 |
 | 改 Skill / 闲聊 / 剥离 | `hub edit` / `chat` / `detach` / `resume` | 同样入队 Codex 会话 |
-| 面板 | http://127.0.0.1:18765/ | 展示与拍板；HTTP 只转发 CLI |
+| HTTP | `npm run api` → :18765 | 查询与会话接口，只转发 CLI；网页已撤，以后重做 |
 
 控制面漏斗：
 
 ```text
-人 / Vue / Git hook
+人 / HTTP / Git hook
         │
         ▼
    ozdqp-hub（CLI）     ← 对外唯一命令面
@@ -124,13 +124,13 @@ npm run hub -- decide --id <id> --action merge --merge-target skills/ozdqp-devel
 npm run hub -- decide --id <id> --action reject
 ```
 
-### 面板
+### HTTP（无网页）
 
 ```text
-overlay/start-panel.ps1
+npm run api
 ```
 
-浏览器打开 http://127.0.0.1:18765/ 。启动脚本会先编译过期的 `dist/`。页面上的挂接/拍板同样走 CLI。
+`GET http://127.0.0.1:18765/api/health`、`/api/state`、`/api/worktrees`。管理页已删除，以后重做。
 
 ### 测试
 
@@ -164,7 +164,7 @@ npm run test:http     # HTTP 转发与字段一致
 4. **detach / edit 与 attach 同级。** 剥离、改某一条 Skill 都是后台对话，验收字段与查询 JSON 对齐。
 5. **inbox 更完整。** 建议（adopt / merge / reject）由分析会话填写；面板只展示 CLI 给出的形状。
 6. **多机 / 小团队。** 运行时在 GitHub，语料走另一条私有同步（或以后的团队服务），不要把别人的项目细节推进公开仓。
-7. **面板继续做薄。** 新能力先加 CLI 动词，HTTP 只转发；不要在 Vue 或 `panel/server` 里再算一遍「算不算挂上」。
+7. **新管理页。** 只消费 CLI/HTTP JSON，不再在前端算「算不算挂上」。
 
 更细的层边界见 `docs/系统设计与理念.md` 第 9 节，本阶段查询规格见 `docs/三层本阶段规格.md`。
 

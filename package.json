@@ -14,7 +14,7 @@
     "test:core": "npm run build && node --test test/core.test.mjs",
     "test:cli": "npm run build && node --test test/cli.test.mjs",
     "test:http": "npm run build && node --test test/http.test.mjs",
-    "test:attach": "npm run build && node panel/test/assert-main-fix-attached.mjs"
+    "api": "node server/index.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
