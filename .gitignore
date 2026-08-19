@@ -4,6 +4,8 @@
 
 node_modules/
 dist/
+panel/.next/
+panel/out/
 
 skill-review/hub-codex.lock
 skill-review/panel.pid

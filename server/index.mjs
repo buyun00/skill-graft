@@ -206,17 +206,64 @@ const webRoot = path.join(hubRoot, 'web')
 const WEB_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8'
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.map': 'application/json',
+  '.xml': 'application/xml'
+}
+
+function isInsideWebRoot(file) {
+  const root = path.resolve(webRoot).toLowerCase()
+  const resolved = path.resolve(file).toLowerCase()
+  return resolved === root || resolved.startsWith(root + path.sep)
+}
+
+function sendWebFile(res, file) {
+  const ext = path.extname(file).toLowerCase()
+  send(res, 200, fs.readFileSync(file), WEB_TYPES[ext] || 'application/octet-stream')
+}
+
+function decodePathname(pathname) {
+  try {
+    return decodeURIComponent(pathname)
+  } catch {
+    return pathname
+  }
 }
 
 function serveWeb(url, res) {
-  let rel = url.pathname === '/' ? '/index.html' : url.pathname
-  if (!rel.startsWith('/') || rel.includes('..')) return false
-  const file = path.join(webRoot, rel.slice(1))
-  if (!file.startsWith(webRoot) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return false
-  const ext = path.extname(file)
-  send(res, 200, fs.readFileSync(file), WEB_TYPES[ext] || 'application/octet-stream')
-  return true
+  const pathname = decodePathname(url.pathname || '/')
+  let rel = pathname === '/' ? '/index.html' : pathname
+  if (!rel.startsWith('/')) return false
+  if (rel.split(/[/\\]/).some((part) => part === '..')) return false
+  const candidates = [rel]
+  if (!path.extname(rel)) {
+    const trimmed = rel.replace(/\/$/, '') || '/index'
+    candidates.push(`${trimmed}.html`)
+    candidates.push(`${trimmed}/index.html`)
+    const parts = trimmed.split('/').filter(Boolean)
+    if (parts.length >= 2) {
+      candidates.push(`/${parts[0]}.html`)
+      candidates.push(`/${parts[0]}/index.html`)
+    }
+  }
+  for (const candidate of candidates) {
+    const file = path.join(webRoot, candidate.replace(/^\/+/, ''))
+    if (!isInsideWebRoot(file) || !fs.existsSync(file) || !fs.statSync(file).isFile()) continue
+    sendWebFile(res, file)
+    return true
+  }
+  return false
 }
 
 function findSession(id) {

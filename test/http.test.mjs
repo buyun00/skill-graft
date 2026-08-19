@@ -73,8 +73,24 @@ test('HTTP query handlers invoke the shipped CLI and do not import core commands
   assert.doesNotMatch(worktrees, /readdir/)
 })
 
+function walkWebText(dir, acc = []) {
+  if (!fs.existsSync(dir)) return acc
+  for (const name of fs.readdirSync(dir)) {
+    if (name === 'node_modules' || name === '.next' || name === 'out') continue
+    const full = path.join(dir, name)
+    const st = fs.statSync(full)
+    if (st.isDirectory()) walkWebText(full, acc)
+    else if (/\.(html|js|css|mjs|txt)$/.test(name)) acc.push(fs.readFileSync(full, 'utf8'))
+  }
+  return acc
+}
+
 test('management page is static and does not import core or embed attach policy', () => {
-  const page = fs.readFileSync(path.join(hubRoot, 'web', 'index.html'), 'utf8')
+  const page = [
+    ...walkWebText(path.join(hubRoot, 'web')),
+    ...walkWebText(path.join(hubRoot, 'panel', 'src')),
+    ...walkWebText(path.join(hubRoot, 'panel', 'lib'))
+  ].join('\n')
   assert.match(page, /\/api\/state/)
   assert.match(page, /\/api\/worktrees/)
   assert.match(page, /\/api\/decide/)
@@ -94,14 +110,41 @@ test('GET / serves the management page and still only execs CLI for JSON', { tim
   const html = await res.text()
   assert.equal(res.ok, true, html)
   assert.match(res.headers.get('content-type') || '', /text\/html/)
-  assert.match(html, /skill-graft/)
-  assert.match(html, /工作树/)
+  assert.match(html, /总览/)
+  assert.match(html, /Skill Hub|技能库|工作区/)
   const worktrees = await getJson(base, '/api/worktrees')
   const cli = spawnHub(['list-worktrees'])
   assert.equal(cli.status, 0, cli.stderr)
   const fromCli = JSON.parse(cli.stdout)
   const paths = (rows) => [...new Set(rows.map((item) => item.path))].sort((a, b) => a.localeCompare(b))
   assert.deepEqual(paths(worktrees.worktrees), paths(fromCli.worktrees))
+})
+
+test('Next catch-all assets with [[...slug]] are served', { timeout: 180000 }, async (t) => {
+  const chunkDir = path.join(hubRoot, 'web', '_next', 'static', 'chunks', 'app', '[[...slug]]')
+  assert.equal(fs.existsSync(chunkDir), true, 'exported [[...slug]] chunk dir')
+  const pageJs = fs.readdirSync(chunkDir).find((name) => name.startsWith('page-') && name.endsWith('.js'))
+  assert.ok(pageJs, 'page chunk')
+  const { server, base } = await listenQueryServer()
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const route = `/_next/static/chunks/app/${encodeURIComponent('[[...slug]]')}/${pageJs}`
+  const res = await fetch(`${base}${route}`)
+  const body = await res.text()
+  assert.equal(res.ok, true, `${route} ${res.status} ${body.slice(0, 120)}`)
+  assert.match(res.headers.get('content-type') || '', /javascript/)
+  assert.ok(body.length > 20, 'js chunk empty')
+})
+
+test('static hub routes are served for sidebar paths', { timeout: 180000 }, async (t) => {
+  const { server, base } = await listenQueryServer()
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  for (const route of ['/', '/skills', '/updates', '/workspaces', '/store', '/codex', '/settings', '/updates/demo-id']) {
+    const res = await fetch(`${base}${route}`)
+    const html = await res.text()
+    assert.equal(res.ok, true, `${route} ${res.status} ${html.slice(0, 200)}`)
+    assert.match(res.headers.get('content-type') || '', /text\/html/)
+    assert.match(html, /总览/)
+  }
 })
 
 test('hooks reach core only through the shipped CLI', () => {
