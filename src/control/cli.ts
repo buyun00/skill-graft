@@ -17,7 +17,7 @@ import {
   parseIngestTransactions,
   presentSession,
   reapSessions,
-  repairPlan,
+  repairLinks,
   resumeSession,
   saveSession,
   sessionExitFile
@@ -61,7 +61,7 @@ function usage(): string {
     'Sessions (background Codex; default model gpt-5.6-luna at max effort):',
     '  attach --worktree <path> [--intent <text>] [--model <id>] [--effort <level>] [--no-spawn] [--wait]',
     '                                 Enqueue and spawn a detached Codex attach conversation.',
-    '                                 Codex runs Disable + attach-library. --no-spawn only records the session.',
+    '                                 Codex conversation does the first-time strip and link. --no-spawn only records the session.',
     '                                 --wait blocks until the conversation settles (default returns immediately).',
     '  detach --worktree <path> [--intent <text>] [--no-spawn] [--wait]',
     '  edit --path <rel> [--intent <text>] [--no-spawn] [--wait]',
@@ -285,14 +285,7 @@ async function main() {
   if (command === 'repair-links') {
     const worktree = takeFlag(argv, '--worktree')
     if (!worktree) fail('repair-links requires --worktree')
-    const plan = repairPlan(hub, worktree)
-    if (!plan.attached || plan.blocked) {
-      print({ ok: true, ...plan, repaired: false, reason: plan.blocked ? 'blocked' : 'not-attached' })
-    } else {
-      const ran = runPs1('attach-library.ps1', ['-TargetWorktree', plan.worktree])
-      if (ran.status !== 0) fail(ran.stderr || ran.stdout || 'repair-links failed')
-      print({ ok: true, ...plan, repaired: true, output: ran.stdout })
-    }
+    print(repairLinks(hub, worktree))
     return
   }
   if (command === 'ingest') {

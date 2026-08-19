@@ -34,11 +34,8 @@ test('breaking the probe override makes CLI repair-links fail', (t) => {
   }
   const previousGameRepo = spawnSync('git', ['-C', hubRoot, 'config', '--get', 'ozdqp.gameRepo'], { encoding: 'utf8' }).stdout.trim()
   t.after(() => {
-    spawnSync('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-      path.join(hubRoot, 'overlay', 'attach-library.ps1'),
-      '-TargetWorktree', probe, '-PreferLibrary'
-    ], { encoding: 'utf8', windowsHide: true })
+    fs.rmSync(override, { force: true })
+    spawnHub(['repair-links', '--worktree', probe])
     if (previousGameRepo) {
       spawnSync('git', ['-C', hubRoot, 'config', 'ozdqp.gameRepo', previousGameRepo], { encoding: 'utf8' })
     }

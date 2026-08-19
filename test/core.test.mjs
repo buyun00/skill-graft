@@ -17,6 +17,7 @@ import {
   markSessionSpawned,
   parseWorktreePorcelain,
   reapSessions,
+  repairLinks,
   RESIDENT_SKILLS,
   sessionExitFile
 } from '../dist/index.js'
@@ -301,6 +302,70 @@ test('finalizeSession writes waiting on exit 0 without treating a live pid as se
   assert.equal(done.status, 'waiting')
   assert.equal(done.exitCode, 0)
   assert.match(done.summary || '', /detached/)
+})
+
+function attachedRepairHub(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-repair-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const hubDir = path.join(dir, 'hub')
+  const tree = path.join(dir, 'tree')
+  for (const name of RESIDENT_SKILLS) {
+    fs.mkdirSync(path.join(hubDir, 'skills', name), { recursive: true })
+    fs.writeFileSync(path.join(hubDir, 'skills', name, 'SKILL.md'), `${name}\n`)
+  }
+  fs.mkdirSync(path.join(hubDir, 'overlay'), { recursive: true })
+  fs.writeFileSync(path.join(hubDir, 'AGENTS.override.md'), 'override-bytes\n')
+  fs.writeFileSync(path.join(hubDir, 'overlay', 'attached-worktrees.txt'), `${tree}\n`)
+  fs.writeFileSync(path.join(hubDir, 'overlay', 'do-not-auto-attach.txt'), '')
+  fs.mkdirSync(path.join(tree, '.agents', 'skills'), { recursive: true })
+  fs.mkdirSync(path.join(tree, '.codex'), { recursive: true })
+  const ctx = createHub(hubDir)
+  const first = repairLinks(ctx, tree)
+  assert.equal(first.ok, true)
+  assert.equal(first.repaired, true)
+  return { dir, hubDir, tree, ctx }
+}
+
+test('repairLinks does not rewrite an unattached fixture tree', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-repair-unattached-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const hubDir = path.join(dir, 'hub')
+  const tree = path.join(dir, 'tree')
+  fs.mkdirSync(path.join(hubDir, 'overlay'), { recursive: true })
+  fs.writeFileSync(path.join(hubDir, 'overlay', 'attached-worktrees.txt'), '')
+  fs.writeFileSync(path.join(hubDir, 'overlay', 'do-not-auto-attach.txt'), '')
+  fs.mkdirSync(tree, { recursive: true })
+  const sentinel = path.join(tree, 'keep.txt')
+  fs.writeFileSync(sentinel, 'untouched\n')
+  const result = repairLinks(createHub(hubDir), tree)
+  assert.equal(result.attached, false)
+  assert.equal(result.repaired, false)
+  assert.equal(result.reason, 'not-attached')
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'untouched\n')
+  assert.equal(fs.existsSync(path.join(tree, '.agents')), false)
+})
+
+test('repairLinks restores a broken resident skill junction on an attached fixture', (t) => {
+  const { ctx, tree, hubDir } = attachedRepairHub(t)
+  const name = RESIDENT_SKILLS[0]
+  const linkPath = path.join(tree, '.agents', 'skills', name)
+  const hubPath = path.join(hubDir, 'skills', name)
+  ctx.link.unlink(linkPath)
+  assert.equal(ctx.link.isLinked(linkPath, hubPath), false)
+  const result = repairLinks(ctx, tree)
+  assert.equal(result.ok, true)
+  assert.equal(result.repaired, true)
+  assert.equal(ctx.link.isLinked(linkPath, hubPath), true)
+  assert.equal(fs.readFileSync(path.join(linkPath, 'SKILL.md'), 'utf8'), `${name}\n`)
+})
+
+test('repairLinks fails when fixture override bytes differ and does not overwrite them', (t) => {
+  const { ctx, tree } = attachedRepairHub(t)
+  const override = path.join(tree, 'AGENTS.override.md')
+  fs.rmSync(override, { force: true })
+  fs.writeFileSync(override, 'DIRTY-OVERRIDE\n')
+  assert.throws(() => repairLinks(ctx, tree), /differs from hub/)
+  assert.equal(fs.readFileSync(override, 'utf8'), 'DIRTY-OVERRIDE\n')
 })
 
 test('core source does not import http, powershell, Win32, or APPDATA', () => {

@@ -18,6 +18,8 @@ export {
   markSessionSpawned,
   mergeUserPath,
   parseWorktreePorcelain,
+  repairLinks,
+  repairPlan,
   pathHasDir,
   presentSession,
   PRODUCT_ALIAS,

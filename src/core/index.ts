@@ -8,7 +8,7 @@ export {
   listWorktrees,
   parseWorktreePorcelain
 } from './worktrees.js'
-export { repairPlan } from './repair.js'
+export { repairLinks, repairPlan } from './repair.js'
 export { emptyIngestResult, parseIngestTransactions } from './ingest.js'
 export { decide } from './decide.js'
 export {
