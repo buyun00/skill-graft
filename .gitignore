@@ -1,3 +1,7 @@
+# Local skill corpus — project-specific, never publish
+/skills/*
+!/skills/README.md
+
 node_modules/
 dist/
 panel/node_modules/
