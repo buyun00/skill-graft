@@ -202,6 +202,23 @@ function send(res, status, payload, contentType = 'application/json; charset=utf
   res.end(payload)
 }
 
+const webRoot = path.join(hubRoot, 'web')
+const WEB_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8'
+}
+
+function serveWeb(url, res) {
+  let rel = url.pathname === '/' ? '/index.html' : url.pathname
+  if (!rel.startsWith('/') || rel.includes('..')) return false
+  const file = path.join(webRoot, rel.slice(1))
+  if (!file.startsWith(webRoot) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return false
+  const ext = path.extname(file)
+  send(res, 200, fs.readFileSync(file), WEB_TYPES[ext] || 'application/octet-stream')
+  return true
+}
+
 function findSession(id) {
   const session = (loadAndHydrateSessions().sessions || []).find((item) => item.id === id) || null
   return session ? hydrateSession(session) : null
@@ -270,6 +287,9 @@ export const onRequest = async (req, res) => {
         return
       }
       streamSession(id, req, res)
+      return
+    }
+    if (!url.pathname.startsWith('/api/') && serveWeb(url, res)) {
       return
     }
     if (url.pathname.startsWith('/api/')) {

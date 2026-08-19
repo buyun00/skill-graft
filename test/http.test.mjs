@@ -73,6 +73,37 @@ test('HTTP query handlers invoke the shipped CLI and do not import core commands
   assert.doesNotMatch(worktrees, /readdir/)
 })
 
+test('management page is static and does not import core or embed attach policy', () => {
+  const page = fs.readFileSync(path.join(hubRoot, 'web', 'index.html'), 'utf8')
+  assert.match(page, /\/api\/state/)
+  assert.match(page, /\/api\/worktrees/)
+  assert.match(page, /\/api\/decide/)
+  assert.match(page, /EventSource/)
+  assert.match(page, /\/api\/codex\/session\/stream/)
+  assert.doesNotMatch(page, /src\/core/)
+  assert.doesNotMatch(page, /preferLibrary/)
+  assert.doesNotMatch(page, /inode/)
+  assert.doesNotMatch(page, /认仓/)
+  assert.doesNotMatch(page, /createHub/)
+})
+
+test('GET / serves the management page and still only execs CLI for JSON', { timeout: 180000 }, async (t) => {
+  const { server, base } = await listenQueryServer()
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const res = await fetch(`${base}/`)
+  const html = await res.text()
+  assert.equal(res.ok, true, html)
+  assert.match(res.headers.get('content-type') || '', /text\/html/)
+  assert.match(html, /skill-graft/)
+  assert.match(html, /工作树/)
+  const worktrees = await getJson(base, '/api/worktrees')
+  const cli = spawnHub(['list-worktrees'])
+  assert.equal(cli.status, 0, cli.stderr)
+  const fromCli = JSON.parse(cli.stdout)
+  const paths = (rows) => [...new Set(rows.map((item) => item.path))].sort((a, b) => a.localeCompare(b))
+  assert.deepEqual(paths(worktrees.worktrees), paths(fromCli.worktrees))
+})
+
 test('hooks reach core only through the shipped CLI', () => {
   const post = fs.readFileSync(path.join(hubRoot, 'overlay', 'hooks', 'post-checkout'), 'utf8')
   const ingest = fs.readFileSync(path.join(hubRoot, 'overlay', 'hooks', 'reference-transaction'), 'utf8')

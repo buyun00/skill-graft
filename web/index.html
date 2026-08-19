@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>skill-graft</title>
+  <style>
+    :root { color-scheme: dark; --bg:#111; --card:#1c1c1c; --fg:#eee; --muted:#9aa; --acc:#7dd; --bad:#f88; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+    header { padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border-bottom: 1px solid #333; }
+    header h1 { font-size: 18px; margin: 0 12px 0 0; }
+    nav { display: flex; flex-wrap: wrap; gap: 6px; }
+    nav a { color: var(--muted); text-decoration: none; padding: 6px 10px; border-radius: 8px; }
+    nav a.active { background: var(--card); color: var(--fg); }
+    main { padding: 16px; max-width: 1100px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+    .card { background: var(--card); border-radius: 12px; padding: 14px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #333; word-break: break-all; }
+    button { background: #333; color: var(--fg); border: 0; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+    button.bad { background: #522; }
+    pre { background: #000; padding: 12px; border-radius: 8px; overflow: auto; max-height: 50vh; white-space: pre-wrap; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+    input, select { background: #222; color: var(--fg); border: 1px solid #444; border-radius: 6px; padding: 6px; }
+    @media (max-width: 640px) {
+      main { padding: 10px; }
+      table, thead, tbody, th, td, tr { display: block; }
+      th { display: none; }
+      td { border: 0; padding: 4px 0; }
+      tr { border-bottom: 1px solid #333; margin-bottom: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>skill-graft</h1>
+    <nav>
+      <a href="#overview" data-page="overview">总览</a>
+      <a href="#worktrees" data-page="worktrees">工作树</a>
+      <a href="#inbox" data-page="inbox">inbox</a>
+      <a href="#sessions" data-page="sessions">会话</a>
+    </nav>
+    <span id="health" class="muted"></span>
+  </header>
+  <main id="app">加载中…</main>
+  <script>
+    const api = (path, opts) => fetch(path, opts).then(async (res) => {
+      const text = await res.text()
+      if (!res.ok) throw new Error(text || res.status)
+      return text ? JSON.parse(text) : {}
+    })
+    const state = { page: 'overview', data: null, trees: null, sessions: null, sessionId: '', log: '' }
+    let source = null
+
+    function nav() {
+      document.querySelectorAll('nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === state.page))
+    }
+
+    function render() {
+      nav()
+      const el = document.getElementById('app')
+      if (state.page === 'overview') {
+        const s = state.data || {}
+        const c = s.counts || {}
+        el.innerHTML = `<div class="cards">
+          <div class="card"><div class="muted">常驻 Skill</div><strong>${c.resident ?? '—'}</strong></div>
+          <div class="card"><div class="muted">inbox queued</div><strong>${c.queued ?? '—'}</strong></div>
+          <div class="card"><div class="muted">proposed</div><strong>${c.proposed ?? '—'}</strong></div>
+          <div class="card"><div class="muted">进行中会话</div><strong>${(s.sessions || []).length}</strong></div>
+        </div>
+        <p class="muted">${s.hubRoot || ''}</p>`
+        return
+      }
+      if (state.page === 'worktrees') {
+        const rows = (state.trees && state.trees.worktrees) || []
+        el.innerHTML = `<table><thead><tr><th>名字</th><th>路径</th><th>挂接</th><th>override</th><th>官方树</th></tr></thead><tbody>${
+          rows.map((w) => `<tr><td>${esc(w.name)}</td><td>${esc(w.path)}</td><td>${w.attached}</td><td>${w.overrideLinked}</td><td>${w.officialPresent}</td></tr>`).join('')
+        }</tbody></table>`
+        return
+      }
+      if (state.page === 'inbox') {
+        const items = (state.data && state.data.items) || []
+        el.innerHTML = `<table><thead><tr><th>名字</th><th>状态</th><th>建议</th><th>拍板</th></tr></thead><tbody>${
+          items.map((item) => `<tr>
+            <td>${esc(item.name)}<div class="muted">${esc(item.id)}</div></td>
+            <td>${esc(item.status)}</td>
+            <td>${esc((item.suggestion && (item.suggestion.action + ' ' + (item.suggestion.reason || ''))) || '')}</td>
+            <td>
+              <button data-decide="${esc(item.id)}" data-action="reject" class="bad">拒绝</button>
+            </td>
+          </tr>`).join('')
+        }</tbody></table>`
+        el.querySelectorAll('[data-decide]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            await api('/api/decide', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: btn.dataset.decide, action: btn.dataset.action })
+            })
+            await load()
+          })
+        })
+        return
+      }
+      const sessions = (state.sessions && state.sessions.sessions) || (state.data && state.data.sessions) || []
+      el.innerHTML = `<div class="row">
+        <select id="sid">${sessions.map((s) => `<option value="${esc(s.id)}" ${s.id === state.sessionId ? 'selected' : ''}>${esc(s.kind)} ${esc(s.id)} ${esc(s.status)}</option>`).join('')}</select>
+      </div>
+      <pre id="log">${esc(state.log)}</pre>`
+      const sel = document.getElementById('sid')
+      if (sel) {
+        sel.addEventListener('change', () => openSession(sel.value))
+        if (!state.sessionId && sessions[0]) openSession(sessions[0].id)
+      }
+    }
+
+    function esc(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
+    }
+
+    function openSession(id) {
+      state.sessionId = id
+      if (source) source.close()
+      state.log = ''
+      source = new EventSource('/api/codex/session/stream?id=' + encodeURIComponent(id))
+      source.addEventListener('log', (ev) => {
+        try { state.log = JSON.parse(ev.data).text || '' } catch { state.log = ev.data }
+        const pre = document.getElementById('log')
+        if (pre) { pre.textContent = state.log; pre.scrollTop = pre.scrollHeight }
+      })
+      source.addEventListener('status', (ev) => {
+        state.log += '\n' + ev.data
+      })
+    }
+
+    async function load() {
+      try {
+        const health = await api('/api/health')
+        document.getElementById('health').textContent = health.ok ? 'API 绿' : 'API 异常'
+        state.data = await api('/api/state')
+        state.trees = await api('/api/worktrees')
+        try { state.sessions = await api('/api/codex/sessions') } catch { state.sessions = { sessions: state.data.sessions || [] } }
+        render()
+      } catch (error) {
+        document.getElementById('app').textContent = String(error.message || error)
+      }
+    }
+
+    function route() {
+      const page = (location.hash || '#overview').slice(1)
+      state.page = ['overview', 'worktrees', 'inbox', 'sessions'].includes(page) ? page : 'overview'
+      render()
+    }
+    window.addEventListener('hashchange', route)
+    route()
+    load()
+  </script>
+</body>
+</html>
