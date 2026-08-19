@@ -1,0 +1,106 @@
+{
+  "type": "codex-skill-attach-acceptance",
+  "intent": "background-luna-max",
+  "observedAt": "2026-08-19T19:42:37.9244559+08:00",
+  "hub": "E:\\ozdqp-skill-hub",
+  "workspace": "E:\\ozdqp-cli-attach-probe",
+  "scripts": {
+    "visibility": {
+      "command": "overlay/manage-skill-visibility.ps1 -Workspace E:\\ozdqp-cli-attach-probe -Mode Disable",
+      "exitCode": 0,
+      "reportedTrackedFiles": 571
+    },
+    "attach": {
+      "command": "overlay/attach-library.ps1 -TargetWorktree E:\\ozdqp-cli-attach-probe -ConfigureGit -PreferLibrary",
+      "exitCode": 0,
+      "promoteFromWorktree": false,
+      "force": false,
+      "result": "Attached E:\\ozdqp-cli-attach-probe -> E:\\ozdqp-skill-hub"
+    },
+    "attachInternalVisibilityDisable": {
+      "invoked": true,
+      "exitCode": 0,
+      "reportedTrackedFiles": 571
+    }
+  },
+  "target": {
+    "head": "c992cc988614aaa5f2811c28aa090496cb936d68",
+    "branch": null,
+    "detached": true,
+    "statusPorcelainBefore": [],
+    "statusPorcelainAfter": [],
+    "businessChangeCountBefore": 0,
+    "businessChangeCountAfter": 0,
+    "businessChangesPreserved": true,
+    "officialTrackedAssistantCount": 571,
+    "officialSkipWorktreeCount": 571,
+    "physicalLegacySkillDirectoryCount": 0,
+    "physicalLegacySkillFileCount": 0,
+    "officialTreesAbsent": {
+      ".claude": true,
+      ".codex/agents": true,
+      ".codex/scripts": true,
+      ".codex/skills": true,
+      ".codex/cursor-rules.env": true,
+      "skills": true
+    },
+    "residentAgentSkills": {
+      "ozdqp-development": {
+        "linkType": "Junction",
+        "pointsToHub": true,
+        "readable": true,
+        "targetFiles": 6,
+        "hubFiles": 6,
+        "hashDiff": 0
+      },
+      "ozdqp-ui-development": {
+        "linkType": "Junction",
+        "pointsToHub": true,
+        "readable": true,
+        "targetFiles": 17,
+        "hubFiles": 17,
+        "hashDiff": 0
+      },
+      "ozdqp-git-workflow": {
+        "linkType": "Junction",
+        "pointsToHub": true,
+        "readable": true,
+        "targetFiles": 6,
+        "hubFiles": 6,
+        "hashDiff": 0
+      }
+    },
+    "agentsOverride": {
+      "linkType": "SymbolicLink",
+      "pointsToHub": true,
+      "contentEqualHub": true,
+      "targetSha256": "3E5F997E4FD896EDFE453856B6568ED2ADB89958E5D99DDF838043A286A1368A",
+      "hubSha256": "3E5F997E4FD896EDFE453856B6568ED2ADB89958E5D99DDF838043A286A1368A"
+    },
+    "overlay": {
+      "linkType": "Junction",
+      "pointsToHub": true,
+      "linkTarget": "E:\\ozdqp-skill-hub\\overlay"
+    },
+    "hubReadableFromTarget": {
+      "agentsOverride": true,
+      "ozdqp-development": true,
+      "ozdqp-ui-development": true,
+      "ozdqp-git-workflow": true,
+      "overlay": true
+    }
+  },
+  "configured": {
+    "core.hooksPath": "E:\\ozdqp-skill-hub\\overlay\\hooks",
+    "ozdqp.localOverlaySource": "E:\\ozdqp-skill-hub",
+    "ozdqp.skillWatchWorkspace": "E:\\ozdqp-skill-hub",
+    "ozdqp.skillWatchEnabled": "true"
+  },
+  "registration": {
+    "file": "overlay/attached-worktrees.txt",
+    "targetEntryCount": 1,
+    "containsTarget": true,
+    "targetEntry": "E:\\ozdqp-cli-attach-probe"
+  },
+  "result": "accepted"
+}
