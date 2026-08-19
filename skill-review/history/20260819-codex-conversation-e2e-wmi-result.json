@@ -1,0 +1,43 @@
+{
+  "type": "codex-skill-attach",
+  "kind": "result",
+  "task": "codex-conversation-e2e-wmi",
+  "workspace": "E:\\ozdqp-cli-attach-probe",
+  "hub": "E:\\ozdqp-skill-hub",
+  "operations": {
+    "disable": "succeeded; 571 official tracked files marked skip-worktree",
+    "attach": "succeeded",
+    "arguments": ["-ConfigureGit", "-PreferLibrary"]
+  },
+  "verification": {
+    "legacyRootsAbsent": [
+      ".claude",
+      ".codex/agents",
+      ".codex/scripts",
+      ".codex/skills",
+      ".codex/cursor-rules.env"
+    ],
+    "agentsSkillsContents": [
+      "ozdqp-development -> E:\\ozdqp-skill-hub\\skills\\ozdqp-development",
+      "ozdqp-ui-development -> E:\\ozdqp-skill-hub\\skills\\ozdqp-ui-development",
+      "ozdqp-git-workflow -> E:\\ozdqp-skill-hub\\skills\\ozdqp-git-workflow"
+    ],
+    "skillSampleHashesMatchHub": true,
+    "agentsOverride": "hardlink to hub content; SHA256 matches",
+    "codexLocalOverlay": "junction -> E:\\ozdqp-skill-hub\\overlay",
+    "targetGitConfig": {
+      "core.hooksPath": "E:\\ozdqp-skill-hub\\overlay\\hooks",
+      "ozdqp.localOverlaySource": "E:\\ozdqp-skill-hub",
+      "ozdqp.skillWatchWorkspace": "E:\\ozdqp-skill-hub",
+      "ozdqp.skillWatchEnabled": "true"
+    },
+    "targetStatus": {
+      "allLines": 571,
+      "legacyAssistantLines": 571,
+      "businessLines": 0,
+      "businessChangesPreserved": true
+    },
+    "attachedWorktreesContainsTarget": true
+  },
+  "scope": "Only the center repository records are to be committed; no game repository commit and no business code change."
+}
