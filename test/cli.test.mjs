@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -119,6 +119,60 @@ test('ingest with empty stdin is a no-op', () => {
   assert.equal(payload.action, 'ingest')
   assert.equal(payload.created, 0)
   assert.deepEqual(payload.items, [])
+})
+
+function git(cwd, args) {
+  return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true })
+}
+
+function makeSkillRepo(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-game-ingest-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  git(dir, ['init'])
+  git(dir, ['config', 'user.email', 'hub@test'])
+  git(dir, ['config', 'user.name', 'hub'])
+  fs.mkdirSync(path.join(dir, '.agents', 'skills', 'smoke-ingest'), { recursive: true })
+  fs.writeFileSync(path.join(dir, '.agents', 'skills', 'smoke-ingest', 'SKILL.md'), '# v1\n')
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), 'agents v1\n')
+  git(dir, ['add', '.'])
+  git(dir, ['commit', '-m', 'base'])
+  const old = git(dir, ['rev-parse', 'HEAD']).stdout.trim()
+  fs.writeFileSync(path.join(dir, '.agents', 'skills', 'smoke-ingest', 'SKILL.md'), '# v2 official skill\n')
+  git(dir, ['add', '.'])
+  git(dir, ['commit', '-m', 'update skill'])
+  const next = git(dir, ['rev-parse', 'HEAD']).stdout.trim()
+  return { dir, old, next }
+}
+
+test('CLI ingest writes inbox under isolated HUB_ROOT and --dispatch only enqueues', (t) => {
+  const game = makeSkillRepo(t)
+  const hubDir = tempHub()
+  t.after(() => fs.rmSync(hubDir, { recursive: true, force: true }))
+  const liveInbox = path.join(hubRoot, 'skills', 'inbox')
+  const liveBefore = fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : ''
+  const liveSessions = path.join(hubRoot, 'skill-review', 'sessions.json')
+  const sessionsBefore = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
+  const payload = parseStdout(
+    spawnHub(['ingest', '--game-repo', game.dir, '--dispatch'], {
+      env: { HUB_ROOT: hubDir, HUB_SPAWN_CODEX: '0' },
+      input: `${game.old} ${game.next} refs/remotes/origin/smoke-ingest\n`
+    }),
+    'ingest-isolated'
+  )
+  assert.equal(payload.ok, true)
+  assert.ok(payload.created >= 1)
+  assert.equal(payload.dispatched, true)
+  assert.equal(payload.session.kind, 'chat')
+  assert.equal(payload.session.status, 'queued')
+  assert.equal(payload.applied, null)
+  const inboxSkill = path.join(hubDir, 'skills', 'inbox', 'smoke-ingest', 'SKILL.md')
+  assert.equal(fs.readFileSync(inboxSkill, 'utf8'), '# v2 official skill\n')
+  const state = JSON.parse(fs.readFileSync(path.join(hubDir, 'skill-review', 'state.json'), 'utf8'))
+  assert.equal(state.items.some((item) => item.name === 'smoke-ingest' && item.status === 'queued'), true)
+  const status = parseStdout(spawnHub(['status'], { env: { HUB_ROOT: hubDir } }), 'status-ingest')
+  assert.equal(status.counts.queued, state.items.filter((item) => item.status === 'queued').length)
+  assert.equal(fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : '', liveBefore)
+  assert.equal(fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : '', sessionsBefore)
 })
 
 test('decide reject updates a fixture hub and does not touch the live inbox', (t) => {
@@ -320,6 +374,7 @@ test('shipped CLI attach spawns Codex on gpt-5.6-luna at max, not overlay script
   assert.match(src, /spawnCodex/)
   assert.doesNotMatch(src, /manage-skill-visibility\.ps1/)
   assert.doesNotMatch(src, /attach-library\.ps1/)
+  assert.doesNotMatch(src, /analyze-remote-skill-update\.ps1/)
 })
 
 test('CLI repair-links restores a broken fixture junction and rejects a dirty override', (t) => {

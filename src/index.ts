@@ -9,6 +9,7 @@ export {
   findSession,
   gameRepoOf,
   getStatus,
+  ingest,
   isClientCheckout,
   isEphemeralPath,
   KEPT_AGENT_SKILLS,

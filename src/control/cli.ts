@@ -6,15 +6,14 @@ import { fileURLToPath } from 'node:url'
 import { createHub } from '../adapters/create-hub.js'
 import {
   decide,
-  emptyIngestResult,
   enqueueSession,
+  ingest,
   findSession,
   finalizeSession,
   getStatus,
   listWorktrees,
   listSkills,
   markSessionSpawned,
-  parseIngestTransactions,
   presentSession,
   reapSessions,
   repairLinks,
@@ -99,16 +98,6 @@ function readStdin(): string {
   } catch {
     return ''
   }
-}
-
-function runPs1(name: string, args: string[], input?: string) {
-  const root = findHubRoot()
-  return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(root, 'overlay', name), ...args], {
-    cwd: root,
-    encoding: 'utf8',
-    windowsHide: true,
-    input
-  })
 }
 
 function codexJs() {
@@ -292,16 +281,12 @@ async function main() {
     const gameRepo = takeFlag(argv, '--game-repo') || hub.git.configGet(hub.hubRoot, 'ozdqp.gameRepo')
     const dispatch = takeSwitch(argv, '--dispatch')
     const payload = readStdin()
-    const rows = parseIngestTransactions(payload)
-    if (rows.length === 0) {
-      print(emptyIngestResult())
+    const result = ingest(hub, { gameRepo, payload, dispatch })
+    if (dispatch && result.created > 0) {
+      const session = enqueueSession(hub, { kind: 'chat', intent: 'Analyze queued inbox skill updates' })
+      print({ ...result, dispatched: true, session, applied: null })
     } else {
-      if (!gameRepo) fail('ingest requires --game-repo or git config ozdqp.gameRepo')
-      const args = ['-GameRepo', gameRepo, '-HubRoot', hub.hubRoot]
-      if (dispatch) args.push('-DispatchCodex')
-      const ran = runPs1('analyze-remote-skill-update.ps1', args, payload)
-      if (ran.status !== 0) fail(ran.stderr || ran.stdout || 'ingest failed')
-      print({ ok: true, action: 'ingest', gameRepo, dispatched: dispatch, output: ran.stdout })
+      print({ ...result, dispatched: Boolean(dispatch && result.created > 0) })
     }
     return
   }

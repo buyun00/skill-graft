@@ -107,7 +107,7 @@ test('CLI ingest of a real game commit range writes inbox into an isolated hub',
   const payload = JSON.parse(result.stdout)
   assert.equal(payload.ok, true)
   assert.equal(payload.action, 'ingest')
-  assert.ok(typeof payload.output === 'string')
+  assert.equal(typeof payload.created, 'number')
   const liveItems = JSON.parse(fs.readFileSync(path.join(hubRoot, 'skill-review', 'state.json'), 'utf8')).items || []
   const liveIds = new Set(liveItems.map((item) => item.id))
   const isolated = JSON.parse(fs.readFileSync(path.join(dir, 'skill-review', 'state.json'), 'utf8'))

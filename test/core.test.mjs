@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -10,6 +11,7 @@ import {
   finalizeSession,
   findSession,
   getStatus,
+  ingest,
   isClientCheckout,
   isEphemeralPath,
   listSkills,
@@ -357,6 +359,47 @@ test('repairLinks restores a broken resident skill junction on an attached fixtu
   assert.equal(result.repaired, true)
   assert.equal(ctx.link.isLinked(linkPath, hubPath), true)
   assert.equal(fs.readFileSync(path.join(linkPath, 'SKILL.md'), 'utf8'), `${name}\n`)
+})
+
+test('ingest empty payload is a no-op and does not need a game repo', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-ingest-empty-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const result = ingest(createHub(dir), { payload: '' })
+  assert.equal(result.created, 0)
+  assert.deepEqual(result.items, [])
+})
+
+test('ingest copies official skill files into an isolated hub inbox', (t) => {
+  const game = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-game-core-ingest-'))
+  const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-core-ingest-'))
+  t.after(() => {
+    fs.rmSync(game, { recursive: true, force: true })
+    fs.rmSync(hubDir, { recursive: true, force: true })
+  })
+  const run = (args) => spawnSync('git', ['-C', game, ...args], { encoding: 'utf8', windowsHide: true })
+  run(['init'])
+  run(['config', 'user.email', 'hub@test'])
+  run(['config', 'user.name', 'hub'])
+  fs.mkdirSync(path.join(game, '.agents', 'skills', 'core-ingest'), { recursive: true })
+  fs.writeFileSync(path.join(game, '.agents', 'skills', 'core-ingest', 'SKILL.md'), '# one\n')
+  run(['add', '.'])
+  run(['commit', '-m', 'one'])
+  const old = run(['rev-parse', 'HEAD']).stdout.trim()
+  fs.writeFileSync(path.join(game, '.agents', 'skills', 'core-ingest', 'SKILL.md'), '# two\n')
+  run(['add', '.'])
+  run(['commit', '-m', 'two'])
+  const next = run(['rev-parse', 'HEAD']).stdout.trim()
+  fs.mkdirSync(path.join(hubDir, 'skill-review'), { recursive: true })
+  const result = ingest(createHub(hubDir), {
+    gameRepo: game,
+    payload: `${old} ${next} refs/remotes/origin/core-ingest\n`
+  })
+  assert.equal(result.created, 1)
+  assert.equal(result.items[0].name, 'core-ingest')
+  assert.equal(result.items[0].status, 'queued')
+  assert.equal(fs.readFileSync(path.join(hubDir, 'skills', 'inbox', 'core-ingest', 'SKILL.md'), 'utf8'), '# two\n')
+  const liveInbox = path.join(hubRoot, 'skills', 'inbox', 'core-ingest')
+  assert.equal(fs.existsSync(liveInbox), false)
 })
 
 test('repairLinks fails when fixture override bytes differ and does not overwrite them', (t) => {
