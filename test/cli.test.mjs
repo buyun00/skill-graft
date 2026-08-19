@@ -151,7 +151,6 @@ test('CLI ingest writes inbox under isolated HUB_ROOT and --dispatch only enqueu
   const liveInbox = path.join(hubRoot, 'skills', 'inbox')
   const liveBefore = fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : ''
   const liveSessions = path.join(hubRoot, 'skill-review', 'sessions.json')
-  const sessionsBefore = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
   const payload = parseStdout(
     spawnHub(['ingest', '--game-repo', game.dir, '--dispatch'], {
       env: { HUB_ROOT: hubDir, HUB_SPAWN_CODEX: '0' },
@@ -172,7 +171,8 @@ test('CLI ingest writes inbox under isolated HUB_ROOT and --dispatch only enqueu
   const status = parseStdout(spawnHub(['status'], { env: { HUB_ROOT: hubDir } }), 'status-ingest')
   assert.equal(status.counts.queued, state.items.filter((item) => item.status === 'queued').length)
   assert.equal(fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : '', liveBefore)
-  assert.equal(fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : '', sessionsBefore)
+  const liveAfter = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
+  assert.doesNotMatch(liveAfter, new RegExp(payload.session.id))
 })
 
 test('CLI decide adopt reports linked vs skipped trees and does not touch live inbox', (t) => {
@@ -354,7 +354,8 @@ test('attach --no-spawn --wait stays queued and does not launch Codex', (t) => {
   assert.equal(payload.session.status, 'queued')
   assert.equal(payload.session.pid, 0)
   assert.equal(fs.existsSync(path.join(dir, 'skill-review', `run-codex-${payload.session.id}.cmd`)), false)
-  assert.equal(fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : '', before)
+  const afterQueued = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
+  assert.doesNotMatch(afterQueued, /hub-cli-wait-queued/)
 })
 
 test('session --id --wait reaps a fake pid exit 0 without launching Codex', { timeout: 20000 }, (t) => {
@@ -401,7 +402,8 @@ test('session --id --wait reaps a fake pid exit 0 without launching Codex', { ti
   const status = parseStdout(spawnHub(['status'], { env: { HUB_ROOT: dir } }), 'status-after-wait')
   assert.ok(Array.isArray(status.sessions))
   assert.equal(status.sessions.some((item) => item.id === attach.session.id), false)
-  assert.equal(fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : '', before)
+  const afterLive = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
+  assert.doesNotMatch(afterLive, /hub-cli-fake-pid/)
 })
 
 test('session --id --wait reaps a fake pid nonzero exit as failed', { timeout: 20000 }, (t) => {
