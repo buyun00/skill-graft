@@ -6,6 +6,7 @@ import os from 'node:os'
 import test from 'node:test'
 import {
   createHub,
+  decide,
   enqueueSession,
   extractCodexSessionId,
   finalizeSession,
@@ -367,6 +368,75 @@ test('ingest empty payload is a no-op and does not need a game repo', (t) => {
   const result = ingest(createHub(dir), { payload: '' })
   assert.equal(result.created, 0)
   assert.deepEqual(result.items, [])
+})
+
+test('adopt links only attached fixture trees and skips a same-name non-hub path', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-adopt-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const hubDir = path.join(dir, 'hub')
+  const attachedA = path.join(dir, 'attached-a')
+  const attachedB = path.join(dir, 'attached-b')
+  const loose = path.join(dir, 'unattached')
+  fs.mkdirSync(path.join(hubDir, 'overlay'), { recursive: true })
+  fs.mkdirSync(path.join(hubDir, 'skill-review', 'history'), { recursive: true })
+  fs.mkdirSync(path.join(hubDir, 'skills', 'inbox', 'smoke-adopt'), { recursive: true })
+  fs.writeFileSync(path.join(hubDir, 'skills', 'inbox', 'smoke-adopt', 'SKILL.md'), '# smoke-adopt\n')
+  fs.writeFileSync(
+    path.join(hubDir, 'overlay', 'attached-worktrees.txt'),
+    `${attachedA}\n${attachedB}\n`
+  )
+  fs.writeFileSync(path.join(hubDir, 'overlay', 'do-not-auto-attach.txt'), '')
+  fs.writeFileSync(path.join(hubDir, 'skill-review', 'state.json'), JSON.stringify({
+    version: 1,
+    items: [{ id: 'adopt-1', name: 'smoke-adopt', unit: 'smoke-adopt', status: 'queued', inboxPath: 'skills/inbox/smoke-adopt' }],
+    lastIngest: null
+  }))
+  for (const tree of [attachedA, attachedB, loose]) {
+    fs.mkdirSync(path.join(tree, '.agents', 'skills'), { recursive: true })
+  }
+  fs.mkdirSync(path.join(attachedB, '.agents', 'skills', 'smoke-adopt'), { recursive: true })
+  fs.writeFileSync(path.join(attachedB, '.agents', 'skills', 'smoke-adopt', 'SKILL.md'), '# not hub\n')
+  const liveInbox = path.join(hubRoot, 'skills', 'inbox')
+  const liveBefore = fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : ''
+  const result = decide(createHub(hubDir), { id: 'adopt-1', action: 'adopt' })
+  assert.equal(result.ok, true)
+  assert.equal(result.item.status, 'adopted')
+  const dest = path.join(hubDir, 'skills', 'adopted', 'smoke-adopt')
+  assert.equal(fs.existsSync(path.join(dest, 'SKILL.md')), true)
+  assert.equal(result.trees.linked.some((row) => row.worktree === attachedA && row.status === 'linked'), true)
+  assert.equal(result.trees.skipped.some((row) => row.worktree === attachedB && /elsewhere/.test(row.reason)), true)
+  assert.equal(createHub(hubDir).link.isLinked(path.join(attachedA, '.agents', 'skills', 'smoke-adopt'), dest), true)
+  assert.equal(fs.readFileSync(path.join(attachedB, '.agents', 'skills', 'smoke-adopt', 'SKILL.md'), 'utf8'), '# not hub\n')
+  assert.equal(fs.existsSync(path.join(loose, '.agents', 'skills', 'smoke-adopt')), false)
+  assert.equal(fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : '', liveBefore)
+})
+
+test('merge and reject do not create game-tree skill links', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-decide-nolink-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const hubDir = path.join(dir, 'hub')
+  const tree = path.join(dir, 'tree')
+  fs.mkdirSync(path.join(hubDir, 'overlay'), { recursive: true })
+  fs.mkdirSync(path.join(hubDir, 'skill-review', 'history'), { recursive: true })
+  fs.mkdirSync(path.join(hubDir, 'skills', 'ozdqp-development'), { recursive: true })
+  fs.mkdirSync(path.join(hubDir, 'skills', 'inbox', 'merge-me'), { recursive: true })
+  fs.mkdirSync(path.join(hubDir, 'skills', 'inbox', 'reject-me'), { recursive: true })
+  fs.writeFileSync(path.join(hubDir, 'skills', 'inbox', 'merge-me', 'SKILL.md'), '# m\n')
+  fs.writeFileSync(path.join(hubDir, 'skills', 'inbox', 'reject-me', 'SKILL.md'), '# r\n')
+  fs.writeFileSync(path.join(hubDir, 'overlay', 'attached-worktrees.txt'), `${tree}\n`)
+  fs.mkdirSync(path.join(tree, '.agents', 'skills'), { recursive: true })
+  fs.writeFileSync(path.join(hubDir, 'skill-review', 'state.json'), JSON.stringify({
+    version: 1,
+    items: [
+      { id: 'm1', name: 'merge-me', unit: 'merge-me', status: 'queued', inboxPath: 'skills/inbox/merge-me' },
+      { id: 'r1', name: 'reject-me', unit: 'reject-me', status: 'queued', inboxPath: 'skills/inbox/reject-me' }
+    ]
+  }))
+  const ctx = createHub(hubDir)
+  decide(ctx, { id: 'm1', action: 'merge', mergeTarget: 'skills/ozdqp-development' })
+  decide(ctx, { id: 'r1', action: 'reject' })
+  assert.equal(fs.existsSync(path.join(tree, '.agents', 'skills', 'merge-me')), false)
+  assert.equal(fs.existsSync(path.join(tree, '.agents', 'skills', 'reject-me')), false)
 })
 
 test('ingest copies official skill files into an isolated hub inbox', (t) => {

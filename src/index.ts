@@ -2,6 +2,7 @@ export { createHub } from './adapters/create-hub.js'
 export {
   API_PORT,
   cloneRootFromCommonDir,
+  decide,
   enqueueSession,
   evaluateDoctor,
   extractCodexSessionId,

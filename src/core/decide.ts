@@ -28,7 +28,11 @@ export function decide(
   if (!item) throw new Error(`Unknown inbox item: ${input.id}`)
 
   const now = new Date().toISOString()
-  if (input.action === 'adopt') applyAdopt(ctx, item)
+  let trees: { linked: Array<{ worktree: string; status: string }>; skipped: Array<{ worktree: string; reason: string }> } = {
+    linked: [],
+    skipped: []
+  }
+  if (input.action === 'adopt') trees = applyAdopt(ctx, item)
   else if (input.action === 'merge') applyMerge(ctx, item, input.mergeTarget)
   else applyReject(ctx, item)
 
@@ -37,7 +41,7 @@ export function decide(
   state.items = items
   ctx.persist.writeState(file, state)
   writeHistory(ctx, { type: 'decide', id: input.id, action: input.action, note: input.note, mergeTarget: input.mergeTarget })
-  return { ok: true, action: input.action, item }
+  return { ok: true, action: input.action, item, trees }
 }
 
 function inboxAbs(ctx: HubContext, item: InboxItem) {
@@ -56,6 +60,31 @@ function applyAdopt(ctx: HubContext, item: InboxItem) {
   ctx.fs.rename(source, dest)
   item.status = 'adopted'
   item.adoptedPath = destRel
+  return linkAdopted(ctx, name, dest)
+}
+
+function linkAdopted(ctx: HubContext, name: string, dest: string) {
+  const attached = ctx.persist.readList(ctx.path.join(ctx.hubRoot, 'overlay', 'attached-worktrees.txt'))
+  const linked: Array<{ worktree: string; status: string }> = []
+  const skipped: Array<{ worktree: string; reason: string }> = []
+  for (const tree of attached) {
+    if (!ctx.fs.exists(tree)) {
+      skipped.push({ worktree: tree, reason: 'missing' })
+      continue
+    }
+    const linkPath = ctx.path.join(tree, '.agents', 'skills', name)
+    if (ctx.link.isLinked(linkPath, dest)) {
+      linked.push({ worktree: tree, status: 'ok' })
+      continue
+    }
+    if (ctx.fs.exists(linkPath)) {
+      skipped.push({ worktree: tree, reason: 'already points elsewhere' })
+      continue
+    }
+    ctx.link.linkDirectory(linkPath, dest)
+    linked.push({ worktree: tree, status: 'linked' })
+  }
+  return { linked, skipped }
 }
 
 function applyMerge(ctx: HubContext, item: InboxItem, mergeTarget?: string) {

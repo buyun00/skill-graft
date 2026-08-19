@@ -175,6 +175,39 @@ test('CLI ingest writes inbox under isolated HUB_ROOT and --dispatch only enqueu
   assert.equal(fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : '', sessionsBefore)
 })
 
+test('CLI decide adopt reports linked vs skipped trees and does not touch live inbox', (t) => {
+  const dir = tempHub()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const attached = path.join(dir, 'attached')
+  const skippedTree = path.join(dir, 'skipped')
+  const loose = path.join(dir, 'loose')
+  fs.mkdirSync(path.join(dir, 'skills', 'inbox', 'smoke-cli-adopt'), { recursive: true })
+  fs.writeFileSync(path.join(dir, 'skills', 'inbox', 'smoke-cli-adopt', 'SKILL.md'), '# cli\n')
+  fs.writeFileSync(path.join(dir, 'overlay', 'attached-worktrees.txt'), `${attached}\n${skippedTree}\n`)
+  fs.writeFileSync(path.join(dir, 'skill-review', 'state.json'), JSON.stringify({
+    version: 1,
+    items: [{ id: 'cli-adopt-1', name: 'smoke-cli-adopt', unit: 'smoke-cli-adopt', status: 'queued', inboxPath: 'skills/inbox/smoke-cli-adopt' }]
+  }))
+  fs.mkdirSync(path.join(attached, '.agents', 'skills'), { recursive: true })
+  fs.mkdirSync(path.join(skippedTree, '.agents', 'skills', 'smoke-cli-adopt'), { recursive: true })
+  fs.writeFileSync(path.join(skippedTree, '.agents', 'skills', 'smoke-cli-adopt', 'other.txt'), 'nope\n')
+  fs.mkdirSync(path.join(loose, '.agents', 'skills'), { recursive: true })
+  const liveInbox = path.join(hubRoot, 'skills', 'inbox')
+  const liveBefore = fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : ''
+  const payload = parseStdout(
+    spawnHub(['decide', '--id', 'cli-adopt-1', '--action', 'adopt'], { env: { HUB_ROOT: dir } }),
+    'decide-adopt'
+  )
+  assert.equal(payload.ok, true)
+  assert.equal(payload.action, 'adopt')
+  assert.equal(payload.item.status, 'adopted')
+  assert.ok(payload.trees.linked.some((row) => row.worktree === attached))
+  assert.ok(payload.trees.skipped.some((row) => row.worktree === skippedTree))
+  assert.equal(fs.existsSync(path.join(attached, '.agents', 'skills', 'smoke-cli-adopt', 'SKILL.md')), true)
+  assert.equal(fs.existsSync(path.join(loose, '.agents', 'skills', 'smoke-cli-adopt')), false)
+  assert.equal(fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : '', liveBefore)
+})
+
 test('decide reject updates a fixture hub and does not touch the live inbox', (t) => {
   const dir = tempHub()
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
