@@ -1,0 +1,106 @@
+{
+  "type": "codex-skill-attach-recon",
+  "intent": "background-luna-max",
+  "observedAt": "2026-08-19T23:02:06.1261230+08:00",
+  "hub": "E:\\ozdqp-skill-hub",
+  "workspace": "E:\\ozdqp-cli-attach-probe",
+  "git": {
+    "branch": null,
+    "detached": true,
+    "head": "c992cc988614aaa5f2811c28aa090496cb936d68",
+    "statusPorcelain": [],
+    "businessChangeCount": 0,
+    "officialTrackedCount": 571,
+    "officialSkipWorktreeCount": 571
+  },
+  "officialTrees": {
+    ".agents": {
+      "onDisk": true,
+      "note": "Carrier directory only; .agents/skills contains the three retained hub Junctions."
+    },
+    ".agents/skills": {
+      "onDisk": true,
+      "physicalLegacySkillFiles": 0,
+      "residentEntries": [
+        "ozdqp-development",
+        "ozdqp-git-workflow",
+        "ozdqp-ui-development"
+      ]
+    },
+    ".claude": {
+      "onDisk": false
+    },
+    ".codex": {
+      "onDisk": true,
+      "note": "Carrier directory only; .codex/local-overlay is a hub Junction."
+    },
+    ".codex/agents": {
+      "onDisk": false
+    },
+    ".codex/scripts": {
+      "onDisk": false
+    },
+    ".codex/skills": {
+      "onDisk": false
+    },
+    ".codex/cursor-rules.env": {
+      "onDisk": false
+    },
+    "skills": {
+      "onDisk": false
+    }
+  },
+  "existingPaths": {
+    "AGENTS.override.md": {
+      "onDisk": true,
+      "linkType": "SymbolicLink",
+      "hubLink": true,
+      "linkTarget": "E:\\ozdqp-skill-hub\\AGENTS.override.md",
+      "contentEqualHub": true,
+      "sha256": "3E5F997E4FD896EDFE453856B6568ED2ADB89958E5D99DDF838043A286A1368A"
+    },
+    ".agents/skills/ozdqp-development": {
+      "linkType": "Junction",
+      "hubLink": true,
+      "linkTarget": "E:\\ozdqp-skill-hub\\skills\\ozdqp-development",
+      "targetFiles": 6,
+      "hubFiles": 6,
+      "contentEqualHub": true,
+      "skillSha256": "2EE9EBD33699217E4F07868D4F31F41183C934DA4295969D7151D404FC2DFC5E"
+    },
+    ".agents/skills/ozdqp-git-workflow": {
+      "linkType": "Junction",
+      "hubLink": true,
+      "linkTarget": "E:\\ozdqp-skill-hub\\skills\\ozdqp-git-workflow",
+      "targetFiles": 6,
+      "hubFiles": 6,
+      "contentEqualHub": true,
+      "skillSha256": "988F44441369206444E36A1B77C0E29DFBA229FBA3A108A465C02A1A69023962"
+    },
+    ".agents/skills/ozdqp-ui-development": {
+      "linkType": "Junction",
+      "hubLink": true,
+      "linkTarget": "E:\\ozdqp-skill-hub\\skills\\ozdqp-ui-development",
+      "targetFiles": 17,
+      "hubFiles": 17,
+      "contentEqualHub": true,
+      "skillSha256": "E38F38B14E05B817CBED986DB5FA7324F9240AE0110C97B849BC27E435086D4A"
+    },
+    ".codex/local-overlay": {
+      "linkType": "Junction",
+      "hubLink": true,
+      "linkTarget": "E:\\ozdqp-skill-hub\\overlay"
+    }
+  },
+  "registration": {
+    "file": "overlay/attached-worktrees.txt",
+    "containsTargetBeforeAttach": true,
+    "targetEntryCount": 1
+  },
+  "stopConditions": {
+    "nonHubLinkConflict": false,
+    "disableOrAttachFailure": false,
+    "acceptanceFailure": false
+  },
+  "decision": "No stop condition. Execute the mandated Disable followed immediately by ConfigureGit PreferLibrary attach."
+}
