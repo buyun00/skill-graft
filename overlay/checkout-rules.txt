@@ -1,0 +1,8 @@
+# How to recognize a managed worktree.
+# All `require` entries must exist (file or directory).
+# `exclude` matches the directory basename (case-insensitive).
+# `path` is an explicit worktree that is recognized even without the require files.
+exclude ozdqp-skill-hub
+exclude ozdqp-skill-overlay-kit
+require AGENTS.md
+require baloot_client

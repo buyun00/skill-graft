@@ -63,7 +63,7 @@ test('C2 isEphemeralPath hits the four temp markers and not a normal drive path'
   assert.equal(isEphemeralPath('E:\\ozdqp-main-fix'), false)
 })
 
-test('C3 isClientCheckout requires AGENTS.md + baloot_client and skips hub/excluded/.partial-', () => {
+test('C3 isClientCheckout default rules require AGENTS.md + baloot_client and skip hub/excluded/.partial-', () => {
   const root = path.join(os.tmpdir(), 'hub-client-fake')
   const game = path.join(root, 'ozdqp-main-fix')
   const hubDir = path.join(root, 'ozdqp-skill-hub')
@@ -93,6 +93,31 @@ test('C3 isClientCheckout requires AGENTS.md + baloot_client and skips hub/exclu
   assert.equal(isClientCheckout(ctx, partial), false)
   assert.equal(isClientCheckout(ctx, noAgents), false)
   assert.equal(isClientCheckout(ctx, noBaloot), false)
+})
+
+test('C3b checkout-rules can recognize .git + custom file and still exclude names', () => {
+  const root = path.join(os.tmpdir(), 'hub-rules-fake')
+  const hubDir = path.join(root, 'hub')
+  const custom = path.join(root, 'tiny-git')
+  const excluded = path.join(root, 'ozdqp-skill-hub')
+  const agentsOnly = path.join(root, 'agents-only')
+  const files = {
+    [path.resolve(hubDir, 'overlay', 'checkout-rules.txt')]: {
+      text: 'exclude ozdqp-skill-hub\nrequire .git\nrequire custom.marker\n'
+    },
+    [path.resolve(custom)]: { dir: true },
+    [path.resolve(custom, '.git')]: { dir: true },
+    [path.resolve(custom, 'custom.marker')]: { text: 'x' },
+    [path.resolve(excluded)]: { dir: true },
+    [path.resolve(excluded, '.git')]: { dir: true },
+    [path.resolve(excluded, 'custom.marker')]: { text: 'x' },
+    [path.resolve(agentsOnly)]: { dir: true },
+    [path.resolve(agentsOnly, 'AGENTS.md')]: { text: 'x' }
+  }
+  const ctx = createHub(hubDir, { fs: makeFs(files) })
+  assert.equal(isClientCheckout(ctx, custom), true)
+  assert.equal(isClientCheckout(ctx, excluded), false)
+  assert.equal(isClientCheckout(ctx, agentsOnly), false)
 })
 
 test('C4 getStatus reads this hub: 3 resident SKILL.md, inbox has queued names, counts match items', () => {

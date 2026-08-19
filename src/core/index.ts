@@ -5,6 +5,7 @@ export {
   cloneRootFromCommonDir,
   isClientCheckout,
   isEphemeralPath,
+  loadCheckoutRules,
   listWorktrees,
   parseWorktreePorcelain
 } from './worktrees.js'

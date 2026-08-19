@@ -2,18 +2,52 @@ import { EPHEMERAL_PATH_MARKERS, EXCLUDED_CHECKOUT_NAMES } from './constants.js'
 import type { HubContext } from './ports.js'
 import type { GitWorktreeRef, WorktreeInfo, WorktreeList } from './types.js'
 
+export type CheckoutRules = {
+  exclude: string[]
+  require: string[]
+  paths: string[]
+}
+
 export function isEphemeralPath(dir: string): boolean {
   const normalized = dir.replaceAll('\\', '/').toLowerCase()
   return EPHEMERAL_PATH_MARKERS.some((marker) => normalized.includes(marker))
 }
 
+export function loadCheckoutRules(ctx: HubContext): CheckoutRules {
+  const defaults: CheckoutRules = {
+    exclude: [...EXCLUDED_CHECKOUT_NAMES],
+    require: ['AGENTS.md', 'baloot_client'],
+    paths: []
+  }
+  const file = ctx.path.join(ctx.hubRoot, 'overlay', 'checkout-rules.txt')
+  const text = ctx.fs.readText(file)
+  if (text == null) return defaults
+  const rules: CheckoutRules = { exclude: [...EXCLUDED_CHECKOUT_NAMES], require: [], paths: [] }
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const space = line.indexOf(' ')
+    const key = (space < 0 ? line : line.slice(0, space)).toLowerCase()
+    const value = (space < 0 ? '' : line.slice(space + 1)).trim()
+    if (!value) continue
+    if (key === 'exclude') rules.exclude.push(value)
+    else if (key === 'require') rules.require.push(value)
+    else if (key === 'path') rules.paths.push(value)
+  }
+  if (rules.require.length === 0 && rules.paths.length === 0) rules.require = defaults.require
+  return rules
+}
+
 export function isClientCheckout(ctx: HubContext, dir: string): boolean {
   if (!dir || !ctx.fs.exists(dir)) return false
   if (ctx.link.samePath(dir, ctx.hubRoot)) return false
+  const rules = loadCheckoutRules(ctx)
   const name = ctx.path.basename(dir).toLowerCase()
-  if ((EXCLUDED_CHECKOUT_NAMES as readonly string[]).includes(name)) return false
+  if (rules.exclude.some((item) => item.toLowerCase() === name)) return false
   if (name.includes('.partial-')) return false
-  return ctx.fs.exists(ctx.path.join(dir, 'AGENTS.md')) && ctx.fs.exists(ctx.path.join(dir, 'baloot_client'))
+  if (rules.paths.some((item) => ctx.link.samePath(item, dir))) return true
+  if (rules.require.length === 0) return false
+  return rules.require.every((item) => ctx.fs.exists(ctx.path.join(dir, item)))
 }
 
 export function parseWorktreePorcelain(text: string): GitWorktreeRef[] {
@@ -94,7 +128,11 @@ function discoverClientDirs(ctx: HubContext, roots: string[]): string[] {
 
 export function listWorktrees(ctx: HubContext): WorktreeList {
   const scanRoots = ctx.persist.readList(ctx.path.join(ctx.hubRoot, 'overlay', 'scan-roots.txt'))
-  const discovered = discoverClientDirs(ctx, scanRoots)
+  const rules = loadCheckoutRules(ctx)
+  const discovered = [
+    ...discoverClientDirs(ctx, scanRoots),
+    ...rules.paths.filter((item) => ctx.fs.exists(item))
+  ]
   const cloneSeeds = new Map<string, { seed: string; common: string }>()
   for (const dir of discovered) {
     const raw = ctx.git.output(dir, ['rev-parse', '--git-common-dir']).trim()
