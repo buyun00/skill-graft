@@ -1,3 +1,5 @@
+node_modules/
+dist/
 panel/node_modules/
 panel/dist/
 skill-review/hub-codex.lock
@@ -5,8 +7,11 @@ skill-review/panel.pid
 skill-review/start-panel-run.cmd
 skill-review/prompt-*.txt
 skill-review/run-codex-*.ps1
+skill-review/run-codex-*.cmd
 skill-review/session-*.log
 skill-review/session-*.last.txt
 skill-review/*.log
+skill-review/last-attach-cli.json
+skill-review/codex-smoke.last.txt
 .DS_Store
 *.pre-hub-*

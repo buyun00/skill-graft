@@ -1,5 +1,5 @@
 你在中心仓 {{HUB}} 工作，目标游戏 worktree 是 {{WORKTREE}}（已通过 --add-dir 可写）。
-用户从管理面板点了「改用本地 Skill」，这就是确认。用户意图：{{INTENT}}
+用户从 CLI（`ozdqp-hub attach`）或管理面板确认了「改用本地 Skill」。用户意图：{{INTENT}}
 任务：剥掉该树自带的官方 Skill 体系，改挂本中心仓本地体系。不要把跑一遍脚本当成完成。不要再问一次确认。
 固定步骤：
 1. 侦察：分支、git status、官方 .agents/.claude/.codex/skills 是否在磁盘、是否已有 hub 链接、与 hub 的 3 Skill 是否内容不同。

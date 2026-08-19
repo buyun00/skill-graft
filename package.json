@@ -1,0 +1,23 @@
+{
+  "name": "ozdqp-skill-hub",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "ozdqp-hub": "dist/control/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "hub": "node dist/control/cli.js",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:adapter": "npm run build && node --test test/adapter.test.mjs",
+    "test:core": "npm run build && node --test test/core.test.mjs",
+    "test:cli": "npm run build && node --test test/cli.test.mjs",
+    "test:http": "npm run build && node --test test/http.test.mjs",
+    "test:attach": "npm run build && node panel/test/assert-main-fix-attached.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.7.2"
+  }
+}

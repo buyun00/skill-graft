@@ -1,14 +1,32 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const panelRoot = path.resolve(__dirname, '..')
 const hubRoot = path.resolve(panelRoot, '..')
-const host = '127.0.0.1'
+const cliPath = path.join(hubRoot, 'dist', 'control', 'cli.js')
 const port = 18765
+
+function runHub(args, options = {}) {
+  const result = spawnSync(process.execPath, [cliPath, ...args], {
+    cwd: hubRoot,
+    encoding: 'utf8',
+    windowsHide: true,
+    env: { ...process.env, HUB_ROOT: hubRoot },
+    input: options.input
+  })
+  if (result.status !== 0) {
+    const err = new Error((result.stderr || result.stdout || 'hub command failed').trim())
+    err.status = 500
+    throw err
+  }
+  const text = result.stdout || ''
+  if (!text.trim()) throw new Error(`hub ${args[0]} produced empty stdout`)
+  return JSON.parse(text)
+}
 
 function readJson(file, fallback) {
   if (!fs.existsSync(file)) return fallback
@@ -30,32 +48,6 @@ function loadSessions() {
 
 function saveSessions(data) {
   writeJson(sessionsPath(), data)
-}
-
-function upsertSession(session) {
-  const data = loadSessions()
-  const list = Array.isArray(data.sessions) ? data.sessions : []
-  const index = list.findIndex((item) => item.id === session.id)
-  if (index >= 0) list[index] = session
-  else list.push(session)
-  data.sessions = list
-  saveSessions(data)
-}
-
-function buildPrompt({ kind, skillPath, intent, worktree }) {
-  const name = kind === 'analyze-note' ? 'chat' : kind
-  const templateFile = path.join(hubRoot, 'overlay', 'prompts', `${name}.txt`)
-  let prompt = fs.existsSync(templateFile) ? fs.readFileSync(templateFile, 'utf8') : (intent || '')
-  prompt = prompt
-    .replaceAll('{{HUB}}', hubRoot)
-    .replaceAll('{{PATH}}', skillPath || '')
-    .replaceAll('{{INTENT}}', intent || '')
-    .replaceAll('{{WORKTREE}}', worktree || '')
-  return prompt.trim()
-}
-
-function codexJs() {
-  return path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
 }
 
 function extractCodexSessionId(text) {
@@ -91,396 +83,27 @@ function loadAndHydrateSessions() {
   return data
 }
 
-function spawnCodex(session, args) {
-  const child = spawn(process.execPath, [codexJs(), ...args], {
-    cwd: hubRoot,
-    windowsHide: true,
-    windowsVerbatimArguments: false,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, NO_COLOR: '1' }
-  })
-  session.pid = child.pid || 0
-  session.status = 'running'
-  session.error = ''
-  upsertSession(session)
-
-  const append = (chunk) => {
-    const text = chunk.toString('utf8')
-    fs.appendFileSync(session.logFile, text)
-    const found = extractCodexSessionId(text)
-    if (found) session.codexSessionId = found
-  }
-  child.stdout.on('data', append)
-  child.stderr.on('data', append)
-  child.on('error', (error) => {
-    session.status = 'failed'
-    session.error = error.message
-    session.finishedAt = new Date().toISOString()
-    fs.appendFileSync(session.logFile, `\n[spawn error] ${error.message}\n`)
-    upsertSession(session)
-  })
-  child.on('close', (code) => {
-    session.exitCode = code
-    if (fs.existsSync(session.lastFile)) session.lastMessage = fs.readFileSync(session.lastFile, 'utf8')
-    if (fs.existsSync(session.logFile) && !session.codexSessionId) {
-      session.codexSessionId = extractCodexSessionId(fs.readFileSync(session.logFile, 'utf8'))
-    }
-    session.status = code === 0 ? 'waiting' : 'failed'
-    session.finishedAt = new Date().toISOString()
-    upsertSession(session)
-  })
-}
-
-function startInternalCodex({ kind, skillPath, intent, worktree }) {
-  if (kind === 'edit' && !skillPath) throw new Error('edit requires path')
-  if ((kind === 'attach' || kind === 'detach') && !worktree) throw new Error(`${kind} requires worktree`)
-
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
-  const prompt = buildPrompt({ kind, skillPath, intent, worktree })
-  const promptFile = path.join(hubRoot, 'skill-review', `prompt-${id}.txt`)
-  const logFile = path.join(hubRoot, 'skill-review', `session-${id}.log`)
-  const lastFile = path.join(hubRoot, 'skill-review', `session-${id}.last.txt`)
-  fs.writeFileSync(promptFile, prompt, 'utf8')
-
-  const args = execArgs({ worktree, lastFile, prompt })
-
-  const session = {
-    id,
-    kind,
-    path: skillPath || '',
-    worktree: worktree || '',
-    intent: intent || '',
-    pid: 0,
-    promptFile,
-    logFile,
-    lastFile,
-    startedAt: new Date().toISOString(),
-    status: 'running',
-    exitCode: null,
-    error: '',
-    codexSessionId: ''
-  }
-  upsertSession(session)
-  spawnCodex(session, args)
-  return session
-}
-
-function execArgs({ resumeId, worktree, lastFile, prompt }) {
-  const args = [
-    'exec',
-    '-C', hubRoot,
-    '--skip-git-repo-check',
-    '--color', 'never',
-    '--sandbox', 'danger-full-access',
-    '--dangerously-bypass-approvals-and-sandbox'
-  ]
-  if (worktree) args.push('--add-dir', worktree)
-  if (resumeId) args.push('resume', resumeId)
-  args.push('-o', lastFile, prompt)
-  return args
-}
-
-function resumeInternalCodex({ id, message }) {
-  const session = findSession(id)
-  if (!session) throw new Error('session not found')
-  if (session.status === 'running') throw new Error('session still running')
-  if (!session.codexSessionId) throw new Error('missing Codex session id, cannot continue')
-  const prompt = String(message || '').trim()
-  if (!prompt) throw new Error('message required')
-
-  session.status = 'running'
-  session.error = ''
-  fs.appendFileSync(session.logFile, `\n\n--------\nuser\n${prompt}\n`)
-  spawnCodex(session, execArgs({
-    resumeId: session.codexSessionId,
-    worktree: session.worktree,
-    lastFile: session.lastFile,
-    prompt
-  }))
-  return session
-}
-
-function listSkillGroup(rel, kind) {
-  const abs = path.join(hubRoot, rel)
-  if (!fs.existsSync(abs)) return []
-  return fs.readdirSync(abs, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => ({
-      name: entry.name,
-      kind,
-      path: `${rel.replaceAll('\\', '/')}/${entry.name}`,
-      hasSkillMd: fs.existsSync(path.join(abs, entry.name, 'SKILL.md')),
-      attached: false
-    }))
-}
-
-function gameRepoSync() {
-  try {
-    return spawnSync('git', ['-C', hubRoot, 'config', '--get', 'ozdqp.gameRepo'], { encoding: 'utf8' }).stdout.trim() || null
-  } catch {
-    return null
-  }
-}
-
-function runGit(cwd, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, windowsHide: true })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (chunk) => { out += chunk })
-    child.stderr.on('data', (chunk) => { err += chunk })
-    child.on('close', (code) => {
-      if (code === 0) resolve(out)
-      else reject(new Error(err || `git ${args.join(' ')} failed (${code})`))
-    })
-  })
-}
-
-function runPwsh(script, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], {
-      cwd: hubRoot,
-      windowsHide: true
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (chunk) => { out += chunk })
-    child.stderr.on('data', (chunk) => { err += chunk })
-    child.on('close', (code) => {
-      if (code === 0) resolve(out)
-      else reject(new Error(err || out || `${path.basename(script)} failed`))
-    })
-  })
-}
-
-function readList(file) {
-  if (!fs.existsSync(file)) return []
-  return fs.readFileSync(file, 'utf8').split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'))
-}
-
-function gitOut(cwd, args) {
-  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true })
-  if (result.status !== 0) return ''
-  return result.stdout || ''
-}
-
-function isClientCheckout(dir) {
-  if (!dir || !fs.existsSync(dir)) return false
-  if (samePath(dir, hubRoot)) return false
-  const name = path.basename(dir).toLowerCase()
-  if (name === 'ozdqp-skill-hub' || name === 'ozdqp-skill-overlay-kit') return false
-  if (name.includes('.partial-')) return false
-  return fs.existsSync(path.join(dir, 'AGENTS.md')) && fs.existsSync(path.join(dir, 'baloot_client'))
-}
-
-function isEphemeralPath(dir) {
-  const normalized = dir.replaceAll('\\', '/').toLowerCase()
-  return (
-    normalized.includes('/temp/') ||
-    normalized.includes('/appdata/local/temp/') ||
-    normalized.includes('/.codex/worktrees/') ||
-    normalized.includes('/.config/cursor/worktrees/')
-  )
-}
-
-function parseWorktreePorcelain(text) {
-  const trees = []
-  let current = {}
-  const flush = () => {
-    if (!current.path) return
-    trees.push({
-      path: current.path,
-      branch: current.branch || (current.detached ? '(detached)' : ''),
-      head: current.head || '',
-      locked: Boolean(current.locked),
-      prunable: Boolean(current.prunable)
-    })
-    current = {}
-  }
-  for (const line of text.split(/\r?\n/)) {
-    if (line.startsWith('worktree ')) {
-      flush()
-      current.path = line.slice(9)
-    } else if (line.startsWith('HEAD ')) current.head = line.slice(5)
-    else if (line.startsWith('branch ')) current.branch = line.slice(7).replace('refs/heads/', '')
-    else if (line === 'detached') current.detached = true
-    else if (line.startsWith('locked')) current.locked = true
-    else if (line.startsWith('prunable')) current.prunable = true
-    else if (line === '') flush()
-  }
-  flush()
-  return trees
-}
-
-function discoverClientDirs(roots) {
-  const found = []
-  for (const root of roots) {
-    if (!root || !fs.existsSync(root)) continue
-    let entries = []
-    try {
-      entries = fs.readdirSync(root, { withFileTypes: true })
-    } catch {
-      continue
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
-      const full = path.join(root, entry.name)
-      if (isClientCheckout(full)) found.push(full)
-    }
-  }
-  return found
-}
-
-function cloneRootFromCommonDir(commonDir) {
-  const resolved = path.resolve(commonDir)
-  const base = path.basename(resolved)
-  const parent = path.dirname(resolved)
-  if (base === '.git') return parent
-  if (path.basename(parent) === 'worktrees' && path.basename(path.dirname(parent)) === '.git') {
-    return path.dirname(path.dirname(parent))
-  }
-  return parent
-}
-
-function collectWorktrees() {
-  const scanRoots = readList(path.join(hubRoot, 'overlay', 'scan-roots.txt'))
-  const discovered = discoverClientDirs(scanRoots)
-  const cloneSeeds = new Map()
-  for (const dir of discovered) {
-    const raw = gitOut(dir, ['rev-parse', '--git-common-dir']).trim()
-    const common = raw ? path.resolve(dir, raw) : path.resolve(dir, '.git')
-    if (!cloneSeeds.has(common.toLowerCase())) cloneSeeds.set(common.toLowerCase(), { seed: dir, common })
-  }
-
-  const attached = readList(path.join(hubRoot, 'overlay', 'attached-worktrees.txt'))
-  const blocked = readList(path.join(hubRoot, 'overlay', 'do-not-auto-attach.txt'))
-  const byPath = new Map()
-
-  const addTree = (info, cloneRoot, requireClient) => {
-    if (!info.path || !fs.existsSync(info.path) || samePath(info.path, hubRoot)) return
-    if (requireClient && !isClientCheckout(info.path)) return
-    const resolved = path.resolve(info.path)
-    const key = resolved.toLowerCase()
-    if (byPath.has(key)) return
-    const changedAtMs = latestLocalChangeMs(resolved)
-    byPath.set(key, {
-      name: path.basename(resolved),
-      path: info.path,
-      branch: info.branch || gitOut(info.path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() || '(unknown)',
-      head: info.head || gitOut(info.path, ['rev-parse', 'HEAD']).trim(),
-      cloneRoot,
-      changedAt: changedAtMs ? new Date(changedAtMs).toISOString() : '',
-      changedAtMs,
-      attached: attached.some((item) => samePath(item, info.path)),
-      doNotAuto: blocked.some((item) => samePath(item, info.path)),
-      officialPresent: fs.existsSync(path.join(info.path, '.claude', 'skills')) || fs.existsSync(path.join(info.path, '.codex', 'skills')),
-      overrideLinked: isLinked(path.join(info.path, 'AGENTS.override.md'), path.join(hubRoot, 'AGENTS.override.md')),
-      ephemeral: isEphemeralPath(info.path),
-      locked: Boolean(info.locked),
-      prunable: Boolean(info.prunable)
-    })
-  }
-
-  for (const { seed, common } of cloneSeeds.values()) {
-    const porcelain = gitOut(seed, ['worktree', 'list', '--porcelain'])
-    const listed = parseWorktreePorcelain(porcelain)
-    const cloneRoot = cloneRootFromCommonDir(common)
-    if (listed.length === 0) {
-      addTree({ path: seed, branch: '', head: '' }, cloneRoot, true)
-      continue
-    }
-    for (const tree of listed) addTree(tree, cloneRoot, false)
-  }
-
-  for (const dir of discovered) {
-    const raw = gitOut(dir, ['rev-parse', '--git-common-dir']).trim()
-    const common = raw ? path.resolve(dir, raw) : path.resolve(dir, '.git')
-    addTree({ path: dir, branch: '', head: '' }, cloneRootFromCommonDir(common), true)
-  }
-
-  const worktrees = [...byPath.values()].sort((left, right) => (right.changedAtMs || 0) - (left.changedAtMs || 0))
-  return { worktrees, scanRoots }
-}
-
 let worktreeCache = { at: 0, data: null }
 
 function collectWorktreesCached() {
   const now = Date.now()
   if (worktreeCache.data && now - worktreeCache.at < 30000) return worktreeCache.data
-  const data = collectWorktrees()
+  const data = runHub(['list-worktrees'])
   worktreeCache = { at: now, data }
   return data
 }
 
-function fileTimeMs(filePath) {
-  try {
-    return fs.statSync(filePath).mtimeMs || 0
-  } catch {
-    return 0
-  }
+function sessionFromHub(kind, body) {
+  const args = [kind]
+  if (body.path) args.push('--path', body.path)
+  if (body.intent) args.push('--intent', body.intent)
+  if (body.worktree) args.push('--worktree', body.worktree)
+  return runHub(args)
 }
 
-function latestLocalChangeMs(dir) {
-  const times = [fileTimeMs(dir), fileTimeMs(path.join(dir, '.git')), fileTimeMs(path.join(dir, 'AGENTS.override.md'))]
-  const gitDir = gitOut(dir, ['rev-parse', '--absolute-git-dir']).trim()
-  if (gitDir) {
-    times.push(fileTimeMs(gitDir), fileTimeMs(path.join(gitDir, 'HEAD')), fileTimeMs(path.join(gitDir, 'index')))
-  }
-  return Math.max(0, ...times)
-}
-
-function samePath(left, right) {
-  return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase()
-}
-
-function isLinked(linkPath, expected) {
-  try {
-    if (samePath(fs.realpathSync(linkPath), expected)) return true
-  } catch {
-    // fall through to inode compare
-  }
-  try {
-    const left = fs.statSync(linkPath)
-    const right = fs.statSync(expected)
-    return Boolean(left.ino && right.ino && left.ino === right.ino && left.dev === right.dev)
-  } catch {
-    return false
-  }
-}
-
-async function handleApi(req, url, body) {
-  const state = readJson(path.join(hubRoot, 'skill-review', 'state.json'), { version: 1, items: [], lastIngest: null })
-  const repo = gameRepoSync()
+export async function handleApi(req, url, body) {
   if (url.pathname === '/api/state') {
-    const resident = ['ozdqp-development', 'ozdqp-ui-development', 'ozdqp-git-workflow'].map((name) => ({
-      name,
-      kind: 'resident',
-      path: `skills/${name}`,
-      hasSkillMd: fs.existsSync(path.join(hubRoot, 'skills', name, 'SKILL.md')),
-      attached: repo ? isLinked(path.join(repo, '.agents', 'skills', name), path.join(hubRoot, 'skills', name)) : false
-    }))
-    const adopted = listSkillGroup('skills/adopted', 'adopted').map((node) => ({
-      ...node,
-      attached: repo ? isLinked(path.join(repo, '.agents', 'skills', node.name), path.join(hubRoot, 'skills', 'adopted', node.name)) : false
-    }))
-    const inbox = listSkillGroup('skills/inbox', 'inbox')
-    const items = state.items || []
-    return {
-      hubRoot,
-      gameRepo: repo,
-      lastIngest: state.lastIngest || null,
-      resident,
-      adopted,
-      inbox,
-      items,
-      counts: {
-        resident: resident.length,
-        adopted: adopted.length,
-        queued: items.filter((item) => item.status === 'queued').length,
-        proposed: items.filter((item) => item.status === 'proposed').length
-      }
-    }
+    return runHub(['status'])
   }
 
   if (url.pathname === '/api/skill') {
@@ -539,44 +162,31 @@ async function handleApi(req, url, body) {
   }
 
   if (url.pathname === '/api/decide') {
-    const args = ['-Id', body.id, '-Action', body.action]
-    if (body.note) args.push('-Note', body.note)
-    if (body.mergeTarget) args.push('-MergeTarget', body.mergeTarget)
-    const out = await runPwsh(path.join(hubRoot, 'overlay', 'promote-inbox.ps1'), args)
-    return { ok: true, output: out }
+    const args = ['decide', '--id', body.id, '--action', body.action]
+    if (body.note) args.push('--note', body.note)
+    if (body.mergeTarget) args.push('--merge-target', body.mergeTarget)
+    return runHub(args)
   }
 
   if (url.pathname === '/api/analyze') {
-    const out = await runPwsh(path.join(hubRoot, 'overlay', 'dispatch-hub-codex.ps1'), [])
-    return { ok: true, output: out }
+    return runHub(['chat', '--intent', 'Analyze queued inbox skill updates'])
   }
 
   if (url.pathname === '/api/codex/start') {
-    const session = startInternalCodex({
-      kind: body.kind || 'chat',
-      skillPath: body.path,
-      intent: body.intent,
-      worktree: body.worktree
-    })
-    return session
+    const kind = body.kind === 'analyze-note' ? 'chat' : (body.kind || 'chat')
+    return sessionFromHub(kind, body)
   }
 
   if (url.pathname === '/api/codex/resume') {
-    const session = resumeInternalCodex({
-      id: body.id,
-      message: body.message
-    })
-    return session
+    return runHub(['resume', '--id', body.id, '--message', body.message])
   }
 
   if (url.pathname === '/api/worktree/attach') {
-    const session = startInternalCodex({ kind: 'attach', worktree: body.path, intent: body.intent })
-    return { ok: true, session }
+    return sessionFromHub('attach', { worktree: body.path, intent: body.intent })
   }
 
   if (url.pathname === '/api/worktree/detach') {
-    const session = startInternalCodex({ kind: 'detach', worktree: body.path, intent: body.intent })
-    return { ok: true, session }
+    return sessionFromHub('detach', { worktree: body.path, intent: body.intent })
   }
 
   const err = new Error('not found')
@@ -666,7 +276,7 @@ function streamSession(id, req, res) {
   })
 }
 
-const onRequest = async (req, res) => {
+export const onRequest = async (req, res) => {
   const url = new URL(req.url || '/', `http://127.0.0.1:${port}`)
   try {
     if (url.pathname === '/api/health') {
@@ -700,19 +310,29 @@ const onRequest = async (req, res) => {
   }
 }
 
-for (const bindHost of ['127.0.0.1', '::1']) {
-  const server = http.createServer(onRequest)
-  server.listen(port, bindHost, () => {
-    const label = bindHost === '::1' ? 'localhost' : bindHost
-    console.log(`skill hub panel http://${label}:${port}/`)
-  })
-  server.on('error', (error) => {
-    if (bindHost === '::1' && error && error.code === 'EADDRINUSE') return
-    console.error(`listen ${bindHost}:${port} failed`, error)
-    if (bindHost === '127.0.0.1') process.exit(1)
-  })
+function isMainModule() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  return path.resolve(fileURLToPath(import.meta.url)).toLowerCase() === path.resolve(entry).toLowerCase()
 }
 
-setTimeout(() => {
-  try { collectWorktreesCached() } catch (error) { console.error(error) }
-}, 300)
+function startPanelListeners() {
+  for (const bindHost of ['127.0.0.1', '::1']) {
+    const server = http.createServer(onRequest)
+    server.listen(port, bindHost, () => {
+      const label = bindHost === '::1' ? 'localhost' : bindHost
+      console.log(`skill hub panel http://${label}:${port}/`)
+    })
+    server.on('error', (error) => {
+      if (bindHost === '::1' && error && error.code === 'EADDRINUSE') return
+      console.error(`listen ${bindHost}:${port} failed`, error)
+      if (bindHost === '127.0.0.1') process.exit(1)
+    })
+  }
+
+  setTimeout(() => {
+    try { collectWorktreesCached() } catch (error) { console.error(error) }
+  }, 300)
+}
+
+if (isMainModule()) startPanelListeners()

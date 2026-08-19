@@ -19,8 +19,8 @@ if [ -z "$hub" ]; then
 fi
 
 game="$(git rev-parse --show-toplevel 2>/dev/null)"
-script="${hub%/}/overlay/analyze-remote-skill-update.ps1"
-if [ ! -f "$script" ] || [ -z "$game" ]; then
+cli="${hub%/}/dist/control/cli.js"
+if [ ! -f "$cli" ] || [ -z "$game" ]; then
     cat >/dev/null
     exit 0
 fi
@@ -30,9 +30,10 @@ if [ -z "$payload" ]; then
     exit 0
 fi
 
-printf '%s\n' "$payload" | powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$script" -GameRepo "$game" -HubRoot "$hub" -DispatchCodex
+printf '%s\n' "$payload" | HUB_ROOT="$hub" node "$cli" ingest --game-repo "$game" --dispatch
 status=$?
 if [ $status -ne 0 ]; then
     echo "[OZDQP Skill Hub] ingest failed (exit $status); git operation continues." >&2
 fi
 exit 0
+

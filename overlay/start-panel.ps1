@@ -47,6 +47,34 @@ if (-not $node -or -not $npm) {
 }
 
 [void](New-Item -ItemType Directory -Force -Path $logDir)
+
+$hubDist = Join-Path $hubRoot 'dist\index.js'
+if (-not (Test-Path -LiteralPath (Join-Path $hubRoot 'node_modules'))) {
+    Push-Location $hubRoot
+    try {
+        & npm.cmd install
+        if ($LASTEXITCODE -ne 0) { throw 'hub npm install failed' }
+    } finally {
+        Pop-Location
+    }
+}
+$hubSrc = Join-Path $hubRoot 'src'
+$distStale = -not (Test-Path -LiteralPath $hubDist)
+if (-not $distStale -and (Test-Path -LiteralPath $hubSrc)) {
+    $distTime = (Get-Item -LiteralPath $hubDist).LastWriteTimeUtc
+    $newestSrc = Get-ChildItem -LiteralPath $hubSrc -Recurse -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($newestSrc -and $newestSrc.LastWriteTimeUtc -gt $distTime) { $distStale = $true }
+}
+if ($distStale) {
+    Push-Location $hubRoot
+    try {
+        & npm.cmd run build
+        if ($LASTEXITCODE -ne 0) { throw 'hub TypeScript build failed' }
+    } finally {
+        Pop-Location
+    }
+}
+
 if (-not (Test-Path -LiteralPath (Join-Path $panelRoot 'node_modules'))) {
     Push-Location $panelRoot
     try {
