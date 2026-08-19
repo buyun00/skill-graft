@@ -1,3 +1,10 @@
-你在中心仓 {{HUB}} 中工作。只改 {{PATH}} 。
-面板意图：{{INTENT}}
-不要写游戏仓业务代码。改完在本仓 git commit，并在 skill-review/history 记一条。
+你在中心仓 {{HUB}} 工作。只改 {{PATH}} 这一条 Skill（及其目录内文件）。
+用户从 CLI（`sg edit`）给出的意图：{{INTENT}}
+不要再问一次确认。不要写游戏仓业务代码。不要改其他 Skill、inbox、adopted、overlay 脚本。
+验收：
+1. 中心仓 {{PATH}} 的文件内容已按意图改变。
+2. 已挂接的游戏树若经 Junction 指向该 Skill，读到的字节与 hub 相同（不要在游戏仓再复制一份）。
+3. 游戏仓 git status 不因这次编辑多出业务文件。
+改完在本仓 git commit 中心仓改动，并在 skill-review/history 记一条。
+停手条件：目标路径不是 hub 上的指定 Skill；需要改游戏仓才能完成。
+最后写一行「验收摘要：」说明改了哪个文件、已挂树是否读到同一内容。

@@ -399,6 +399,59 @@ test('session --id --wait reaps a fake pid nonzero exit as failed', { timeout: 2
   assert.equal(payload.session.exitCode, 3)
 })
 
+test('detach and edit --no-spawn enqueue the conversation prompt and finalize via fake pid', (t) => {
+  const dir = tempHub()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'overlay', 'prompts'), { recursive: true })
+  fs.copyFileSync(path.join(hubRoot, 'overlay', 'prompts', 'detach.txt'), path.join(dir, 'overlay', 'prompts', 'detach.txt'))
+  fs.copyFileSync(path.join(hubRoot, 'overlay', 'prompts', 'edit.txt'), path.join(dir, 'overlay', 'prompts', 'edit.txt'))
+  const env = { HUB_ROOT: dir, HUB_SPAWN_CODEX: '0' }
+  const detach = parseStdout(
+    spawnHub(['detach', '--worktree', 'C:\\hub-cli-detach-tree', '--no-spawn'], { env }),
+    'detach-enqueue'
+  )
+  assert.equal(detach.session.kind, 'detach')
+  assert.equal(detach.session.status, 'queued')
+  assert.equal(detach.applied, null)
+  const detachPrompt = fs.readFileSync(detach.session.promptFile, 'utf8')
+  assert.match(detachPrompt, /Restore/)
+  assert.match(detachPrompt, /attached-worktrees/)
+  assert.match(detachPrompt, /停手条件/)
+  assert.doesNotMatch(detachPrompt, /等用户确认/)
+
+  const edit = parseStdout(
+    spawnHub(['edit', '--path', 'skills/ozdqp-development', '--intent', 'add a smoke line', '--no-spawn'], { env }),
+    'edit-enqueue'
+  )
+  assert.equal(edit.session.kind, 'edit')
+  assert.equal(edit.session.status, 'queued')
+  const editPrompt = fs.readFileSync(edit.session.promptFile, 'utf8')
+  assert.match(editPrompt, /skills\/ozdqp-development/)
+  assert.match(editPrompt, /已挂接/)
+
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 300)'], {
+    stdio: 'ignore',
+    windowsHide: true
+  })
+  t.after(() => {
+    try { child.kill() } catch { /* gone */ }
+  })
+  markRunningWithPid(dir, detach.session, child.pid, {
+    exitCode: 0,
+    log: 'session id: 0123456789abcdef0123456789abcdef\n',
+    last: '验收摘要: attached=false officialPresent=true\n'
+  })
+  const settled = parseStdout(
+    spawnHub(['session', '--id', detach.session.id, '--wait'], {
+      env: { ...env, HUB_WAIT_TIMEOUT_MS: '10000' }
+    }),
+    'detach-wait'
+  )
+  assert.equal(settled.session.status, 'waiting')
+  assert.equal(settled.session.exitCode, 0)
+  assert.match(settled.session.summary || '', /attached=false/)
+})
+
 test('shipped CLI attach spawns Codex on gpt-5.6-luna at max, not overlay scripts', () => {
   const src = fs.readFileSync(path.join(hubRoot, 'dist', 'control', 'cli.js'), 'utf8')
   assert.match(src, /gpt-5\.6-luna/)

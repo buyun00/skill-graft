@@ -86,9 +86,14 @@ function Invoke-ChunkedGit([string[]]$prefixArguments, [string[]]$paths) {
     if ($useStdin) {
         $temp = Join-Path $env:TEMP ("ozdqp-hub-index-{0}.txt" -f [guid]::NewGuid().ToString('N'))
         try {
-            [System.IO.File]::WriteAllLines($temp, $paths, [System.Text.UTF8Encoding]::new($false))
-            Get-Content -LiteralPath $temp -Encoding UTF8 | & git -C $workspace -c i18n.filesEncoding=utf-8 @prefixArguments --stdin
+            $payload = [System.Text.Encoding]::UTF8.GetBytes((($paths -join "`0") + "`0"))
+            [System.IO.File]::WriteAllBytes($temp, $payload)
+            $argLine = (@('-C', $workspace, '-c', 'core.quotepath=false', '-c', 'i18n.filesEncoding=utf-8') + $prefixArguments + @('-z', '--stdin') | ForEach-Object {
+                if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+            }) -join ' '
+            $ran = cmd.exe /c "git $argLine < `"$temp`""
             if ($LASTEXITCODE -ne 0) { throw "git $($prefixArguments -join ' ') failed" }
+            [void]$ran
         } finally {
             Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
         }
