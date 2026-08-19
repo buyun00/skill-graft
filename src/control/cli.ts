@@ -65,6 +65,8 @@ function usage(): string {
     '  detach --worktree <path> [--intent <text>] [--no-spawn] [--wait]',
     '  edit --path <rel> [--intent <text>] [--no-spawn] [--wait]',
     '  chat [--intent <text>] [--worktree <path>] [--no-spawn] [--wait]',
+    '  analyze [--id <inbox-id>] [--intent <text>] [--no-spawn] [--wait]',
+    '                                 Enqueue an analysis session; on finish writes suggestion.* and status=proposed.',
     '  resume --id <id> --message <text> [--no-spawn] [--wait]',
     '  session --id <id> [--wait]     Read the same skill-review/sessions.json; reap a dead pid first'
   ].join('\n')
@@ -283,7 +285,11 @@ async function main() {
     const payload = readStdin()
     const result = ingest(hub, { gameRepo, payload, dispatch })
     if (dispatch && result.created > 0) {
-      const session = enqueueSession(hub, { kind: 'chat', intent: 'Analyze queued inbox skill updates' })
+      const session = enqueueSession(hub, {
+        kind: 'analyze',
+        intent: 'Analyze queued inbox skill updates',
+        inboxIds: result.items.map((item) => item.id)
+      })
       print({ ...result, dispatched: true, session, applied: null })
     } else {
       print({ ...result, dispatched: Boolean(dispatch && result.created > 0) })
@@ -309,6 +315,31 @@ async function main() {
     if (wait) session = await waitUntilSettled(hub, id)
     else session = presentSession(hub, session)
     print({ ok: true, action: 'session', session })
+    return
+  }
+  if (command === 'analyze') {
+    const inboxId = takeFlag(argv, '--id')
+    const intent = takeFlag(argv, '--intent') || 'Analyze queued inbox skill updates'
+    const noSpawn = takeSwitch(argv, '--no-spawn')
+    const wait = takeSwitch(argv, '--wait')
+    const status = getStatus(hub)
+    const inboxIds = inboxId
+      ? [inboxId]
+      : status.items.filter((item) => item.status === 'queued' || item.status === 'proposed').map((item) => item.id)
+    if (inboxId && !status.items.some((item) => item.id === inboxId)) fail(`inbox item not found: ${inboxId}`)
+    let session = enqueueSession(hub, { kind: 'analyze', intent, inboxIds })
+    session.model = process.env.HUB_CODEX_MODEL || DEFAULT_CODEX_MODEL
+    session.effort = process.env.HUB_CODEX_EFFORT || DEFAULT_CODEX_EFFORT
+    if (shouldSpawn(noSpawn)) {
+      const prompt = hub.fs.readText(session.promptFile) || intent
+      const pid = spawnCodex(hub, session, { prompt })
+      session = markSessionSpawned(hub, session, pid)
+      if (!pid) session = finalizeSession(hub, session, { exitCode: 1, error: 'spawn failed' })
+    } else {
+      saveSession(hub, session)
+    }
+    if (wait) session = await waitUntilSettled(hub, session.id)
+    print({ ok: true, action: 'analyze', session, applied: null })
     return
   }
   if (command === 'attach' || command === 'detach' || command === 'edit' || command === 'chat') {

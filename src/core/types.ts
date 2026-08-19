@@ -106,6 +106,7 @@ export type HubSession = {
   lastMessage?: string
   endedAt?: string
   canResume?: boolean
+  inboxIds?: string[]
 }
 
 export type IngestTransaction = {

@@ -6,6 +6,7 @@ export {
   enqueueSession,
   evaluateDoctor,
   extractCodexSessionId,
+  extractSuggestion,
   finalizeSession,
   findSession,
   gameRepoOf,

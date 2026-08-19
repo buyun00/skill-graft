@@ -16,6 +16,7 @@ export {
   enqueueSession,
   extractAcceptanceSummary,
   extractCodexSessionId,
+  extractSuggestion,
   finalizeSession,
   findSession,
   inProgressSessions,

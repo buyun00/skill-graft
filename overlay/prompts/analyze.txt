@@ -1,0 +1,6 @@
+你在中心仓 {{HUB}} 工作。任务：给 skills/inbox 里尚未拍板的条目写建议，不要执行 adopt / merge / reject，不要改游戏仓。
+用户意图：{{INTENT}}
+阅读 inbox 各条目的 SKILL.md 或文件，对每一条给出 adopt、merge 或 reject 之一。
+最后只输出一段 JSON（可以包在 ```json 里），形状：
+{"action":"reject","target":"","reason":"简短理由"}
+action 只能是 adopt、merge 或 reject。建议只给人看，CLI decide 仍要人显式 --action。

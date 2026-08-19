@@ -8,6 +8,7 @@ import {
   createHub,
   decide,
   enqueueSession,
+  extractSuggestion,
   extractCodexSessionId,
   finalizeSession,
   findSession,
@@ -385,6 +386,32 @@ test('repairLinks restores a broken resident skill junction on an attached fixtu
   assert.equal(result.repaired, true)
   assert.equal(ctx.link.isLinked(linkPath, hubPath), true)
   assert.equal(fs.readFileSync(path.join(linkPath, 'SKILL.md'), 'utf8'), `${name}\n`)
+})
+
+test('analyze finalize writes suggestion and proposed without adopting', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-analyze-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'skill-review', 'history'), { recursive: true })
+  fs.mkdirSync(path.join(dir, 'skills', 'inbox', 'smoke-analyze'), { recursive: true })
+  fs.writeFileSync(path.join(dir, 'skills', 'inbox', 'smoke-analyze', 'SKILL.md'), '# smoke\n')
+  fs.writeFileSync(path.join(dir, 'skill-review', 'state.json'), JSON.stringify({
+    version: 1,
+    items: [{ id: 'an-1', name: 'smoke-analyze', unit: 'smoke-analyze', status: 'queued', inboxPath: 'skills/inbox/smoke-analyze' }]
+  }))
+  const ctx = createHub(dir)
+  const session = enqueueSession(ctx, { kind: 'analyze', intent: 'suggest', inboxIds: ['an-1'] })
+  markSessionSpawned(ctx, session, 88001)
+  ctx.fs.writeText(session.logFile, 'session id: 0123456789abcdef0123456789abcdef\n')
+  ctx.fs.writeText(session.lastFile, '```json\n{"action":"reject","target":"","reason":"discardable smoke"}\n```\n')
+  ctx.fs.writeText(sessionExitFile(ctx, session), '0\n')
+  reapSessions(ctx, () => false)
+  const state = JSON.parse(fs.readFileSync(path.join(dir, 'skill-review', 'state.json'), 'utf8'))
+  const item = state.items.find((row) => row.id === 'an-1')
+  assert.equal(item.status, 'proposed')
+  assert.equal(item.suggestion.action, 'reject')
+  assert.match(item.suggestion.reason, /discardable/)
+  assert.equal(fs.existsSync(path.join(dir, 'skills', 'inbox', 'smoke-analyze', 'SKILL.md')), true)
+  assert.equal(extractSuggestion(ctx.fs.readText(session.lastFile)).action, 'reject')
 })
 
 test('ingest empty payload is a no-op and does not need a game repo', (t) => {

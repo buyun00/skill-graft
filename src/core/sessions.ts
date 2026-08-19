@@ -1,7 +1,7 @@
 import type { HubContext } from './ports.js'
-import type { HubSession } from './types.js'
+import type { HubSession, HubStateFile, InboxSuggestion } from './types.js'
 
-const SESSION_KINDS = new Set(['attach', 'detach', 'edit', 'chat'])
+const SESSION_KINDS = new Set(['attach', 'detach', 'edit', 'chat', 'analyze'])
 
 export type PidAlive = (pid: number) => boolean
 
@@ -88,9 +88,66 @@ function applyFinalize(session: HubSession, exitCode: number, error?: string) {
   }
 }
 
+export function extractSuggestion(text: string): InboxSuggestion | null {
+  const raw = String(text || '')
+  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)
+  const body = fenced ? fenced[1] : raw
+  const start = body.search(/[\[{]/)
+  if (start < 0) return null
+  const sliced = body.slice(start)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(sliced)
+  } catch {
+    const endObj = sliced.lastIndexOf('}')
+    const endArr = sliced.lastIndexOf(']')
+    const end = Math.max(endObj, endArr)
+    if (end < 0) return null
+    try {
+      parsed = JSON.parse(sliced.slice(0, end + 1))
+    } catch {
+      return null
+    }
+  }
+  const row = Array.isArray(parsed) ? parsed[0] : parsed
+  if (!row || typeof row !== 'object') return null
+  const rec = row as Record<string, unknown>
+  const action = String(rec.action || rec.suggestion || '').trim()
+  if (!action) return null
+  return {
+    action,
+    target: String(rec.target || ''),
+    reason: String(rec.reason || rec.summary || ''),
+    confidence: String(rec.confidence || '')
+  }
+}
+
+function applyInboxSuggestions(ctx: HubContext, session: HubSession) {
+  if (session.kind !== 'analyze' || session.exitCode !== 0) return
+  const suggestion = extractSuggestion(session.lastMessage || session.summary || '')
+  if (!suggestion) return
+  const file = ctx.path.join(ctx.hubRoot, 'skill-review', 'state.json')
+  const state: HubStateFile = ctx.persist.readState(file)
+  const items = Array.isArray(state.items) ? state.items : []
+  const ids = new Set((session.inboxIds || []).filter(Boolean))
+  const now = new Date().toISOString()
+  let changed = false
+  for (const item of items) {
+    if (ids.size > 0 && !ids.has(item.id)) continue
+    if (ids.size === 0 && item.status !== 'queued' && item.status !== 'proposed') continue
+    item.suggestion = suggestion
+    item.status = 'proposed'
+    item.updatedAt = now
+    changed = true
+  }
+  if (!changed) return
+  state.items = items
+  ctx.persist.writeState(file, state)
+}
+
 export function enqueueSession(
   ctx: HubContext,
-  input: { kind: string; worktree?: string; skillPath?: string; intent?: string }
+  input: { kind: string; worktree?: string; skillPath?: string; intent?: string; inboxIds?: string[] }
 ): HubSession {
   const kind = input.kind || 'chat'
   if (!SESSION_KINDS.has(kind)) throw new Error(`unsupported session kind: ${kind}`)
@@ -125,7 +182,8 @@ export function enqueueSession(
     error: '',
     codexSessionId: '',
     summary: '',
-    lastMessage: ''
+    lastMessage: '',
+    inboxIds: input.inboxIds || []
   }
   const sessions = loadSessions(ctx)
   sessions.push(session)
@@ -201,6 +259,7 @@ export function finalizeSession(
 ): HubSession {
   refreshFromDisk(ctx, session)
   applyFinalize(session, result.exitCode, result.error)
+  applyInboxSuggestions(ctx, session)
   saveSession(ctx, session)
   return presentSession(ctx, session)
 }
@@ -216,6 +275,7 @@ export function reapSessions(ctx: HubContext, pidAlive: PidAlive): HubSession[] 
       const alive = Boolean(session.pid) && pidAlive(session.pid)
       if (!alive) {
         applyFinalize(session, resolveExitCode(ctx, session))
+        applyInboxSuggestions(ctx, session)
         finalized.push(session)
       }
     }

@@ -50,7 +50,7 @@ test('U4 unknown command is non-zero; --help and -h exit 0', () => {
 
   const help = spawnHub(['--help'])
   assert.equal(help.status, 0, help.stderr)
-  for (const verb of ['status', 'list-worktrees', 'list-skills', 'repair-links', 'ingest', 'decide', 'attach', 'detach', 'edit', 'chat', 'resume', 'session', 'setup', 'uninstall', 'doctor', 'daemon']) {
+  for (const verb of ['status', 'list-worktrees', 'list-skills', 'repair-links', 'ingest', 'decide', 'attach', 'detach', 'edit', 'chat', 'analyze', 'resume', 'session', 'setup', 'uninstall', 'doctor', 'daemon']) {
     assert.match(help.stdout, new RegExp(verb))
   }
 
@@ -162,7 +162,7 @@ test('CLI ingest writes inbox under isolated HUB_ROOT and --dispatch only enqueu
   assert.equal(payload.ok, true)
   assert.ok(payload.created >= 1)
   assert.equal(payload.dispatched, true)
-  assert.equal(payload.session.kind, 'chat')
+  assert.equal(payload.session.kind, 'analyze')
   assert.equal(payload.session.status, 'queued')
   assert.equal(payload.applied, null)
   const inboxSkill = path.join(hubDir, 'skills', 'inbox', 'smoke-ingest', 'SKILL.md')
@@ -206,6 +206,44 @@ test('CLI decide adopt reports linked vs skipped trees and does not touch live i
   assert.equal(fs.existsSync(path.join(attached, '.agents', 'skills', 'smoke-cli-adopt', 'SKILL.md')), true)
   assert.equal(fs.existsSync(path.join(loose, '.agents', 'skills', 'smoke-cli-adopt')), false)
   assert.equal(fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : '', liveBefore)
+})
+
+test('CLI analyze fake session writes proposed suggestion; decide without --action does not adopt', (t) => {
+  const dir = tempHub()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'overlay', 'prompts'), { recursive: true })
+  fs.copyFileSync(path.join(hubRoot, 'overlay', 'prompts', 'analyze.txt'), path.join(dir, 'overlay', 'prompts', 'analyze.txt'))
+  fs.mkdirSync(path.join(dir, 'skills', 'inbox', 'smoke-cli-analyze'), { recursive: true })
+  fs.writeFileSync(path.join(dir, 'skills', 'inbox', 'smoke-cli-analyze', 'SKILL.md'), '# x\n')
+  const id = 'cli-an-1'
+  fs.writeFileSync(path.join(dir, 'skill-review', 'state.json'), JSON.stringify({
+    version: 1,
+    items: [{ id, name: 'smoke-cli-analyze', unit: 'smoke-cli-analyze', status: 'queued', inboxPath: 'skills/inbox/smoke-cli-analyze' }]
+  }))
+  const env = { HUB_ROOT: dir, HUB_SPAWN_CODEX: '0' }
+  const missing = spawnHub(['decide', '--id', id], { env })
+  assert.notEqual(missing.status, 0)
+  assert.match(missing.stderr, /--action/)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'skill-review', 'state.json'), 'utf8')).items[0].status, 'queued')
+  const analyze = parseStdout(spawnHub(['analyze', '--id', id, '--no-spawn'], { env }), 'analyze')
+  assert.equal(analyze.session.kind, 'analyze')
+  assert.equal(analyze.applied, null)
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 300)'], { stdio: 'ignore', windowsHide: true })
+  t.after(() => { try { child.kill() } catch { /* gone */ } })
+  markRunningWithPid(dir, analyze.session, child.pid, {
+    exitCode: 0,
+    log: 'session id: 0123456789abcdef0123456789abcdef\n',
+    last: '{"action":"reject","target":"","reason":"smoke only"}'
+  })
+  parseStdout(
+    spawnHub(['session', '--id', analyze.session.id, '--wait'], { env: { ...env, HUB_WAIT_TIMEOUT_MS: '10000' } }),
+    'analyze-wait'
+  )
+  const status = parseStdout(spawnHub(['status'], { env }), 'status-proposed')
+  const item = status.items.find((row) => row.id === id)
+  assert.equal(item.status, 'proposed')
+  assert.equal(item.suggestion.action, 'reject')
+  assert.equal(fs.existsSync(path.join(dir, 'skills', 'inbox', 'smoke-cli-analyze', 'SKILL.md')), true)
 })
 
 test('decide reject updates a fixture hub and does not touch the live inbox', (t) => {
