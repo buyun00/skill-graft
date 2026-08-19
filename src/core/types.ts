@@ -46,6 +46,7 @@ export type HubState = {
   adopted: SkillNode[]
   inbox: SkillNode[]
   items: InboxItem[]
+  sessions: HubSession[]
   counts: {
     resident: number
     adopted: number
@@ -101,6 +102,10 @@ export type HubSession = {
   codexSessionId: string
   model?: string
   effort?: string
+  summary?: string
+  lastMessage?: string
+  endedAt?: string
+  canResume?: boolean
 }
 
 export type IngestTransaction = {

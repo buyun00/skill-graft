@@ -11,7 +11,22 @@ export {
 export { repairPlan } from './repair.js'
 export { emptyIngestResult, parseIngestTransactions } from './ingest.js'
 export { decide } from './decide.js'
-export { enqueueSession, findSession, markSessionSpawned, resumeSession, saveSession } from './sessions.js'
+export {
+  enqueueSession,
+  extractAcceptanceSummary,
+  extractCodexSessionId,
+  finalizeSession,
+  findSession,
+  inProgressSessions,
+  listSessions,
+  markSessionSpawned,
+  presentSession,
+  reapSessions,
+  resumeSession,
+  saveSession,
+  sessionExitFile
+} from './sessions.js'
+export type { PidAlive } from './sessions.js'
 export {
   API_PORT,
   evaluateDoctor,

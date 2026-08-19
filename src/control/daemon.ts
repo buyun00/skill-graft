@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import { join } from 'node:path'
+import { createHub } from '../adapters/create-hub.js'
 import { API_PORT } from '../core/install.js'
+import { reapSessions } from '../core/index.js'
 import { createInstallHost, type InstallHost } from '../adapters/install-host.js'
 
 export type DaemonRunOptions = {
@@ -185,6 +187,11 @@ export async function runDaemon(opts: DaemonRunOptions) {
   process.stderr.write(`skill-graft daemon pid ${process.pid}\n`)
 
   const tick = async () => {
+    try {
+      reapSessions(createHub(hubRoot), (pid) => host.pidAlive(pid))
+    } catch (error) {
+      log(`session reap ${error instanceof Error ? error.message : String(error)}`)
+    }
     const healthy = await pingApi(port)
     if (healthy) {
       backoff = 1000

@@ -3,8 +3,14 @@ import type { HubSession } from './types.js'
 
 const SESSION_KINDS = new Set(['attach', 'detach', 'edit', 'chat'])
 
+export type PidAlive = (pid: number) => boolean
+
 function sessionsFile(ctx: HubContext) {
   return ctx.path.join(ctx.hubRoot, 'skill-review', 'sessions.json')
+}
+
+export function sessionExitFile(ctx: HubContext, session: { id: string }) {
+  return ctx.path.join(ctx.hubRoot, 'skill-review', `session-${session.id}.exit`)
 }
 
 function loadSessions(ctx: HubContext): HubSession[] {
@@ -31,6 +37,55 @@ function buildPrompt(ctx: HubContext, input: { kind: string; skillPath: string; 
     .replaceAll('{{INTENT}}', input.intent || '')
     .replaceAll('{{WORKTREE}}', input.worktree || '')
     .trim()
+}
+
+export function extractCodexSessionId(text: string): string {
+  const match = String(text || '').match(/session id:\s*([0-9a-fA-F-]{16,})/i)
+  return match ? match[1] : ''
+}
+
+export function extractAcceptanceSummary(text: string): string {
+  const raw = String(text || '')
+  const labeled = raw.match(/验收摘要[:：]\s*([\s\S]+)/) || raw.match(/acceptance summary[:：]\s*([\s\S]+)/i)
+  const picked = (labeled ? labeled[1] : raw).trim()
+  return picked.slice(0, 2000)
+}
+
+function refreshFromDisk(ctx: HubContext, session: HubSession) {
+  const log = ctx.fs.readText(session.logFile) || ''
+  const last = ctx.fs.readText(session.lastFile) || ''
+  if (last) session.lastMessage = last
+  const id = extractCodexSessionId(log) || extractCodexSessionId(last)
+  if (id) session.codexSessionId = id
+  const summary = extractAcceptanceSummary(last || log)
+  if (summary) session.summary = summary
+  if (session.status === 'completed') {
+    session.status = session.exitCode === 0 ? 'waiting' : 'failed'
+  }
+}
+
+function resolveExitCode(ctx: HubContext, session: HubSession): number {
+  const text = ctx.fs.readText(sessionExitFile(ctx, session))
+  if (text != null) {
+    const parsed = Number.parseInt(String(text).trim(), 10)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  if (session.exitCode != null) return session.exitCode
+  const log = ctx.fs.readText(session.logFile) || ''
+  if (/\[spawn error\]/.test(log)) return 1
+  if (extractCodexSessionId(log)) return 0
+  return 1
+}
+
+function applyFinalize(session: HubSession, exitCode: number, error?: string) {
+  session.exitCode = exitCode
+  session.status = exitCode === 0 ? 'waiting' : 'failed'
+  session.endedAt = new Date().toISOString()
+  if (exitCode !== 0) {
+    session.error = error || session.error || `process exited with code ${exitCode}`
+  } else if (!session.error) {
+    session.error = ''
+  }
 }
 
 export function enqueueSession(
@@ -68,7 +123,9 @@ export function enqueueSession(
     status: 'queued',
     exitCode: null,
     error: '',
-    codexSessionId: ''
+    codexSessionId: '',
+    summary: '',
+    lastMessage: ''
   }
   const sessions = loadSessions(ctx)
   sessions.push(session)
@@ -107,6 +164,8 @@ export function resumeSession(ctx: HubContext, input: { id: string; message: str
   session.intent = message
   session.status = 'queued'
   session.error = ''
+  session.exitCode = null
+  session.endedAt = ''
   saveSession(ctx, session)
   return session
 }
@@ -116,4 +175,52 @@ export function markSessionSpawned(ctx: HubContext, session: HubSession, pid: nu
   session.status = pid ? 'running' : 'queued'
   saveSession(ctx, session)
   return session
+}
+
+export function presentSession(ctx: HubContext, session: HubSession): HubSession {
+  const copy: HubSession = { ...session }
+  refreshFromDisk(ctx, copy)
+  return {
+    ...copy,
+    canResume: Boolean(copy.codexSessionId) && copy.status !== 'running' && copy.status !== 'queued'
+  }
+}
+
+export function listSessions(ctx: HubContext): HubSession[] {
+  return loadSessions(ctx).map((item) => presentSession(ctx, item))
+}
+
+export function inProgressSessions(ctx: HubContext): HubSession[] {
+  return listSessions(ctx).filter((item) => item.status === 'running' || item.status === 'queued')
+}
+
+export function finalizeSession(
+  ctx: HubContext,
+  session: HubSession,
+  result: { exitCode: number; error?: string }
+): HubSession {
+  refreshFromDisk(ctx, session)
+  applyFinalize(session, result.exitCode, result.error)
+  saveSession(ctx, session)
+  return presentSession(ctx, session)
+}
+
+export function reapSessions(ctx: HubContext, pidAlive: PidAlive): HubSession[] {
+  const sessions = loadSessions(ctx)
+  const finalized: HubSession[] = []
+  let dirty = false
+  for (const session of sessions) {
+    const before = JSON.stringify(session)
+    refreshFromDisk(ctx, session)
+    if (session.status === 'running') {
+      const alive = Boolean(session.pid) && pidAlive(session.pid)
+      if (!alive) {
+        applyFinalize(session, resolveExitCode(ctx, session))
+        finalized.push(session)
+      }
+    }
+    if (JSON.stringify(session) !== before) dirty = true
+  }
+  if (dirty) saveSessions(ctx, sessions)
+  return finalized
 }

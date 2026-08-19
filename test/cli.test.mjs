@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -49,7 +50,7 @@ test('U4 unknown command is non-zero; --help and -h exit 0', () => {
 
   const help = spawnHub(['--help'])
   assert.equal(help.status, 0, help.stderr)
-  for (const verb of ['status', 'list-worktrees', 'list-skills', 'repair-links', 'ingest', 'decide', 'attach', 'detach', 'edit', 'chat', 'resume', 'setup', 'uninstall', 'doctor', 'daemon']) {
+  for (const verb of ['status', 'list-worktrees', 'list-skills', 'repair-links', 'ingest', 'decide', 'attach', 'detach', 'edit', 'chat', 'resume', 'session', 'setup', 'uninstall', 'doctor', 'daemon']) {
     assert.match(help.stdout, new RegExp(verb))
   }
 
@@ -196,6 +197,119 @@ test('session verbs enqueue and do not silently rewrite a live game tree', (t) =
   const afterSessions = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
   assert.doesNotMatch(afterSessions, /hub-cli-not-a-game-tree/)
   assert.equal(fs.existsSync(fakeTree), false)
+})
+
+function markRunningWithPid(dir, session, pid, extra = {}) {
+  const file = path.join(dir, 'skill-review', 'sessions.json')
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const row = data.sessions.find((item) => item.id === session.id)
+  row.pid = pid
+  row.status = 'running'
+  fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`)
+  fs.writeFileSync(session.logFile, extra.log || `session id: 0123456789abcdef0123456789abcdef\n`)
+  fs.writeFileSync(session.lastFile, extra.last || '验收摘要: fixture-ok\n')
+  if (extra.exitCode != null) {
+    fs.writeFileSync(path.join(dir, 'skill-review', `session-${session.id}.exit`), `${extra.exitCode}\n`)
+  }
+}
+
+test('attach --no-spawn --wait stays queued and does not launch Codex', (t) => {
+  const dir = tempHub()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const liveSessions = path.join(hubRoot, 'skill-review', 'sessions.json')
+  const before = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
+  const started = Date.now()
+  const payload = parseStdout(
+    spawnHub(['attach', '--worktree', 'C:\\hub-cli-wait-queued', '--intent', 'no-spawn-wait', '--no-spawn', '--wait'], {
+      env: { HUB_ROOT: dir, HUB_WAIT_TIMEOUT_MS: '4000', HUB_SPAWN_CODEX: '0' }
+    }),
+    'attach-no-spawn-wait'
+  )
+  assert.ok(Date.now() - started < 3500, 'queued --wait must return without polling a missing pid')
+  assert.equal(payload.session.status, 'queued')
+  assert.equal(payload.session.pid, 0)
+  assert.equal(fs.existsSync(path.join(dir, 'skill-review', `run-codex-${payload.session.id}.cmd`)), false)
+  assert.equal(fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : '', before)
+})
+
+test('session --id --wait reaps a fake pid exit 0 without launching Codex', { timeout: 20000 }, (t) => {
+  const dir = tempHub()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const liveSessions = path.join(hubRoot, 'skill-review', 'sessions.json')
+  const before = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
+  const attach = parseStdout(
+    spawnHub(['attach', '--worktree', 'C:\\hub-cli-fake-pid', '--intent', 'wait-zero', '--no-spawn'], {
+      env: { HUB_ROOT: dir, HUB_SPAWN_CODEX: '0' }
+    }),
+    'attach-fixture'
+  )
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 400)'], {
+    stdio: 'ignore',
+    windowsHide: true
+  })
+  t.after(() => {
+    try {
+      child.kill()
+    } catch {
+      /* already exited */
+    }
+  })
+  assert.ok(child.pid > 0)
+  markRunningWithPid(dir, attach.session, child.pid, { exitCode: 0 })
+  const payload = parseStdout(
+    spawnHub(['session', '--id', attach.session.id, '--wait'], {
+      env: { HUB_ROOT: dir, HUB_WAIT_TIMEOUT_MS: '10000', HUB_SPAWN_CODEX: '0' }
+    }),
+    'session-wait-zero'
+  )
+  assert.equal(payload.ok, true)
+  assert.equal(payload.action, 'session')
+  assert.equal(payload.session.status, 'waiting')
+  assert.equal(payload.session.exitCode, 0)
+  assert.equal(payload.session.codexSessionId, '0123456789abcdef0123456789abcdef')
+  assert.match(payload.session.summary || '', /fixture-ok/)
+  assert.equal(fs.existsSync(path.join(dir, 'skill-review', `run-codex-${attach.session.id}.cmd`)), false)
+  const stored = JSON.parse(fs.readFileSync(path.join(dir, 'skill-review', 'sessions.json'), 'utf8'))
+  const row = stored.sessions.find((item) => item.id === attach.session.id)
+  assert.equal(row.status, 'waiting')
+  assert.equal(row.exitCode, 0)
+  const status = parseStdout(spawnHub(['status'], { env: { HUB_ROOT: dir } }), 'status-after-wait')
+  assert.ok(Array.isArray(status.sessions))
+  assert.equal(status.sessions.some((item) => item.id === attach.session.id), false)
+  assert.equal(fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : '', before)
+})
+
+test('session --id --wait reaps a fake pid nonzero exit as failed', { timeout: 20000 }, (t) => {
+  const dir = tempHub()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const chat = parseStdout(
+    spawnHub(['chat', '--intent', 'wait-fail', '--no-spawn'], { env: { HUB_ROOT: dir, HUB_SPAWN_CODEX: '0' } }),
+    'chat-fixture'
+  )
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(3), 400)'], {
+    stdio: 'ignore',
+    windowsHide: true
+  })
+  t.after(() => {
+    try {
+      child.kill()
+    } catch {
+      /* already exited */
+    }
+  })
+  markRunningWithPid(dir, chat.session, child.pid, {
+    exitCode: 3,
+    log: 'failed without a session id\n',
+    last: ''
+  })
+  const payload = parseStdout(
+    spawnHub(['session', '--id', chat.session.id, '--wait'], {
+      env: { HUB_ROOT: dir, HUB_WAIT_TIMEOUT_MS: '10000', HUB_SPAWN_CODEX: '0' }
+    }),
+    'session-wait-fail'
+  )
+  assert.equal(payload.session.status, 'failed')
+  assert.equal(payload.session.exitCode, 3)
 })
 
 test('shipped CLI attach spawns Codex on gpt-5.6-luna at max, not overlay scripts', () => {

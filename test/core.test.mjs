@@ -5,13 +5,20 @@ import os from 'node:os'
 import test from 'node:test'
 import {
   createHub,
+  enqueueSession,
+  extractCodexSessionId,
+  finalizeSession,
+  findSession,
   getStatus,
   isClientCheckout,
   isEphemeralPath,
   listSkills,
   listWorktrees,
+  markSessionSpawned,
   parseWorktreePorcelain,
-  RESIDENT_SKILLS
+  reapSessions,
+  RESIDENT_SKILLS,
+  sessionExitFile
 } from '../dist/index.js'
 import { hubRoot, makeFs } from './helpers.mjs'
 
@@ -237,6 +244,63 @@ test('C9 inbox nodes are kind inbox and never attached', () => {
   assert.equal(skills.inbox[0].kind, 'inbox')
   assert.equal(skills.inbox[0].attached, false)
   assert.equal(skills.inbox[0].name, 'queued-skill')
+})
+
+function sessionHub(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-session-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'skill-review', 'history'), { recursive: true })
+  const ctx = createHub(dir)
+  return { dir, ctx }
+}
+
+test('fake process exit 0 finalizes sessions.json to waiting with exitCode, codexSessionId, and summary', (t) => {
+  const { ctx } = sessionHub(t)
+  const session = enqueueSession(ctx, { kind: 'attach', worktree: 'C:\\hub-session-fake-tree', intent: 'close-loop' })
+  markSessionSpawned(ctx, session, 424201)
+  ctx.fs.writeText(session.logFile, 'codex\nsession id: 0123456789abcdef0123456789abcdef\n')
+  ctx.fs.writeText(session.lastFile, '验收摘要: attached=true overrideLinked=true officialPresent=false\n')
+  ctx.fs.writeText(sessionExitFile(ctx, session), '0\n')
+  const finalized = reapSessions(ctx, () => false)
+  assert.equal(finalized.length, 1)
+  assert.equal(finalized[0].status, 'waiting')
+  assert.equal(finalized[0].exitCode, 0)
+  assert.equal(finalized[0].codexSessionId, '0123456789abcdef0123456789abcdef')
+  assert.match(finalized[0].summary || '', /attached=true/)
+  const stored = findSession(ctx, session.id)
+  assert.equal(stored.status, 'waiting')
+  assert.equal(stored.exitCode, 0)
+  assert.equal(extractCodexSessionId(ctx.fs.readText(session.logFile)), stored.codexSessionId)
+})
+
+test('fake process nonzero exit finalizes sessions.json to failed', (t) => {
+  const { ctx } = sessionHub(t)
+  const session = enqueueSession(ctx, { kind: 'chat', intent: 'will-fail' })
+  markSessionSpawned(ctx, session, 424202)
+  ctx.fs.writeText(session.logFile, 'boom\n')
+  ctx.fs.writeText(sessionExitFile(ctx, session), '2\n')
+  const finalized = reapSessions(ctx, () => false)
+  assert.equal(finalized.length, 1)
+  assert.equal(finalized[0].status, 'failed')
+  assert.equal(finalized[0].exitCode, 2)
+  assert.match(finalized[0].error || '', /2/)
+  const stored = findSession(ctx, session.id)
+  assert.equal(stored.status, 'failed')
+  assert.equal(stored.exitCode, 2)
+})
+
+test('finalizeSession writes waiting on exit 0 without treating a live pid as settled', (t) => {
+  const { ctx } = sessionHub(t)
+  const session = enqueueSession(ctx, { kind: 'detach', worktree: 'C:\\hub-session-fake-tree', intent: 'done' })
+  markSessionSpawned(ctx, session, 424203)
+  ctx.fs.writeText(session.lastFile, '验收摘要: detached\n')
+  const stillRunning = reapSessions(ctx, (pid) => pid === 424203)
+  assert.equal(stillRunning.length, 0)
+  assert.equal(findSession(ctx, session.id).status, 'running')
+  const done = finalizeSession(ctx, findSession(ctx, session.id), { exitCode: 0 })
+  assert.equal(done.status, 'waiting')
+  assert.equal(done.exitCode, 0)
+  assert.match(done.summary || '', /detached/)
 })
 
 test('core source does not import http, powershell, Win32, or APPDATA', () => {

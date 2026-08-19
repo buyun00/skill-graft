@@ -1,6 +1,7 @@
 import { listSkills } from './inventory.js'
 import type { HubContext } from './ports.js'
 import type { HubState } from './types.js'
+import { inProgressSessions } from './sessions.js'
 
 export function gameRepoOf(ctx: HubContext): string | null {
   return ctx.git.configGet(ctx.hubRoot, 'ozdqp.gameRepo')
@@ -17,6 +18,7 @@ export function getStatus(ctx: HubContext): HubState {
     lastIngest: state.lastIngest || null,
     ...skills,
     items,
+    sessions: inProgressSessions(ctx),
     counts: {
       resident: skills.resident.length,
       adopted: skills.adopted.length,
