@@ -36,6 +36,9 @@ export interface FsPort {
 export interface LinkPort {
   samePath(left: string, right: string): boolean
   isLinked(linkPath: string, expected: string): boolean
+  linkDirectory(linkPath: string, target: string): void
+  linkFile(linkPath: string, target: string): void
+  unlink(linkPath: string): void
 }
 
 export interface GitPort {

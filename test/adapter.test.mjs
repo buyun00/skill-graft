@@ -74,6 +74,39 @@ test('A5 Junction or symlink isLinked when the host allows it', (t) => {
   assert.equal(hub.link.isLinked(linked, expected), true)
 })
 
+test('A10 LinkPort creates and deletes a file link; target bytes stay', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-linkfile-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const source = path.join(dir, 'source.txt')
+  const linked = path.join(dir, 'linked.txt')
+  fs.writeFileSync(source, 'hub-file-bytes')
+  const hub = createHub(dir)
+  hub.link.linkFile(linked, source)
+  assert.equal(hub.link.isLinked(linked, source), true)
+  assert.equal(fs.readFileSync(linked, 'utf8'), 'hub-file-bytes')
+  hub.link.unlink(linked)
+  assert.equal(hub.link.isLinked(linked, source), false)
+  assert.equal(fs.existsSync(linked), false)
+  assert.equal(fs.readFileSync(source, 'utf8'), 'hub-file-bytes')
+})
+
+test('A11 LinkPort creates and deletes a directory link; target files stay', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-linkdir-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const target = path.join(dir, 'target')
+  const linked = path.join(dir, 'linked')
+  fs.mkdirSync(target)
+  fs.writeFileSync(path.join(target, 'kept.txt'), 'hub-dir-bytes')
+  const hub = createHub(dir)
+  hub.link.linkDirectory(linked, target)
+  assert.equal(hub.link.isLinked(linked, target), true)
+  assert.equal(fs.readFileSync(path.join(linked, 'kept.txt'), 'utf8'), 'hub-dir-bytes')
+  hub.link.unlink(linked)
+  assert.equal(hub.link.isLinked(linked, target), false)
+  assert.equal(fs.existsSync(linked), false)
+  assert.equal(fs.readFileSync(path.join(target, 'kept.txt'), 'utf8'), 'hub-dir-bytes')
+})
+
 test('A6 missing file is empty, not a thrown business error', () => {
   const missing = path.join(os.tmpdir(), `hub-missing-${Date.now()}`, 'nope.txt')
   const other = `${missing}.other`
