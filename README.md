@@ -1,5 +1,11 @@
 # skill-graft
 
+> **语言 / Language**: [简体中文](./README.md) · [English](./README.en.md)
+
+![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
+![Status](https://img.shields.io/badge/status-local_experiment-orange.svg)
+![Platform](https://img.shields.io/badge/platform-windows-lightgrey.svg)
+
 工作树不持有 Skill 副本。中心仓是权威源，各仓库用链接「嫁接」上来：改一处，已挂上的树同时看见。
 
 GitHub 上的是**运行时**（CLI、适配层、面板、overlay）。你本机的 Skill 正文留在 `skills/`，默认不入库、不上传。
@@ -200,5 +206,7 @@ npm run test:http     # HTTP 转发与字段一致
 ---
 
 ## 许可与范围
+
+本仓库基于 **Apache License 2.0** 发布，详见 [LICENSE](./LICENSE)。
 
 本仓库是本机实验用的嫁接运行时。不要把本仓文件提交进业务仓库。
