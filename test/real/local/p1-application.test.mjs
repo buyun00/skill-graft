@@ -9,6 +9,7 @@ import {
   ProcessTracker,
   assertRunLayoutOwned,
   createIsolatedGitEnvironment,
+  createWindowsBatchInvocation,
   getAvailableLoopbackPort,
   validateRealE2eEnvironment
 } from '../../support/real-e2e.mjs'
@@ -366,14 +367,9 @@ function runNpm(args, cwd, env) {
   })
 }
 
-function quoteCmd(value) {
-  return `"${String(value).replaceAll('"', '""')}"`
-}
-
 function sgInvocation(args) {
   if (process.platform !== 'win32') return { command: context.cliPath, args }
-  const line = [quoteCmd(context.cliPath), ...args.map(quoteCmd)].join(' ')
-  return { command: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', line] }
+  return createWindowsBatchInvocation(context.cliPath, args)
 }
 
 function runSg(args, env) {
@@ -383,6 +379,7 @@ function runSg(args, env) {
     env,
     encoding: 'utf8',
     windowsHide: true,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
     timeout: 120000,
     maxBuffer: 16 * 1024 * 1024
   })
@@ -609,6 +606,13 @@ function seedInboxFixture(inboxId, inboxName, inboxDirectory) {
 }
 
 function browserAcceptanceMetadata({ base, inboxId, inboxName, inboxDirectory, installedEnv, phase }) {
+  const daemonLauncher = path.join(installRoot, 'run-daemon.cmd')
+  const preferredLaunch = process.platform === 'win32'
+    ? createWindowsBatchInvocation(daemonLauncher)
+    : { command: process.execPath, args: [context.cliPath, 'daemon', 'run'] }
+  const fallbackLaunch = process.platform === 'win32'
+    ? createWindowsBatchInvocation(context.cliPath, ['daemon', 'start'])
+    : { command: context.cliPath, args: ['daemon', 'start'] }
   return {
     schemaVersion: 1,
     runId: context.runId,
@@ -618,17 +622,17 @@ function browserAcceptanceMetadata({ base, inboxId, inboxName, inboxDirectory, i
       installedCli: context.cliPath,
       cwd: context.appRoot,
       dataRoot: context.hubDataRoot,
-      daemonLauncher: path.join(installRoot, 'run-daemon.cmd'),
+      daemonLauncher,
       preferredLaunch: {
-        executable: process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : process.execPath,
-        args: process.platform === 'win32'
-          ? ['/d', '/s', '/c', quoteCmd(path.join(installRoot, 'run-daemon.cmd'))]
-          : [context.cliPath, 'daemon', 'run'],
+        executable: preferredLaunch.command,
+        args: preferredLaunch.args,
+        windowsVerbatimArguments: preferredLaunch.windowsVerbatimArguments === true,
         note: 'the installed launcher already pins the verified isolated environment and selectedPort'
       },
       fallbackLaunch: {
-        executable: context.cliPath,
-        args: ['daemon', 'start'],
+        executable: fallbackLaunch.command,
+        args: fallbackLaunch.args,
+        windowsVerbatimArguments: fallbackLaunch.windowsVerbatimArguments === true,
         note: 'if selectedPort is unavailable, choose a fresh loopback port, rebuild the same sanitized environment with HUB_API_PORT set to it, then invoke this command so the launcher and URLs are regenerated'
       },
       host: '127.0.0.1',

@@ -13,6 +13,7 @@ import {
   cleanupRunLayout,
   createIsolatedGitEnvironment,
   createRunLayout,
+  createWindowsBatchInvocation,
   getAvailableLoopbackPort,
   removeOwnedPath,
   validateRealE2eEnvironment
@@ -20,6 +21,57 @@ import {
 
 const prepareP0FixtureScript = fileURLToPath(new URL('./support/prepare-p0-fixture.mjs', import.meta.url))
 const skillsMaterializationPolicy = 'git-blob-exact-or-strict-crlf-v1'
+
+test('Windows batch invocation preserves safe argv and rejects cmd expansion characters', {
+  skip: process.platform !== 'win32'
+}, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-batch-invocation-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const fixtureRoot = path.join(root, 'fixture with spaces')
+  fs.mkdirSync(fixtureRoot)
+  const batchFile = path.join(fixtureRoot, 'argv-recorder.cmd')
+  fs.writeFileSync(batchFile, '@echo off\r\nsetlocal DisableDelayedExpansion\r\n<nul set /p "=%~1|%~2|%~3"\r\nexit /b 0\r\n', 'utf8')
+
+  const invocation = createWindowsBatchInvocation(batchFile, ['setup', '--intent', 'value with spaces'])
+  assert.deepEqual(invocation.args.slice(0, 4), ['/d', '/s', '/v:off', '/c'])
+  assert.equal(invocation.args[4].startsWith('call "'), true)
+  assert.equal(invocation.windowsVerbatimArguments, true)
+  const result = spawnSync(invocation.command, invocation.args, {
+    encoding: 'utf8',
+    windowsHide: true,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments
+  })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  assert.equal(String(result.stdout), 'setup|--intent|value with spaces')
+
+  const sentinel = path.join(root, 'must-not-exist.txt')
+  const unsafe = [
+    'bad"quote',
+    '%PATH%',
+    '!PATH!',
+    `& type nul > "${sentinel}"`,
+    '|',
+    '<',
+    '>',
+    '(',
+    ')',
+    '^',
+    'line\nbreak',
+    'nul\0byte'
+  ]
+  for (const value of unsafe) {
+    assert.throws(
+      () => createWindowsBatchInvocation(batchFile, ['setup', value]),
+      /cannot be passed safely/
+    )
+  }
+  assert.throws(
+    () => createWindowsBatchInvocation(path.join(root, 'unsafe%PATH%.cmd'), ['setup']),
+    /cannot be passed safely/
+  )
+  assert.equal(fs.existsSync(sentinel), false)
+})
 
 function makePaths(prefix = 'p0-contract-20260821-000000') {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-e2e-contract-'))

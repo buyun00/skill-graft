@@ -71,6 +71,34 @@ export function createIsolatedGitEnvironment(baseEnv, homeRoot, { platform = pro
   return env
 }
 
+const WINDOWS_BATCH_UNSAFE = /[\u0000-\u001f\u007f"%!&|<>()^]/
+
+function windowsBatchToken(value, label) {
+  const token = String(value)
+  if (!token || WINDOWS_BATCH_UNSAFE.test(token)) {
+    throw new Error(`${label} contains a character that cannot be passed safely through cmd.exe`)
+  }
+  return `"${token}"`
+}
+
+export function createWindowsBatchInvocation(batchFile, args = [], options = {}) {
+  if (!Array.isArray(args)) throw new Error('Windows batch arguments must be an array')
+  const absoluteBatch = path.win32.resolve(String(batchFile || ''))
+  if (!path.win32.isAbsolute(String(batchFile || ''))) {
+    throw new Error('Windows batch file must be an absolute path')
+  }
+  const comspec = String(options.comspec || process.env.ComSpec || 'cmd.exe')
+  const line = ['call', windowsBatchToken(absoluteBatch, 'Windows batch file')]
+  for (const [index, value] of args.entries()) {
+    line.push(windowsBatchToken(value, `Windows batch argument ${index}`))
+  }
+  return Object.freeze({
+    command: comspec,
+    args: Object.freeze(['/d', '/s', '/v:off', '/c', line.join(' ')]),
+    windowsVerbatimArguments: true
+  })
+}
+
 export function assertSourceOutsideProtectedRoots(source, protectedRoots, label = 'fixture source') {
   if (!path.isAbsolute(source)) throw new Error(`${label} must be absolute`)
   const canonicalSource = canonicalize(source)
