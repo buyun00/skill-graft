@@ -440,6 +440,21 @@ async function waitForDaemonStatus(env, timeoutMs = 30000) {
   throw new Error(`daemon did not become healthy: ${JSON.stringify(last)}`)
 }
 
+async function waitForInvocationTracePid(pid, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs
+  const prefix = `${pid}-`
+  while (Date.now() < deadline) {
+    if (fs.existsSync(invocationTraceRoot)) {
+      const matched = fs.readdirSync(invocationTraceRoot)
+        .filter((name) => name.startsWith(prefix) && name.endsWith('.jsonl'))
+        .some((name) => fs.statSync(path.join(invocationTraceRoot, name)).size > 0)
+      if (matched) return true
+    }
+    await delay(150)
+  }
+  return false
+}
+
 function pidAlive(pid) {
   try {
     process.kill(pid, 0)
@@ -603,6 +618,33 @@ function seedInboxFixture(inboxId, inboxName, inboxDirectory) {
       inboxPath: `skills/inbox/${inboxName}`
     }]
   }, null, 2)}\n`, 'utf8')
+}
+
+function seedDaemonReapFixture(sessionId) {
+  const stored = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'))
+  assert.equal(Array.isArray(stored.sessions), true, 'daemon reap fixture requires the Local session store')
+  assert.equal(stored.sessions.some((session) => session.id === sessionId), false, 'daemon reap fixture id must be unique')
+  stored.sessions.push({
+    id: sessionId,
+    kind: 'chat',
+    path: '',
+    worktree: context.probeRoot,
+    intent: 'p1-daemon-reap-fixture',
+    pid: 0,
+    promptFile: path.join(runtimeReview, `prompt-${sessionId}.txt`),
+    logFile: path.join(runtimeReview, `session-${sessionId}.log`),
+    lastFile: path.join(runtimeReview, `session-${sessionId}.last.txt`),
+    startedAt: new Date().toISOString(),
+    status: 'running',
+    exitCode: null,
+    error: '',
+    codexSessionId: '',
+    summary: '',
+    lastMessage: '',
+    inboxIds: []
+  })
+  fs.writeFileSync(sessionsFile, `${JSON.stringify(stored, null, 2)}\n`, 'utf8')
+  fs.writeFileSync(path.join(runtimeReview, `session-${sessionId}.exit`), '0\n', { flag: 'wx' })
 }
 
 function browserAcceptanceMetadata({ base, inboxId, inboxName, inboxDirectory, installedEnv, phase }) {
@@ -909,6 +951,11 @@ function validateInvocationTrace({
   assert.ok(apiRows.length > 0, 'API process must emit environment-identified Application trace records')
   assert.equal(daemonRows.every((row) => row.environmentIdentity === expectedEnvironmentIdentity), true)
   assert.equal(apiRows.every((row) => row.environmentIdentity === expectedEnvironmentIdentity), true)
+  const daemonReapRows = daemonRows.filter((row) => row.transport === 'daemon' && row.commandKind === 'reapSessions')
+  assert.equal(daemonReapRows.length, 2, 'daemon must emit one reapSessions entry/result pair')
+  assert.deepEqual(daemonReapRows.map((row) => row.phase), ['entry', 'result'])
+  assert.equal(daemonReapRows[1].ok, true, 'daemon reapSessions result must succeed')
+  assert.equal(daemonReapRows[1].replayed, false, 'daemon reapSessions must execute instead of replaying')
 
   let rawValueMatches = 0
   for (const value of [...rawRequestIds, ...rawValues, key.toString('hex')]) {
@@ -1126,6 +1173,8 @@ test('packed Local P1 distribution uses one Application across CLI and HTTP with
   assert.equal(initialProbe.branch, '(detached)')
   assert.equal(initialProbe.head, p0Fixture.manifest.probeCommit)
 
+  const daemonReapSessionId = `p1-daemon-reap-${context.runId}`
+  seedDaemonReapFixture(daemonReapSessionId)
   seedInboxFixture(inboxId, inboxName, inboxDirectory)
   writeBrowserAcceptanceMetadata(browserAcceptanceMetadata({
     base,
@@ -1164,6 +1213,17 @@ test('packed Local P1 distribution uses one Application across CLI and HTTP with
 
   const daemonStatus = await waitForDaemonStatus(installedEnv)
   assert.equal(daemonStatus.running, true)
+  assert.equal(
+    await waitForInvocationTracePid(daemonPid),
+    true,
+    'daemon must execute a real reapSessions command through the traced Application'
+  )
+  const daemonReapedSessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf8')).sessions
+    .filter((session) => session.id === daemonReapSessionId)
+  assert.equal(daemonReapedSessions.length, 1, 'daemon reap fixture must remain a single owned session')
+  assert.equal(daemonReapedSessions[0].status, 'waiting', 'daemon Application reap must finalize the owned fixture session')
+  assert.equal(daemonReapedSessions[0].exitCode, 0, 'daemon Application reap must consume the runner-style exit evidence')
+  assert.match(String(daemonReapedSessions[0].endedAt || ''), /^\d{4}-\d{2}-\d{2}T/, 'daemon reap must record terminal time')
   assert.equal(daemonStatus.apiHealthy, true)
   assert.equal(Number(daemonStatus.pid), daemonPid)
   apiPid = Number(daemonStatus.apiPid)
@@ -1409,6 +1469,7 @@ test('packed Local P1 distribution uses one Application across CLI and HTTP with
     rawValues: [
       ...Object.values(sessionSecrets),
       cliChat.session.id,
+      daemonReapSessionId,
       inboxId,
       inboxName,
       'isolated P1 application acceptance',
