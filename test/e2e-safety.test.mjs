@@ -323,6 +323,89 @@ function spawnP0Preparation(env) {
   })
 }
 
+function resolveGitExecutable() {
+  const lookup = process.platform === 'win32'
+    ? spawnSync('where.exe', ['git'], { encoding: 'utf8', windowsHide: true })
+    : spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8', windowsHide: true })
+  assert.equal(lookup.error, undefined, `Git lookup failed: ${lookup.error?.message || ''}`)
+  assert.equal(lookup.status, 0, `Git lookup failed: ${lookup.stderr || lookup.stdout}`)
+  const executable = String(lookup.stdout || '').split(/\r?\n/).map((item) => item.trim()).find(Boolean)
+  assert.ok(executable && path.isAbsolute(executable), 'Git lookup must return an absolute executable path')
+  return executable
+}
+
+function createFakeGitShim(parent) {
+  const fakeBin = path.join(parent, 'fake-git')
+  const script = path.join(fakeBin, 'fake-git.cjs')
+  fs.mkdirSync(fakeBin)
+  fs.writeFileSync(script, [
+    "const { spawn, spawnSync } = require('node:child_process')",
+    "const fs = require('node:fs')",
+    'const args = process.argv.slice(2)',
+    "const cloneIndex = args.indexOf('clone')",
+    'if (cloneIndex >= 0) {',
+    "  fs.writeFileSync(process.env.SKILL_GRAFT_TEST_CLONE_INVOCATION, JSON.stringify(args) + '\\n')",
+    '  if (process.env.SKILL_GRAFT_TEST_CHILD_ENV_FILE) {',
+    "    const names = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP']",
+    '    fs.writeFileSync(process.env.SKILL_GRAFT_TEST_CHILD_ENV_FILE, JSON.stringify(Object.fromEntries(names.map((name) => [name, process.env[name] ?? null]))) + \'\\n\')',
+    '  }',
+    "  if (process.env.SKILL_GRAFT_TEST_FAKE_GIT_MODE === 'instant-success') process.exit(0)",
+    "  if (['orphan-child', 'timeout-tree', 'output-cap'].includes(process.env.SKILL_GRAFT_TEST_FAKE_GIT_MODE)) {",
+    "    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'fake-git-clone-child'], { stdio: 'ignore', windowsHide: true, detached: process.platform === 'win32' })",
+    '    child.unref()',
+    "    fs.writeFileSync(process.env.SKILL_GRAFT_TEST_CLONE_PIDS, JSON.stringify({ parentPid: process.pid, childPid: child.pid }) + '\\n')",
+    "    if (process.env.SKILL_GRAFT_TEST_FAKE_GIT_MODE === 'orphan-child') {",
+    "      process.stdout.write('fake clone exiting while child stays alive\\n')",
+    '      process.exit(23)',
+    '    }',
+    "    if (process.env.SKILL_GRAFT_TEST_FAKE_GIT_MODE === 'output-cap') {",
+    '      process.stdout.write(Buffer.alloc(17 * 1024 * 1024, 0x78))',
+    '    }',
+    "    process.stdout.write('fake clone waiting for timeout cleanup\\n')",
+    '    setInterval(() => {}, 1000)',
+    '  }',
+    '}',
+    'const result = spawnSync(process.env.SKILL_GRAFT_TEST_REAL_GIT, args, { stdio: \'inherit\', windowsHide: true })',
+    'if (result.error) {',
+    "  process.stderr.write(result.error.message + '\\n')",
+    '  process.exit(127)',
+    '}',
+    'process.exit(result.status ?? 1)',
+    ''
+  ].join('\n'), 'utf8')
+  return { script, realGit: resolveGitExecutable() }
+}
+
+function fakeGitEnvironment(baseEnv, shim, overrides = {}) {
+  return {
+    ...baseEnv,
+    NODE_ENV: 'test',
+    SKILL_GRAFT_TEST_GIT_EXECUTABLE: process.execPath,
+    SKILL_GRAFT_TEST_GIT_SCRIPT: shim.script,
+    SKILL_GRAFT_TEST_REAL_GIT: shim.realGit,
+    ...overrides
+  }
+}
+
+function cleanupFakeGitCase(parent, pidsFile) {
+  if (fs.existsSync(pidsFile)) {
+    const pids = JSON.parse(fs.readFileSync(pidsFile, 'utf8'))
+    for (const pid of [pids.parentPid, pids.childPid]) {
+      if (!pidAlive(pid)) continue
+      if (process.platform === 'win32') {
+        spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+      } else {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {
+          // The exact synthetic PID may exit between the liveness check and cleanup.
+        }
+      }
+    }
+  }
+  fs.rmSync(parent, { recursive: true, force: true })
+}
+
 function assertP0PreparationRefused(result, context, expected) {
   assert.equal(result.error, undefined, `P0 preparation spawn error: ${result.error?.message || ''}`)
   assert.notEqual(result.status, 0, 'invalid source provenance must be refused')
@@ -330,6 +413,229 @@ function assertP0PreparationRefused(result, context, expected) {
   assert.deepEqual(fs.readdirSync(context.hubDataRoot), [], 'provenance refusal must precede target hub writes')
   assert.deepEqual(fs.readdirSync(context.probeRoot), [], 'provenance refusal must precede target probe writes')
 }
+
+test('P0 fixture clone timeout reclaims the spawned fake Git process tree through the owned process container', {
+  timeout: 30000
+}, (t) => {
+  const fixture = createP0ProvenanceCase('clone-timeout-tree')
+  const shim = createFakeGitShim(fixture.paths.parent)
+  const invocationFile = path.join(fixture.paths.parent, 'clone-timeout-invocation.json')
+  const pidsFile = path.join(fixture.paths.parent, 'clone-timeout-pids.json')
+  t.after(() => cleanupFakeGitCase(fixture.paths.parent, pidsFile))
+  const secret = `must-not-leak-${Date.now().toString(36)}`
+  const result = spawnP0Preparation(fakeGitEnvironment(fixture.env, shim, {
+    NODE_ENV: 'test',
+    SKILL_GRAFT_TEST_CLONE_TIMEOUT_MS: '1500',
+    SKILL_GRAFT_TEST_FAKE_GIT_MODE: 'timeout-tree',
+    SKILL_GRAFT_TEST_CLONE_INVOCATION: invocationFile,
+    SKILL_GRAFT_TEST_CLONE_PIDS: pidsFile,
+    SKILL_GRAFT_TEST_SECRET: secret
+  }))
+
+  assert.equal(result.error, undefined, `P0 timeout preparation spawn error: ${result.error?.message || ''}`)
+  assert.notEqual(result.status, 0, 'fake Git clone timeout must fail fixture preparation')
+  const output = `${result.stderr}\n${result.stdout}`
+  assert.match(output, /git clone failed \(status=.*signal=.*error=Error: timeout after 1500ms/i)
+  assert.doesNotMatch(output, new RegExp(secret), 'clone errors must not serialize the child environment')
+  assert.equal(fs.existsSync(path.join(fixture.context.runRoot, '.skill-graft-p0-fixture.json')), false)
+
+  const invocation = JSON.parse(fs.readFileSync(invocationFile, 'utf8'))
+  const cloneIndex = invocation.indexOf('clone')
+  assert.notEqual(cloneIndex, -1)
+  assert.deepEqual(invocation.slice(cloneIndex), [
+    'clone',
+    '--no-local',
+    '--no-hardlinks',
+    '--no-checkout',
+    fixture.historical.probe,
+    fixture.context.probeRoot
+  ])
+  const pids = JSON.parse(fs.readFileSync(pidsFile, 'utf8'))
+  assert.ok(Number.isInteger(pids.parentPid) && pids.parentPid > 0)
+  assert.ok(Number.isInteger(pids.childPid) && pids.childPid > 0)
+  assert.equal(pidAlive(pids.parentPid), false, 'fake Git parent must be gone before timeout returns')
+  assert.equal(pidAlive(pids.childPid), false, 'fake Git nested child must be gone before timeout returns')
+})
+
+test('P0 fixture clone Job rejects a fast-exiting fake Git parent and reclaims its orphaned child', {
+  timeout: 30000,
+  skip: process.platform !== 'win32'
+}, (t) => {
+  const fixture = createP0ProvenanceCase('clone-orphan-tree')
+  const shim = createFakeGitShim(fixture.paths.parent)
+  const invocationFile = path.join(fixture.paths.parent, 'clone-orphan-invocation.json')
+  const pidsFile = path.join(fixture.paths.parent, 'clone-orphan-pids.json')
+  t.after(() => cleanupFakeGitCase(fixture.paths.parent, pidsFile))
+  const result = spawnP0Preparation(fakeGitEnvironment(fixture.env, shim, {
+    SKILL_GRAFT_TEST_CLONE_TIMEOUT_MS: '10000',
+    SKILL_GRAFT_TEST_FAKE_GIT_MODE: 'orphan-child',
+    SKILL_GRAFT_TEST_CLONE_INVOCATION: invocationFile,
+    SKILL_GRAFT_TEST_CLONE_PIDS: pidsFile
+  }))
+
+  assert.equal(result.error, undefined, `P0 orphan preparation spawn error: ${result.error?.message || ''}`)
+  assert.notEqual(result.status, 0, 'an orphaned fake Git child must fail fixture preparation')
+  assert.equal(fs.existsSync(path.join(fixture.context.runRoot, '.skill-graft-p0-fixture.json')), false)
+  const invocation = JSON.parse(fs.readFileSync(invocationFile, 'utf8'))
+  assert.notEqual(invocation.indexOf('clone'), -1)
+  const pids = JSON.parse(fs.readFileSync(pidsFile, 'utf8'))
+  assert.ok(Number.isInteger(pids.parentPid) && pids.parentPid > 0)
+  assert.ok(Number.isInteger(pids.childPid) && pids.childPid > 0)
+  assert.equal(pidAlive(pids.parentPid), false, 'fast-exiting fake Git parent must remain gone')
+  assert.equal(pidAlive(pids.childPid), false, 'orphaned fake Git child must be gone before Job failure returns')
+  assert.match(`${result.stderr}\n${result.stdout}`, /Git root exited while its Job still contained active descendant processes/i)
+})
+
+test('P0 fixture clone output cap reclaims the spawned fake Git process tree', {
+  timeout: 30000
+}, (t) => {
+  const fixture = createP0ProvenanceCase('clone-output-cap')
+  const shim = createFakeGitShim(fixture.paths.parent)
+  const invocationFile = path.join(fixture.paths.parent, 'clone-output-invocation.json')
+  const pidsFile = path.join(fixture.paths.parent, 'clone-output-pids.json')
+  t.after(() => cleanupFakeGitCase(fixture.paths.parent, pidsFile))
+  const result = spawnP0Preparation(fakeGitEnvironment(fixture.env, shim, {
+    SKILL_GRAFT_TEST_CLONE_TIMEOUT_MS: '10000',
+    SKILL_GRAFT_TEST_FAKE_GIT_MODE: 'output-cap',
+    SKILL_GRAFT_TEST_CLONE_INVOCATION: invocationFile,
+    SKILL_GRAFT_TEST_CLONE_PIDS: pidsFile
+  }))
+
+  assert.equal(result.error, undefined, `P0 output-cap preparation spawn error: ${result.error?.message || ''}`)
+  assert.notEqual(result.status, 0, 'fake Git clone output overflow must fail fixture preparation')
+  assert.match(`${result.stderr}\n${result.stdout}`, /git clone failed \(status=.*signal=.*error=Error: output exceeded 16777216 bytes/i)
+  assert.equal(fs.existsSync(path.join(fixture.context.runRoot, '.skill-graft-p0-fixture.json')), false)
+  const invocation = JSON.parse(fs.readFileSync(invocationFile, 'utf8'))
+  assert.notEqual(invocation.indexOf('clone'), -1)
+  const pids = JSON.parse(fs.readFileSync(pidsFile, 'utf8'))
+  assert.equal(pidAlive(pids.parentPid), false, 'output-overflow fake Git parent must be gone before failure returns')
+  assert.equal(pidAlive(pids.childPid), false, 'output-overflow fake Git child must be gone before failure returns')
+})
+
+test('P0 fixture asynchronous clone preserves the independent clone contract with a fake Git proxy', {
+  timeout: 60000
+}, (t) => {
+  const fixture = createP0ProvenanceCase('clone-normal-contract')
+  t.after(() => fs.rmSync(fixture.paths.parent, { recursive: true, force: true }))
+  const shim = createFakeGitShim(fixture.paths.parent)
+  const invocationFile = path.join(fixture.paths.parent, 'clone-normal-invocation.json')
+  const childEnvFile = path.join(fixture.paths.parent, 'clone-normal-child-env.json')
+  const hostileEnvRoot = path.join(fixture.paths.parent, 'hostile-child-env')
+  const hostileWriteRoots = Object.fromEntries(['APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP']
+    .map((name) => [name, path.join(hostileEnvRoot, name.toLowerCase())]))
+  for (const [name, directory] of Object.entries(hostileWriteRoots)) {
+    fs.mkdirSync(directory, { recursive: true })
+    fs.writeFileSync(path.join(directory, `${name.toLowerCase()}-sentinel.txt`), `${name}-must-not-change\n`)
+  }
+  const hostileBefore = treeFingerprint(hostileEnvRoot)
+  const result = spawnP0Preparation(fakeGitEnvironment(fixture.env, shim, {
+    SKILL_GRAFT_TEST_FAKE_GIT_MODE: 'proxy',
+    SKILL_GRAFT_TEST_CLONE_INVOCATION: invocationFile,
+    SKILL_GRAFT_TEST_CHILD_ENV_FILE: childEnvFile,
+    ...hostileWriteRoots
+  }))
+
+  assert.equal(result.error, undefined, `P0 normal clone preparation spawn error: ${result.error?.message || ''}`)
+  assert.equal(result.status, 0, `P0 normal clone preparation failed: ${result.stderr || result.stdout}`)
+  assert.deepEqual(fs.readdirSync(fixture.context.homeRoot), [], 'normal clone must leave the target home empty')
+  assert.deepEqual(fs.readdirSync(fixture.context.logsRoot), [], 'normal clone must leave the target logs empty')
+  assert.equal(treeFingerprint(hostileEnvRoot), hostileBefore, 'Git clone must not mutate inherited external write roots')
+  const childEnv = JSON.parse(fs.readFileSync(childEnvFile, 'utf8'))
+  const comparablePath = (value) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value)
+  assert.equal(comparablePath(childEnv.HOME), comparablePath(fixture.context.homeRoot))
+  assert.equal(comparablePath(childEnv.USERPROFILE), comparablePath(fixture.context.homeRoot))
+  const helperRoot = path.join(fixture.context.runRoot, '.git-job-helper')
+  const expectedWriteRoots = process.platform === 'win32' ? {
+    APPDATA: path.join(helperRoot, 'AppData', 'Roaming'),
+    LOCALAPPDATA: path.join(helperRoot, 'AppData', 'Local'),
+    TEMP: path.join(helperRoot, 'temp'),
+    TMP: path.join(helperRoot, 'temp')
+  } : hostileWriteRoots
+  for (const name of ['APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP']) {
+    assert.equal(comparablePath(childEnv[name]), comparablePath(expectedWriteRoots[name]), `${name} must use its expected clone write root`)
+  }
+  const invocation = JSON.parse(fs.readFileSync(invocationFile, 'utf8'))
+  const cloneIndex = invocation.indexOf('clone')
+  assert.notEqual(cloneIndex, -1)
+  assert.deepEqual(invocation.slice(cloneIndex), [
+    'clone',
+    '--no-local',
+    '--no-hardlinks',
+    '--no-checkout',
+    fixture.historical.probe,
+    fixture.context.probeRoot
+  ])
+  assert.equal(fs.existsSync(path.join(fixture.context.probeRoot, '.git', 'objects', 'info', 'alternates')), false)
+  assert.equal(runGit(fixture.context.probeRoot, ['remote'], fixture.context.homeRoot), '')
+  assert.equal(runGit(fixture.context.probeRoot, ['rev-parse', 'HEAD'], fixture.context.homeRoot), fixture.historical.probeCommit)
+  assert.equal(runGit(fixture.context.probeRoot, ['status', '--porcelain=v1', '--untracked-files=all'], fixture.context.homeRoot), '')
+})
+
+test('P0 fixture clone refuses any pre-existing Job helper scratch item', {
+  timeout: 60000,
+  skip: process.platform !== 'win32'
+}, (t) => {
+  const fixture = createP0ProvenanceCase('clone-helper-not-fresh')
+  t.after(() => fs.rmSync(fixture.paths.parent, { recursive: true, force: true }))
+  const helperRoot = path.join(fixture.context.runRoot, '.git-job-helper')
+  fs.writeFileSync(helperRoot, 'must-not-be-replaced\n')
+
+  const result = spawnP0Preparation(fixture.env)
+  assert.equal(result.error, undefined, `P0 helper freshness spawn error: ${result.error?.message || ''}`)
+  assert.notEqual(result.status, 0, 'pre-existing helper scratch must fail closed')
+  assert.match(`${result.stderr}\n${result.stdout}`, /Git Job helper scratch must be a fresh direct child/i)
+  assert.equal(fs.readFileSync(helperRoot, 'utf8'), 'must-not-be-replaced\n')
+  assert.deepEqual(fs.readdirSync(fixture.context.homeRoot), [])
+  assert.deepEqual(fs.readdirSync(fixture.context.logsRoot), [])
+  assert.equal(fs.existsSync(path.join(fixture.context.runRoot, '.skill-graft-p0-fixture.json')), false)
+})
+
+test('P0 fixture clone refuses a Job helper junction without touching its target', {
+  timeout: 60000,
+  skip: process.platform !== 'win32'
+}, (t) => {
+  const fixture = createP0ProvenanceCase('clone-helper-junction')
+  t.after(() => fs.rmSync(fixture.paths.parent, { recursive: true, force: true }))
+  const external = path.join(fixture.paths.parent, 'external-helper-target')
+  fs.mkdirSync(external)
+  fs.writeFileSync(path.join(external, 'sentinel.txt'), 'must-not-change\n')
+  const externalBefore = treeFingerprint(external)
+  fs.symlinkSync(external, path.join(fixture.context.runRoot, '.git-job-helper'), 'junction')
+
+  const result = spawnP0Preparation(fixture.env)
+  assert.equal(result.error, undefined, `P0 helper junction spawn error: ${result.error?.message || ''}`)
+  assert.notEqual(result.status, 0, 'pre-existing helper junction must fail closed')
+  assert.match(`${result.stderr}\n${result.stdout}`, /Git Job helper scratch must be a fresh direct child/i)
+  assert.equal(treeFingerprint(external), externalBefore, 'helper refusal must not traverse or mutate the junction target')
+  assert.deepEqual(fs.readdirSync(fixture.context.homeRoot), [])
+  assert.deepEqual(fs.readdirSync(fixture.context.logsRoot), [])
+  assert.equal(fs.existsSync(path.join(fixture.context.runRoot, '.skill-graft-p0-fixture.json')), false)
+})
+
+test('P0 fixture clone timeout waits for close when exit already won and does not taskkill a dead PID', {
+  timeout: 45000
+}, (t) => {
+  const fixture = createP0ProvenanceCase('clone-exit-close-race')
+  t.after(() => fs.rmSync(fixture.paths.parent, { recursive: true, force: true }))
+  const shim = createFakeGitShim(fixture.paths.parent)
+  const invocationFile = path.join(fixture.paths.parent, 'clone-race-invocation.json')
+  const result = spawnP0Preparation(fakeGitEnvironment(fixture.env, shim, {
+    SKILL_GRAFT_TEST_CLONE_TIMEOUT_MS: '15000',
+    SKILL_GRAFT_TEST_CLONE_CLOSE_DELAY_MS: '15000',
+    SKILL_GRAFT_TEST_FAKE_GIT_MODE: 'instant-success',
+    SKILL_GRAFT_TEST_CLONE_INVOCATION: invocationFile
+  }))
+
+  assert.equal(result.error, undefined, `P0 exit/close race spawn error: ${result.error?.message || ''}`)
+  assert.notEqual(result.status, 0, 'timeout must win while logical close delivery is delayed')
+  const output = `${result.stderr}\n${result.stdout}`
+  assert.match(output, /git clone failed \(status=0, signal=null, error=Error: timeout after 15000ms/i)
+  assert.doesNotMatch(output, /cleanupError=|taskkill/i, 'an already-exited direct child must not enter taskkill cleanup')
+  assert.deepEqual(fs.readdirSync(fixture.context.homeRoot), [])
+  assert.deepEqual(fs.readdirSync(fixture.context.logsRoot), [])
+  assert.deepEqual(fs.readdirSync(fixture.context.probeRoot), [])
+  assert.equal(fs.existsSync(path.join(fixture.context.runRoot, '.skill-graft-p0-fixture.json')), false)
+})
 
 test('isolated Git environments discard every inherited GIT_* value and source gates reject overlaps', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-git-env-'))
@@ -513,6 +819,7 @@ test('P0 fixture preparation rejects source alternates and hostile Git injection
   assert.equal(prepared.error, undefined, `P0 preparation spawn error: ${prepared.error?.message || ''}`)
   assert.equal(prepared.status, 0, `P0 preparation failed: ${prepared.stderr || prepared.stdout}`)
   assert.deepEqual(fs.readdirSync(context.homeRoot), [], 'P0 preparation must leave the target home empty')
+  assert.deepEqual(fs.readdirSync(context.logsRoot), [], 'P0 preparation must leave the target logs empty')
   const manifest = JSON.parse(fs.readFileSync(path.join(context.runRoot, '.skill-graft-p0-fixture.json'), 'utf8'))
   assert.equal(manifest.version, 2)
   assert.equal(manifest.probeCloneMode, 'independent-no-local-no-hardlinks-no-checkout')

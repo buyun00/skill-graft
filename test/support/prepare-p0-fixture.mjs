@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -13,6 +13,280 @@ const SKILLS_MATERIALIZATION_POLICY = 'git-blob-exact-or-strict-crlf-v1'
 const GENERATED_ATTRIBUTES_HEADER = '# Skill Graft generated skills worktree policy v1'
 const ALLOWED_GIT_BLOB_MODES = new Set(['100644', '100755'])
 const ALLOWED_EMPTY_SKILLS_DIRECTORIES = new Set(['adopted', 'inbox'])
+const GIT_CLONE_TIMEOUT_MS = 15 * 60 * 1000
+const GIT_CLONE_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+const PROCESS_TREE_EXIT_TIMEOUT_MS = 30 * 1000
+const WINDOWS_GIT_JOB_HELPER = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public static class SkillGraftGitJob
+{
+    private const uint CREATE_SUSPENDED = 0x00000004;
+    private const uint CREATE_NO_WINDOW = 0x08000000;
+    private const uint STARTF_USESTDHANDLES = 0x00000100;
+    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+    private const int JobObjectBasicAccountingInformation = 1;
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const uint INFINITE = 0xffffffff;
+    private const uint WAIT_FAILED = 0xffffffff;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+    {
+        public long TotalUserTime;
+        public long TotalKernelTime;
+        public long ThisPeriodTotalUserTime;
+        public long ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount;
+        public uint TotalProcesses;
+        public uint ActiveProcesses;
+        public uint TotalTerminatedProcesses;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct STARTUPINFO
+    {
+        public uint cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public ushort wShowWindow;
+        public ushort cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(IntPtr job, int informationClass, IntPtr information, uint informationLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryInformationJobObject(IntPtr job, int informationClass, out JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information, uint informationLength, out uint returnLength);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcessW(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint creationFlags, IntPtr environment, string currentDirectory, ref STARTUPINFO startupInfo, out PROCESS_INFORMATION processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(IntPtr thread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int standardHandle);
+
+    private static Win32Exception Win32Error()
+    {
+        return new Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    private static string QuoteArgument(string argument)
+    {
+        if (argument.Length == 0) return "\"\"";
+        if (argument.IndexOfAny(new char[] { ' ', '\t', '\n', '\v', '"' }) < 0) return argument;
+        StringBuilder quoted = new StringBuilder();
+        quoted.Append('"');
+        int backslashes = 0;
+        foreach (char character in argument)
+        {
+            if (character == '\\')
+            {
+                backslashes++;
+                continue;
+            }
+            if (character == '"')
+            {
+                quoted.Append('\\', backslashes * 2 + 1);
+                quoted.Append('"');
+                backslashes = 0;
+                continue;
+            }
+            quoted.Append('\\', backslashes);
+            backslashes = 0;
+            quoted.Append(character);
+        }
+        quoted.Append('\\', backslashes * 2);
+        quoted.Append('"');
+        return quoted.ToString();
+    }
+
+    private static StringBuilder BuildCommandLine(string application, string[] arguments)
+    {
+        StringBuilder commandLine = new StringBuilder(QuoteArgument(application));
+        foreach (string argument in arguments)
+        {
+            commandLine.Append(' ');
+            commandLine.Append(QuoteArgument(argument));
+        }
+        return commandLine;
+    }
+
+    public static int Run(string application, string[] arguments, string currentDirectory)
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw Win32Error();
+        try
+        {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            int limitsSize = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            IntPtr limitsPointer = Marshal.AllocHGlobal(limitsSize);
+            try
+            {
+                Marshal.StructureToPtr(limits, limitsPointer, false);
+                if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, limitsPointer, (uint)limitsSize)) throw Win32Error();
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(limitsPointer);
+            }
+
+            STARTUPINFO startup = new STARTUPINFO();
+            startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+            startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdInput = GetStdHandle(-10);
+            startup.hStdOutput = GetStdHandle(-11);
+            startup.hStdError = GetStdHandle(-12);
+            PROCESS_INFORMATION process;
+            if (!CreateProcessW(application, BuildCommandLine(application, arguments), IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, currentDirectory, ref startup, out process)) throw Win32Error();
+            try
+            {
+                if (!AssignProcessToJobObject(job, process.hProcess))
+                {
+                    TerminateProcess(process.hProcess, 1);
+                    throw Win32Error();
+                }
+                if (ResumeThread(process.hThread) == uint.MaxValue)
+                {
+                    TerminateProcess(process.hProcess, 1);
+                    throw Win32Error();
+                }
+                if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) throw Win32Error();
+                uint exitCode;
+                if (!GetExitCodeProcess(process.hProcess, out exitCode)) throw Win32Error();
+                int descendantGraceChecks = 20;
+                while (true)
+                {
+                    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+                    uint returned;
+                    if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out accounting, (uint)Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)), out returned)) throw Win32Error();
+                    if (accounting.ActiveProcesses == 0) break;
+                    if (descendantGraceChecks-- == 0)
+                    {
+                        Console.Error.WriteLine("Git root exited while its Job still contained active descendant processes.");
+                        return 254;
+                    }
+                    Thread.Sleep(50);
+                }
+                return unchecked((int)exitCode);
+            }
+            finally
+            {
+                if (process.hThread != IntPtr.Zero) CloseHandle(process.hThread);
+                if (process.hProcess != IntPtr.Zero) CloseHandle(process.hProcess);
+            }
+        }
+        finally
+        {
+            CloseHandle(job);
+        }
+    }
+}
+'@
+$payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__'))
+$payload = ConvertFrom-Json $payloadJson
+$environmentNames = @('HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')
+foreach ($name in $environmentNames) {
+  $value = $payload.environment.$name
+  if ($null -eq $value) {
+    Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+  } else {
+    Set-Item -LiteralPath "Env:$name" -Value ([string]$value)
+  }
+}
+$application = [string]$payload.application
+if ([string]::IsNullOrWhiteSpace($application)) {
+  $application = [string](Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+}
+$arguments = [string[]]@($payload.arguments)
+$exitCode = [SkillGraftGitJob]::Run($application, $arguments, [string]$payload.cwd)
+[Environment]::Exit($exitCode)
+`
 
 function required(name) {
   const value = String(process.env[name] || '').trim()
@@ -48,6 +322,408 @@ function runGit(args, cwd, env) {
     throw new Error(`git ${args.join(' ')} failed: ${result.stderr || result.stdout}`)
   }
   return result.stdout.trim()
+}
+
+function gitArgs(args) {
+  return [
+    '--no-optional-locks',
+    '-c', 'core.fsmonitor=false',
+    '-c', 'core.hooksPath=',
+    ...args
+  ]
+}
+
+function gitCloneLaunch(args, env) {
+  const executable = String(env.SKILL_GRAFT_TEST_GIT_EXECUTABLE || '').trim()
+  const script = String(env.SKILL_GRAFT_TEST_GIT_SCRIPT || '').trim()
+  if (!executable && !script) return { application: null, args: gitArgs(args) }
+  if (env.NODE_ENV !== 'test' || !path.isAbsolute(executable) || !path.isAbsolute(script)) {
+    throw new Error('test Git clone override requires NODE_ENV=test and absolute executable/script paths')
+  }
+  return {
+    application: path.resolve(executable),
+    args: [path.resolve(script), ...gitArgs(args)]
+  }
+}
+
+function createWindowsGitHelperLayout(cwd, script) {
+  const runRoot = path.resolve(cwd)
+  assertPlainDirectoryChain(runRoot, runRoot, 'Git Job helper run root')
+  const helperRoot = path.join(runRoot, '.git-job-helper')
+  if (path.dirname(helperRoot) !== runRoot || lstatIfPresent(helperRoot)) {
+    throw new Error('Git Job helper scratch must be a fresh direct child of the marker-owned run root')
+  }
+  fs.mkdirSync(helperRoot)
+  assertPlainDirectoryChain(runRoot, helperRoot, 'Git Job helper scratch')
+  const appDataRoot = path.join(helperRoot, 'AppData')
+  const appDataRoaming = path.join(appDataRoot, 'Roaming')
+  const appDataLocal = path.join(appDataRoot, 'Local')
+  const helperTemp = path.join(helperRoot, 'temp')
+  for (const directory of [appDataRoot, appDataRoaming, appDataLocal, helperTemp]) {
+    fs.mkdirSync(directory)
+    assertPlainDirectoryChain(runRoot, directory, 'Git Job helper writable directory')
+  }
+  const helperScript = path.join(helperRoot, 'run-clone.ps1')
+  fs.writeFileSync(helperScript, script, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+  const scriptStat = fs.lstatSync(helperScript)
+  if (!scriptStat.isFile() || scriptStat.isSymbolicLink()) {
+    throw new Error('Git Job helper script must be a fresh plain file')
+  }
+  return { helperRoot, helperTemp, appDataRoaming, appDataLocal, helperScript }
+}
+
+function spawnGitClone(args, cwd, env) {
+  const launch = gitCloneLaunch(args, env)
+  if (process.platform !== 'win32') {
+    return spawn(launch.application || 'git', launch.args, {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      detached: true
+    })
+  }
+  const environmentValue = (name) => Object.entries(env)
+    .find(([candidate]) => candidate.toLowerCase() === name.toLowerCase())?.[1] ?? null
+  const runRoot = path.resolve(cwd)
+  const helperRoot = path.join(runRoot, '.git-job-helper')
+  const helperTemp = path.join(helperRoot, 'temp')
+  const appDataRoaming = path.join(helperRoot, 'AppData', 'Roaming')
+  const appDataLocal = path.join(helperRoot, 'AppData', 'Local')
+  const payload = Buffer.from(JSON.stringify({
+    application: launch.application,
+    arguments: launch.args,
+    cwd,
+    environment: {
+      HOME: environmentValue('HOME'),
+      USERPROFILE: environmentValue('USERPROFILE'),
+      APPDATA: appDataRoaming,
+      LOCALAPPDATA: appDataLocal,
+      TEMP: helperTemp,
+      TMP: helperTemp
+    }
+  }), 'utf8').toString('base64')
+  const script = WINDOWS_GIT_JOB_HELPER.replace('__PAYLOAD__', payload)
+  const helper = createWindowsGitHelperLayout(runRoot, script)
+  const helperEnv = { ...env }
+  for (const name of Object.keys(helperEnv)) {
+    if (['home', 'userprofile', 'appdata', 'localappdata', 'temp', 'tmp'].includes(name.toLowerCase())) delete helperEnv[name]
+  }
+  Object.assign(helperEnv, {
+    HOME: helperRoot,
+    USERPROFILE: helperRoot,
+    APPDATA: appDataRoaming,
+    LOCALAPPDATA: appDataLocal,
+    TEMP: helperTemp,
+    TMP: helperTemp
+  })
+  return spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper.helperScript], {
+    cwd,
+    env: helperEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true
+  })
+}
+
+function gitCloneTimeoutMs(env) {
+  const override = String(env.SKILL_GRAFT_TEST_CLONE_TIMEOUT_MS || '').trim()
+  if (!override) return GIT_CLONE_TIMEOUT_MS
+  if (env.NODE_ENV !== 'test') {
+    throw new Error('SKILL_GRAFT_TEST_CLONE_TIMEOUT_MS is only available under NODE_ENV=test')
+  }
+  const timeoutMs = Number(override)
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) {
+    throw new Error('SKILL_GRAFT_TEST_CLONE_TIMEOUT_MS must be an integer from 100 through 30000')
+  }
+  return timeoutMs
+}
+
+function gitCloneCloseDelayMs(env) {
+  const override = String(env.SKILL_GRAFT_TEST_CLONE_CLOSE_DELAY_MS || '').trim()
+  if (!override) return 0
+  if (env.NODE_ENV !== 'test') {
+    throw new Error('SKILL_GRAFT_TEST_CLONE_CLOSE_DELAY_MS is only available under NODE_ENV=test')
+  }
+  const delayMs = Number(override)
+  if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > 15000) {
+    throw new Error('SKILL_GRAFT_TEST_CLONE_CLOSE_DELAY_MS must be an integer from 0 through 15000')
+  }
+  return delayMs
+}
+
+function waitWithTimeout(promise, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve(null)
+    }, timeoutMs)
+    promise.then((value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    })
+  })
+}
+
+function processGroupAlive(pid) {
+  try {
+    process.kill(-pid, 0)
+    return true
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false
+    if (error?.code === 'EPERM') return true
+    throw error
+  }
+}
+
+async function waitForProcessGroupExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (processGroupAlive(pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return !processGroupAlive(pid)
+}
+
+function runCleanupCommand(command, args) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      child = spawn(command, args, {
+        stdio: 'ignore',
+        windowsHide: true
+      })
+    } catch (error) {
+      resolve({ status: null, signal: null, error })
+      return
+    }
+    let error = null
+    let settled = false
+    let timer = null
+    let closeTimer = null
+    const finish = (status, signal) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      clearTimeout(closeTimer)
+      resolve({ status, signal, error })
+    }
+    child.once('error', (value) => {
+      error = value
+      if (!child.pid) finish(null, null)
+    })
+    child.once('close', finish)
+    timer = setTimeout(() => {
+      error = new Error(`cleanup command timed out after ${PROCESS_TREE_EXIT_TIMEOUT_MS}ms`)
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        finish(child.exitCode, child.signalCode)
+        return
+      }
+      closeTimer = setTimeout(() => {
+        error = new Error(`cleanup command did not close within ${PROCESS_TREE_EXIT_TIMEOUT_MS}ms after SIGKILL`)
+        finish(child.exitCode, child.signalCode)
+      }, PROCESS_TREE_EXIT_TIMEOUT_MS)
+    }, PROCESS_TREE_EXIT_TIMEOUT_MS)
+  })
+}
+
+async function terminateSpawnedProcessTree(child, closePromise) {
+  const pid = Number(child.pid)
+  if (!Number.isInteger(pid) || pid <= 0) return null
+
+  if (process.platform === 'win32') {
+    const killed = await runCleanupCommand('taskkill.exe', ['/PID', String(pid), '/T', '/F'])
+    let close = await waitWithTimeout(closePromise, PROCESS_TREE_EXIT_TIMEOUT_MS)
+    if (!close) {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        // The direct child may have exited between the wait and fallback kill.
+      }
+      close = await waitWithTimeout(closePromise, PROCESS_TREE_EXIT_TIMEOUT_MS)
+    }
+    if (!close) throw new Error(`spawned Git PID ${pid} did not close after taskkill`)
+    if (killed.error || killed.status !== 0) {
+      const detail = killed.error instanceof Error ? killed.error.message : `status ${killed.status}, signal ${killed.signal || 'none'}`
+      throw new Error(`taskkill could not confirm Git process-tree termination: ${detail}`)
+    }
+    return close
+  }
+
+  try {
+    process.kill(-pid, 'SIGTERM')
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error
+  }
+  let groupExited = await waitForProcessGroupExit(pid, 1000)
+  if (!groupExited) {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw error
+    }
+    groupExited = await waitForProcessGroupExit(pid, PROCESS_TREE_EXIT_TIMEOUT_MS)
+  }
+  const close = await waitWithTimeout(closePromise, PROCESS_TREE_EXIT_TIMEOUT_MS)
+  if (!groupExited) throw new Error(`spawned Git process group ${pid} remained alive after SIGKILL`)
+  if (!close) throw new Error(`spawned Git process group ${pid} did not close after SIGKILL`)
+  return close
+}
+
+function processErrorText(error) {
+  if (!error) return 'none'
+  if (error instanceof Error) return `${error.name}: ${error.message}`
+  return String(error)
+}
+
+function gitCloneError({ status, signal, error, cleanupError, stdout, stderr }) {
+  const output = Buffer.concat([...stderr, ...stdout]).toString('utf8').trim()
+  const excerpt = output.length > 8192 ? `${output.slice(0, 8192)}\n[output truncated]` : output
+  const details = [
+    `status=${status ?? 'null'}`,
+    `signal=${signal || 'null'}`,
+    `error=${processErrorText(error)}`
+  ]
+  if (cleanupError) details.push(`cleanupError=${processErrorText(cleanupError)}`)
+  return new Error(`git clone failed (${details.join(', ')})${excerpt ? `: ${excerpt}` : ''}`)
+}
+
+function runGitClone(args, cwd, env) {
+  const timeoutMs = gitCloneTimeoutMs(env)
+  const closeDelayMs = gitCloneCloseDelayMs(env)
+  return new Promise((resolve, reject) => {
+    let child
+    try {
+      child = spawnGitClone(args, cwd, env)
+    } catch (error) {
+      reject(gitCloneError({
+        status: null,
+        signal: null,
+        error,
+        cleanupError: null,
+        stdout: [],
+        stderr: []
+      }))
+      return
+    }
+
+    const stdout = []
+    const stderr = []
+    let outputBytes = 0
+    let outputCapped = false
+    let exitState = null
+    let closeState = null
+    let terminal = null
+    let timer = null
+    let resolveClose
+    const closePromise = new Promise((resolveValue) => {
+      resolveClose = resolveValue
+    })
+
+    const finishFailure = async (error) => {
+      let cleanupError = null
+      const directExited = Boolean(exitState) || child.exitCode !== null || child.signalCode !== null
+      let shouldTerminate = false
+      try {
+        shouldTerminate = Boolean(child.pid) && (process.platform !== 'win32' ? processGroupAlive(child.pid) : !directExited)
+      } catch (value) {
+        cleanupError = value
+      }
+      if (shouldTerminate) {
+        try {
+          closeState = await terminateSpawnedProcessTree(child, closePromise)
+        } catch (value) {
+          cleanupError = value
+        }
+      }
+      closeState ||= await waitWithTimeout(closePromise, PROCESS_TREE_EXIT_TIMEOUT_MS)
+      if (!closeState && !cleanupError) {
+        cleanupError = new Error(`spawned Git child did not close within ${PROCESS_TREE_EXIT_TIMEOUT_MS}ms`)
+      }
+      reject(gitCloneError({
+        status: closeState?.status ?? exitState?.status ?? child.exitCode,
+        signal: closeState?.signal ?? exitState?.signal ?? child.signalCode,
+        error,
+        cleanupError,
+        stdout,
+        stderr
+      }))
+    }
+
+    const claimFailure = (error) => {
+      if (terminal) return
+      terminal = { kind: 'failure', error }
+      clearTimeout(timer)
+      void finishFailure(error)
+    }
+
+    const finishClose = async ({ status, signal }) => {
+      let error = null
+      let cleanupError = null
+      try {
+        if (process.platform !== 'win32' && child.pid && processGroupAlive(child.pid)) {
+          const exited = await waitForProcessGroupExit(child.pid, 1000)
+          if (!exited) {
+            error = new Error('Git root exited while its process group still contained active descendants')
+            await terminateSpawnedProcessTree(child, closePromise)
+          }
+        }
+      } catch (value) {
+        cleanupError = value
+      }
+      if (status === 0 && !error && !cleanupError) {
+        resolve(Buffer.concat(stdout).toString('utf8').trim())
+        return
+      }
+      reject(gitCloneError({
+        status,
+        signal,
+        error,
+        cleanupError,
+        stdout,
+        stderr
+      }))
+    }
+
+    const capture = (target) => (chunk) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      if (terminal || outputCapped) return
+      outputBytes += bytes.length
+      if (outputBytes > GIT_CLONE_MAX_OUTPUT_BYTES) {
+        outputCapped = true
+        claimFailure(new Error(`output exceeded ${GIT_CLONE_MAX_OUTPUT_BYTES} bytes`))
+        return
+      }
+      target.push(bytes)
+    }
+    child.stdout.on('data', capture(stdout))
+    child.stderr.on('data', capture(stderr))
+    child.once('error', (error) => {
+      claimFailure(error)
+    })
+    child.once('exit', (status, signal) => {
+      exitState = { status, signal }
+    })
+    child.once('close', (status, signal) => {
+      const deliver = () => {
+        closeState = { status, signal }
+        resolveClose(closeState)
+        if (terminal) return
+        terminal = { kind: 'close', closeState }
+        clearTimeout(timer)
+        void finishClose(closeState)
+      }
+      if (closeDelayMs > 0) setTimeout(deliver, closeDelayMs)
+      else deliver()
+    })
+    timer = setTimeout(() => {
+      claimFailure(new Error(`timeout after ${timeoutMs}ms`))
+    }, timeoutMs)
+  })
 }
 
 function runGitBuffer(args, cwd, env) {
@@ -1020,7 +1696,7 @@ const targetHubStatus = runGit(['status', '--porcelain=v1', '--untracked-files=a
 if (targetHubStatus) throw new Error(`target hub-data must be clean after materialization commit:\n${targetHubStatus}`)
 
 runGit(['cat-file', '-e', `${probeCommit}^{commit}`], probeSource, gitEnv)
-runGit([
+await runGitClone([
   'clone',
   '--no-local',
   '--no-hardlinks',
