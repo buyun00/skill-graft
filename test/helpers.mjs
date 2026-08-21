@@ -1,9 +1,15 @@
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { createTemporaryTestHub } from './support/test-hub.mjs'
 
 export const hubRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 export const cliPath = path.join(hubRoot, 'dist', 'control', 'cli.js')
+const temporaryHub = createTemporaryTestHub(hubRoot)
+export const testHubRoot = temporaryHub.root
+process.env.HUB_ROOT = testHubRoot
+process.env.HUB_SPAWN_CODEX = '0'
+process.once('exit', () => temporaryHub.cleanup())
 
 export function makeFs(files) {
   const resolveKey = (target) => path.resolve(target)
@@ -42,10 +48,15 @@ export function makeFs(files) {
 }
 
 export function spawnHub(args, options = {}) {
-  return spawnSync(process.execPath, [cliPath, ...args], {
+  return spawnSync(process.execPath, [options.cliPath || cliPath, ...args], {
     encoding: 'utf8',
     cwd: hubRoot,
-    env: { ...process.env, ...(options.env || {}) },
+    env: {
+      ...process.env,
+      HUB_ROOT: testHubRoot,
+      ...(options.env || {}),
+      HUB_SPAWN_CODEX: '0'
+    },
     input: options.input
   })
 }

@@ -9,12 +9,16 @@ const hubRoot = path.resolve(__dirname, '..')
 const cliPath = path.join(hubRoot, 'dist', 'control', 'cli.js')
 const port = Number(process.env.HUB_API_PORT || 18765)
 
+function hubDataRoot() {
+  return path.resolve(process.env.HUB_ROOT || hubRoot)
+}
+
 function runHub(args, options = {}) {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
     cwd: hubRoot,
     encoding: 'utf8',
     windowsHide: true,
-    env: { ...process.env, HUB_ROOT: hubRoot },
+    env: { ...process.env, HUB_ROOT: hubDataRoot() },
     input: options.input
   })
   if (result.status !== 0) {
@@ -38,7 +42,7 @@ function writeJson(file, value) {
 }
 
 function sessionsPath() {
-  return path.join(hubRoot, 'skill-review', 'sessions.json')
+  return path.join(hubDataRoot(), 'skill-review', 'sessions.json')
 }
 
 function loadSessions() {
@@ -82,13 +86,14 @@ function loadAndHydrateSessions() {
   return data
 }
 
-let worktreeCache = { at: 0, data: null }
+let worktreeCache = { at: 0, root: '', data: null }
 
 function collectWorktreesCached() {
   const now = Date.now()
-  if (worktreeCache.data && now - worktreeCache.at < 30000) return worktreeCache.data
+  const root = hubDataRoot()
+  if (worktreeCache.data && worktreeCache.root === root && now - worktreeCache.at < 30000) return worktreeCache.data
   const data = runHub(['list-worktrees'])
-  worktreeCache = { at: now, data }
+  worktreeCache = { at: now, root, data }
   return data
 }
 
@@ -111,8 +116,9 @@ export async function handleApi(req, url, body) {
 
   if (url.pathname === '/api/skill') {
     const rel = url.searchParams.get('path') || ''
-    const abs = path.resolve(hubRoot, rel)
-    if (!abs.startsWith(hubRoot)) throw new Error('path escaped hub')
+    const dataRoot = hubDataRoot()
+    const abs = path.resolve(dataRoot, rel)
+    if (abs !== dataRoot && !abs.startsWith(dataRoot + path.sep)) throw new Error('path escaped hub')
     if (!fs.existsSync(abs)) throw new Error('missing ' + rel)
     const target = fs.statSync(abs).isDirectory()
       ? (fs.existsSync(path.join(abs, 'SKILL.md')) ? path.join(abs, 'SKILL.md') : abs)
@@ -122,7 +128,7 @@ export async function handleApi(req, url, body) {
   }
 
   if (url.pathname === '/api/history') {
-    const dir = path.join(hubRoot, 'skill-review', 'history')
+    const dir = path.join(hubDataRoot(), 'skill-review', 'history')
     if (!fs.existsSync(dir)) return { records: [] }
     const files = fs.readdirSync(dir).filter((name) => name.endsWith('.json')).sort().reverse().slice(0, 50)
     return { records: files.map((name) => readJson(path.join(dir, name), {})) }

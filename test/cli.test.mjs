@@ -4,7 +4,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { hubRoot, spawnHub } from './helpers.mjs'
+import { hubRoot, spawnHub, testHubRoot } from './helpers.mjs'
+import { createTemporaryCliPackage } from './support/test-hub.mjs'
 
 function parseStdout(result, label) {
   assert.equal(result.status, 0, `${label} stderr=${result.stderr}`)
@@ -23,7 +24,7 @@ function tempHub() {
 
 test('U1 hub status exits 0 with hubRoot and 3 resident skills', () => {
   const payload = parseStdout(spawnHub(['status']), 'status')
-  assert.equal(payload.hubRoot, hubRoot)
+  assert.equal(payload.hubRoot, testHubRoot)
   assert.equal(payload.resident.length, 3)
   assert.ok(payload.resident.every((node) => node.kind === 'resident'))
   const queued = payload.items.filter((item) => item.status === 'queued')
@@ -62,9 +63,12 @@ test('U4 unknown command is non-zero; --help and -h exit 0', () => {
 
 test('setup --dry-run --json does not write an install dir', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-setup-dry-'))
+  const cliPackage = createTemporaryCliPackage(hubRoot)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => cliPackage.cleanup())
   const payload = parseStdout(
     spawnHub(['setup', '--dry-run', '--json', '--no-daemon', '--no-path', '--no-task'], {
+      cliPath: cliPackage.cliPath,
       env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' }
     }),
     'setup-dry-run'
@@ -79,9 +83,12 @@ test('setup --dry-run --json does not write an install dir', (t) => {
 
 test('setup --json writes shims into SG_INSTALL_DIR without touching user PATH', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-setup-'))
+  const cliPackage = createTemporaryCliPackage(hubRoot)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => cliPackage.cleanup())
   const payload = parseStdout(
     spawnHub(['setup', '--json', '--no-daemon', '--no-path', '--no-task'], {
+      cliPath: cliPackage.cliPath,
       env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' }
     }),
     'setup-apply'
@@ -94,11 +101,15 @@ test('setup --json writes shims into SG_INSTALL_DIR without touching user PATH',
   assert.match(shim, /dist\\control\\cli\.js|dist\/control\/cli\.js/)
   assert.match(fs.readFileSync(path.join(dir, 'run-daemon.cmd'), 'utf8'), /daemon run/)
   const doctor = parseStdout(
-    spawnHub(['doctor', '--json'], { env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' } }),
+    spawnHub(['doctor', '--json'], {
+      cliPath: cliPackage.cliPath,
+      env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' }
+    }),
     'doctor'
   )
   assert.equal(doctor.ok, true, JSON.stringify(doctor.issues, null, 2))
   assert.equal(doctor.shims.ok, true)
+  assert.equal(doctor.daemon.apiHealthy, false)
 })
 
 test('repair-links on a path that is not attached does not rewrite disk', () => {

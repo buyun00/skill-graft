@@ -25,7 +25,7 @@ import {
   RESIDENT_SKILLS,
   sessionExitFile
 } from '../dist/index.js'
-import { hubRoot, makeFs } from './helpers.mjs'
+import { hubRoot, makeFs, testHubRoot } from './helpers.mjs'
 
 function fakeGit(handlers) {
   return {
@@ -121,9 +121,9 @@ test('C3b checkout-rules can recognize .git + custom file and still exclude name
   assert.equal(isClientCheckout(ctx, agentsOnly), false)
 })
 
-test('C4 getStatus reads this hub: 3 resident SKILL.md, inbox has queued names, counts match items', () => {
-  const status = getStatus(createHub(hubRoot))
-  assert.equal(status.hubRoot, hubRoot)
+test('C4 getStatus reads an isolated hub: 3 resident SKILL.md, inbox has queued names, counts match items', () => {
+  const status = getStatus(createHub(testHubRoot))
+  assert.equal(status.hubRoot, testHubRoot)
   assert.deepEqual(status.resident.map((node) => node.name), [...RESIDENT_SKILLS])
   assert.ok(status.resident.every((node) => node.hasSkillMd))
   const queued = status.items.filter((item) => item.status === 'queued')

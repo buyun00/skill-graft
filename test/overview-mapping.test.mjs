@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import test from 'node:test'
 import {
   codexSessionHref,
@@ -8,7 +9,7 @@ import {
   sessionFromEnvelope,
   versionParts
 } from '../panel/lib/overview-mapping.mjs'
-import { spawnHub } from './helpers.mjs'
+import { spawnHub, testHubRoot } from './helpers.mjs'
 
 const busyState = {
   hubRoot: 'E:\\hub',
@@ -203,10 +204,11 @@ test('queuedSessionView unwraps the real CLI {ok,action,session} envelope', () =
 })
 
 test('queuedSessionView reads a real CLI attach --no-spawn envelope', () => {
+  const fakeWorktree = path.join(testHubRoot, 'fake-worktree')
   const cli = spawnHub([
     'attach',
     '--worktree',
-    'E:\\ozdqp-cli-attach-probe',
+    fakeWorktree,
     '--intent',
     'unwrap-session-envelope',
     '--no-spawn'
