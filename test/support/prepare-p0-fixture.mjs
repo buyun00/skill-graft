@@ -118,6 +118,43 @@ function assertPlainDirectoryChain(boundary, target, label) {
   return canonicalBoundary
 }
 
+function lstatIfPresent(target) {
+  try {
+    return fs.lstatSync(target)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function ensurePlainContainedDirectory(target, boundary, label) {
+  const existing = lstatIfPresent(target)
+  if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) {
+    throw new Error(`${label} must be a plain directory, not a link or reparse point: ${target}`)
+  }
+  if (!existing) fs.mkdirSync(target)
+  assertPlainDirectoryChain(boundary, target, label)
+}
+
+function assertIsolatedGitAttributesEnvironment(context, gitEnv) {
+  const expectedXdgRoot = path.join(path.resolve(context.homeRoot), 'xdg-config')
+  if (gitEnv.XDG_CONFIG_HOME !== expectedXdgRoot) {
+    throw new Error('isolated Git XDG_CONFIG_HOME must exactly equal marker-owned home/xdg-config')
+  }
+  if (gitEnv.GIT_ATTR_NOSYSTEM !== '1') {
+    throw new Error('isolated Git must disable system attributes with GIT_ATTR_NOSYSTEM=1')
+  }
+
+  assertPlainDirectoryChain(context.runRoot, context.homeRoot, 'isolated Git home')
+  ensurePlainContainedDirectory(expectedXdgRoot, context.runRoot, 'isolated Git XDG_CONFIG_HOME')
+  const globalGitRoot = path.join(expectedXdgRoot, 'git')
+  ensurePlainContainedDirectory(globalGitRoot, context.runRoot, 'isolated Git global attributes directory')
+  const globalAttributes = path.join(globalGitRoot, 'attributes')
+  if (lstatIfPresent(globalAttributes)) {
+    throw new Error('isolated Git global attributes file must not exist before source preflight')
+  }
+}
+
 function assertPlainContainedTree(root, boundary, label) {
   const canonicalBoundary = assertPlainDirectoryChain(boundary, root, label)
   const hash = createHash('sha256')
@@ -880,6 +917,7 @@ assertRunLayoutOwned(context)
 assertEmptyDirectory(context.hubDataRoot, 'hub-data')
 assertEmptyDirectory(context.probeRoot, 'probe')
 const gitEnv = createIsolatedGitEnvironment(process.env, context.homeRoot)
+assertIsolatedGitAttributesEnvironment(context, gitEnv)
 const sourceHub = path.join(libraryRunRoot, 'hub-data')
 const sourceGit = assertSourceGitProvenance(
   sourceHub,

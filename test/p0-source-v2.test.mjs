@@ -547,8 +547,8 @@ test('historical P0 v1 shared source converts to a marker-owned v2 fixture witho
   const historical = createHistoricalV1(parent, homeRoot, {
     exactBinary: true,
     nonUtf8Crlf: true,
-    probeAttributes: '# 根目录中文注释：仅注释可使用 UTF-8\nAGENTS.md text eol=lf diff merge\n',
-    probeNestedAttributes: '  # 嵌套中文注释\nfixture.txt text eol=lf diff merge\n',
+    probeAttributes: '# 根目录中文注释：仅注释可使用 UTF-8\nAGENTS.md text eol=lf diff merge\n*.png binary\n',
+    probeNestedAttributes: '  # 嵌套中文注释\n*.mat diff=unity-material merge=binary\nfixture.txt text eol=lf merge=unityyamlmerge\n*.png binary\n',
     realSkillShape29: true,
     worktreeProjection: 'crlf'
   })
@@ -1095,6 +1095,46 @@ test('converter preflights probe worktree filters and unsafe attributes without 
   assertConversionTargetUntouched(attributesPaths)
 })
 
+test('converter rejects isolated global attributes before a binary macro can execute a filter', { timeout: 60000 }, (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p0-global-attrs-refuse-'))
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
+  const homeRoot = path.join(parent, 'fixture-home')
+  fs.mkdirSync(homeRoot)
+  const packageSource = createPackageSource(parent, homeRoot)
+  const historical = createHistoricalV1(parent, homeRoot, {
+    probeAttributes: 'AGENTS.md binary\n'
+  })
+  const sentinel = path.join(parent, 'global-attributes-filter-must-not-run.txt')
+  const filterScript = path.join(parent, 'hostile-global-attributes-filter.mjs')
+  fs.writeFileSync(filterScript, [
+    "import fs from 'node:fs'",
+    `fs.writeFileSync(${JSON.stringify(sentinel)}, 'global attributes filter executed\\n')`,
+    'process.stdin.pipe(process.stdout)',
+    ''
+  ].join('\n'))
+  const filterCommand = `"${process.execPath}" "${filterScript}"`
+  runGit(historical.probe, ['config', 'filter.hostile.clean', filterCommand], homeRoot)
+  runGit(historical.probe, ['config', 'filter.hostile.smudge', filterCommand], homeRoot)
+  const paths = targetPaths(parent, 'p0-global-attrs-refuse-20260821')
+  const context = prepareTarget(paths, packageSource, [historical.runRoot, filterScript])
+  const globalAttributes = path.join(context.homeRoot, 'xdg-config', 'git', 'attributes')
+  fs.mkdirSync(path.dirname(globalAttributes), { recursive: true })
+  fs.writeFileSync(globalAttributes, '[attr]binary filter=hostile\n')
+  const refused = spawnConverter({
+    ...process.env,
+    ...targetEnv(paths),
+    HOME: homeRoot,
+    USERPROFILE: homeRoot,
+    SKILL_GRAFT_FIXTURE_SOURCE: packageSource,
+    SKILL_GRAFT_P0_SOURCE_RUN: historical.runRoot
+  })
+  assert.equal(refused.error, undefined, `converter spawn error: ${refused.error?.message || ''}`)
+  assert.notEqual(refused.status, 0)
+  assert.match(`${refused.stderr}\n${refused.stdout}`, /isolated Git environment must not contain global attributes/i)
+  assert.equal(fs.existsSync(sentinel), false, 'global attributes must be rejected before their filter can execute')
+  assertConversionTargetUntouched(paths)
+})
+
 test('converter requires probe physical index and HEAD attributes identity before status', { timeout: 60000 }, (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p0-probe-attrs-drift-'))
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
@@ -1131,6 +1171,31 @@ for (const scenario of [
     name: 'invalid UTF-8 in an attributes comment',
     probeAttributes: Buffer.from([0x23, 0x20, 0xff, 0x0a]),
     expected: /must contain valid UTF-8/i
+  },
+  {
+    name: 'unset binary macro state',
+    probeAttributes: '*.png -binary\n',
+    expected: /only allows the exact built-in binary macro token/i
+  },
+  {
+    name: 'valued binary macro state',
+    probeAttributes: '*.png binary=custom\n',
+    expected: /only allows the exact built-in binary macro token/i
+  },
+  {
+    name: 'uppercase binary macro token',
+    probeAttributes: '*.png BINARY\n',
+    expected: /only allows the exact built-in binary macro token/i
+  },
+  {
+    name: 'mixed-case binary macro token',
+    probeAttributes: '*.png BiNaRy\n',
+    expected: /only allows the exact built-in binary macro token/i
+  },
+  {
+    name: 'user-defined binary macro',
+    probeAttributes: '[attr]binary -text -diff -merge\n',
+    expected: /unsafe pattern or macro/i
   }
 ]) {
   test(`converter rejects probe ${scenario.name} before status or target writes`, { timeout: 60000 }, (t) => {

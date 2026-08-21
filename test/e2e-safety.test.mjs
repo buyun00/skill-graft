@@ -335,21 +335,29 @@ test('isolated Git environments discard every inherited GIT_* value and source g
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-git-env-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const homeRoot = path.join(root, 'isolated-home')
+  const hostileXdgRoot = path.join(root, 'hostile-xdg-config')
   const env = createIsolatedGitEnvironment({
     PATH: process.env.PATH,
+    XDG_CONFIG_HOME: hostileXdgRoot,
     GIT_DIR: path.join(root, 'victim', '.git'),
     git_work_tree: path.join(root, 'victim'),
     GIT_CONFIG_COUNT: '1',
     GIT_CONFIG_KEY_0: 'core.hooksPath',
     GIT_CONFIG_VALUE_0: path.join(root, 'hostile-hooks'),
+    gIt_AtTr_NoSyStEm: '0',
     GIT_SSH_COMMAND: 'hostile-command'
   }, homeRoot)
   assert.deepEqual(
     Object.keys(env).filter((name) => /^GIT_/i.test(name)).sort(),
-    ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_OPTIONAL_LOCKS']
+    ['GIT_ATTR_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_OPTIONAL_LOCKS']
   )
   assert.equal(env.HOME, path.resolve(homeRoot))
   assert.equal(env.USERPROFILE, path.resolve(homeRoot))
+  assert.equal(env.XDG_CONFIG_HOME, path.join(path.resolve(homeRoot), 'xdg-config'))
+  assert.equal(path.isAbsolute(env.XDG_CONFIG_HOME), true)
+  assert.notEqual(env.XDG_CONFIG_HOME, hostileXdgRoot)
+  assert.equal(env.GIT_ATTR_NOSYSTEM, '1')
+  assert.equal('gIt_AtTr_NoSyStEm' in env, false)
   assert.equal(env.GIT_CONFIG_NOSYSTEM, '1')
   assert.equal(env.GIT_OPTIONAL_LOCKS, '0')
 
@@ -362,6 +370,61 @@ test('isolated Git environments discard every inherited GIT_* value and source g
   assert.throws(() => assertSourceOutsideProtectedRoots(nested, [live], 'probe'), /protected or live source/)
   assert.throws(() => assertSourceOutsideProtectedRoots(live, [nested], 'probe'), /protected or live source/)
   assert.equal(assertSourceOutsideProtectedRoots(sibling, [live], 'probe'), fs.realpathSync.native(sibling))
+})
+
+test('P0 fixture preflight rejects isolated global attributes files and reparse chains before source status', {
+  timeout: 60000
+}, (t) => {
+  const attributes = createP0ProvenanceCase('isolated-global-attributes')
+  t.after(() => fs.rmSync(attributes.paths.parent, { recursive: true, force: true }))
+  const attributesSentinel = path.join(attributes.paths.parent, 'isolated-global-filter-executed.txt')
+  const attributesCommand = `echo isolated-global-filter-executed > "${attributesSentinel.replaceAll('\\', '/')}"`
+  runGit(attributes.historical.hubData, ['config', 'filter.sentinel.clean', attributesCommand], attributes.sourceHome)
+  runGit(attributes.historical.hubData, ['config', 'filter.sentinel.required', 'true'], attributes.sourceHome)
+  fs.appendFileSync(path.join(attributes.historical.hubData, 'AGENTS.override.md'), 'force source status inspection\n')
+  const isolatedGlobalRoot = path.join(attributes.context.homeRoot, 'xdg-config', 'git')
+  fs.mkdirSync(isolatedGlobalRoot, { recursive: true })
+  const isolatedGlobalAttributes = path.join(isolatedGlobalRoot, 'attributes')
+  fs.writeFileSync(isolatedGlobalAttributes, [
+    '[attr]binary filter=sentinel',
+    'AGENTS.override.md binary',
+    ''
+  ].join('\n'))
+
+  assertP0PreparationRefused(
+    spawnP0Preparation(attributes.env),
+    attributes.context,
+    /isolated Git global attributes file must not exist before source preflight/i
+  )
+  assert.equal(fs.existsSync(attributesSentinel), false, 'isolated global attributes filter must not execute')
+  assert.equal(fs.existsSync(isolatedGlobalAttributes), true, 'refusal must not remove the hostile attributes file')
+
+  const reparse = createP0ProvenanceCase('isolated-global-attributes-reparse')
+  t.after(() => fs.rmSync(reparse.paths.parent, { recursive: true, force: true }))
+  const reparseSentinel = path.join(reparse.paths.parent, 'isolated-global-reparse-filter-executed.txt')
+  const reparseCommand = `echo isolated-global-reparse-filter-executed > "${reparseSentinel.replaceAll('\\', '/')}"`
+  runGit(reparse.historical.hubData, ['config', 'filter.sentinel.clean', reparseCommand], reparse.sourceHome)
+  runGit(reparse.historical.hubData, ['config', 'filter.sentinel.required', 'true'], reparse.sourceHome)
+  fs.appendFileSync(path.join(reparse.historical.hubData, 'AGENTS.override.md'), 'force source status inspection\n')
+  const externalGitRoot = path.join(reparse.paths.parent, 'external-global-git')
+  fs.mkdirSync(externalGitRoot)
+  fs.writeFileSync(path.join(externalGitRoot, 'attributes'), [
+    '[attr]binary filter=sentinel',
+    'AGENTS.override.md binary',
+    ''
+  ].join('\n'))
+  const externalBefore = treeFingerprint(externalGitRoot)
+  const reparseXdgRoot = path.join(reparse.context.homeRoot, 'xdg-config')
+  fs.mkdirSync(reparseXdgRoot)
+  fs.symlinkSync(externalGitRoot, path.join(reparseXdgRoot, 'git'), process.platform === 'win32' ? 'junction' : 'dir')
+
+  assertP0PreparationRefused(
+    spawnP0Preparation(reparse.env),
+    reparse.context,
+    /isolated Git global attributes directory must be a plain directory, not a link or reparse point/i
+  )
+  assert.equal(fs.existsSync(reparseSentinel), false, 'isolated global attributes reparse filter must not execute')
+  assert.equal(treeFingerprint(externalGitRoot), externalBefore, 'reparse refusal must not mutate external attributes bytes')
 })
 
 test('P0 fixture preparation rejects source alternates and hostile Git injection cannot mutate a victim repo', {

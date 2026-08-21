@@ -62,6 +62,8 @@ export function createIsolatedGitEnvironment(baseEnv, homeRoot, { platform = pro
   Object.assign(env, {
     HOME: isolatedHome,
     USERPROFILE: isolatedHome,
+    XDG_CONFIG_HOME: path.join(isolatedHome, 'xdg-config'),
+    GIT_ATTR_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: platform === 'win32' ? 'NUL' : '/dev/null',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_OPTIONAL_LOCKS: '0'

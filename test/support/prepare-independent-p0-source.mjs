@@ -571,6 +571,7 @@ function verifyIndependentHubCheckout(context, targetHub, verifiedSourceSkills, 
     checkout,
     'independent target Hub checkout skills'
   )
+  assertNoIsolatedGlobalAttributes(gitEnv)
   const status = runGit(['status', '--porcelain=v1', '--untracked-files=all'], checkout, gitEnv).stdout
   if (status) throw new Error('independent target Hub checkout is not clean after physical projection verification')
   if (!isSameOrInside(context.runRoot, checkout) || samePath(context.runRoot, checkout)) {
@@ -657,6 +658,7 @@ function initializeHubFixture(packageRoot, verifiedSourceSkills, context, gitEnv
     'committed target Git skills manifest'
   )
   assertTargetPhysicalManifest(targetSkills, verifiedSourceSkills, context.runRoot, 'committed target hub-data/skills')
+  assertNoIsolatedGlobalAttributes(gitEnv)
   const status = runGit(['status', '--porcelain=v1', '--untracked-files=all'], context.hubDataRoot, gitEnv).stdout
   if (status) throw new Error(`converted hub-data is not clean:\n${status}`)
   verifyIndependentHubCheckout(context, context.hubDataRoot, verifiedSourceSkills, gitEnv)
@@ -1032,6 +1034,23 @@ function assertNoExternalConversionConfig(sourceRoot, gitEnv, label) {
   }
 }
 
+function assertNoIsolatedGlobalAttributes(gitEnv) {
+  const isolatedHome = assertPlainDirectory(path.resolve(gitEnv.HOME), 'isolated Git HOME')
+  const xdgConfig = String(gitEnv.XDG_CONFIG_HOME || '')
+  if (!path.isAbsolute(xdgConfig)) throw new Error('isolated Git XDG_CONFIG_HOME must be absolute')
+  assertPlainDirectory(xdgConfig, 'isolated Git XDG_CONFIG_HOME')
+  assertPathInside(isolatedHome, xdgConfig, 'isolated Git XDG_CONFIG_HOME')
+  const gitConfigDirectory = path.join(xdgConfig, 'git')
+  if (!fs.existsSync(gitConfigDirectory)) return
+  assertPlainDirectory(gitConfigDirectory, 'isolated Git global attributes parent')
+  assertPathInside(isolatedHome, gitConfigDirectory, 'isolated Git global attributes parent')
+  const attributes = path.join(gitConfigDirectory, 'attributes')
+  if (!fs.existsSync(attributes)) return
+  assertPlainFile(attributes, 'isolated Git global attributes')
+  assertPathInside(isolatedHome, attributes, 'isolated Git global attributes')
+  throw new Error('isolated Git environment must not contain global attributes')
+}
+
 function assertNoExternalSkillsConversionPolicy(sourceHub, gitManifest, gitEnv, { allowGeneratedRoot = false } = {}) {
   if (gitManifest.entries.some((entry) => path.posix.basename(entry.path).toLowerCase() === '.gitattributes')) {
     throw new Error('skills tree contains a nested .gitattributes conversion policy')
@@ -1247,7 +1266,7 @@ function assertSafeProbeAttributesBytes(contents) {
     }
   }
   if (/\r(?!\n)/.test(text)) throw new Error('historical probe .gitattributes contains a bare CR byte')
-  const allowed = new Set(['text', 'eol', 'diff', 'merge'])
+  const allowed = new Set(['text', 'eol', 'diff', 'merge', 'binary'])
   for (const rawLine of text.split(/\r?\n/)) {
     if (/^[ \t]*$/.test(rawLine) || /^[ \t]*#/.test(rawLine)) continue
     if ([...rawLine].some((character) => character.codePointAt(0) > 0x7e)) {
@@ -1269,6 +1288,9 @@ function assertSafeProbeAttributesBytes(contents) {
       const name = rawName.toLowerCase()
       if (!allowed.has(name)) {
         throw new Error('historical probe .gitattributes contains an unsafe conversion attribute')
+      }
+      if (name === 'binary' && (rawName !== 'binary' || state || value !== undefined)) {
+        throw new Error('historical probe .gitattributes only allows the exact built-in binary macro token')
       }
       if (value && state) throw new Error('historical probe .gitattributes contains an invalid attribute state')
       if (name === 'eol' && (state || !['lf', 'crlf'].includes(String(value || '').toLowerCase()))) {
@@ -1407,6 +1429,7 @@ function assertSafeProbeGitPolicy(sourceRun, sourceProbe, commit, gitEnv) {
 }
 
 function inspectProbeProjection(sourceRun, sourceHub, sourceProbe, fixtureVersion, gitEnv) {
+  assertNoIsolatedGlobalAttributes(gitEnv)
   const status = parseNullPaths(runGitBuffer([
     'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=no'
   ], sourceProbe, gitEnv).stdout)
@@ -1601,6 +1624,7 @@ function verifyHistoricalGit(sourceRun, sourceHub, sourceProbe, metadata, gitEnv
     )
   }
 
+  assertNoIsolatedGlobalAttributes(gitEnv)
   const hubStatus = runGit(['status', '--porcelain=v1', '--untracked-files=all'], sourceHub, gitEnv).stdout
   if (hubStatus) throw new Error(`historical hub-data is not clean:\n${hubStatus}`)
 
@@ -1737,6 +1761,7 @@ function createIndependentProbe(sourceProbe, context, commit, gitEnv) {
   if (runGit(['remote'], context.probeRoot, gitEnv).stdout) {
     throw new Error('target probe retained a Git remote')
   }
+  assertNoIsolatedGlobalAttributes(gitEnv)
   const status = runGit(['status', '--porcelain=v1', '--untracked-files=all'], context.probeRoot, gitEnv).stdout
   if (status) throw new Error(`target probe is not clean after checkout:\n${status}`)
   assertPlainFile(path.join(context.probeRoot, 'AGENTS.md'), 'target probe AGENTS.md')
@@ -1781,8 +1806,10 @@ Object.assign(gitEnv, {
   LOCALAPPDATA: path.join(context.homeRoot, 'localappdata')
 })
 fs.mkdirSync(gitEnv.XDG_CONFIG_HOME, { recursive: true })
+fs.mkdirSync(path.join(gitEnv.XDG_CONFIG_HOME, 'git'), { recursive: true })
 fs.mkdirSync(gitEnv.APPDATA, { recursive: true })
 fs.mkdirSync(gitEnv.LOCALAPPDATA, { recursive: true })
+assertNoIsolatedGlobalAttributes(gitEnv)
 
 const protectedWatchRoots = watchRoots([
   { root: sourceRun, forceFullTree: true },
