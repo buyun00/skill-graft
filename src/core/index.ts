@@ -1,72 +1,83 @@
 export { KEPT_AGENT_SKILLS, RESIDENT_SKILLS } from './constants.js'
-export { getStatus, gameRepoOf } from './status.js'
-export { listAdoptedSkills, listInboxSkills, listResidentSkills, listSkillGroup, listSkills } from './inventory.js'
 export {
-  cloneRootFromCommonDir,
-  isClientCheckout,
-  isEphemeralPath,
-  loadCheckoutRules,
-  listWorktrees,
-  parseWorktreePorcelain
-} from './worktrees.js'
-export { repairLinks, repairPlan } from './repair.js'
-export { emptyIngestResult, ingest, parseIngestTransactions } from './ingest.js'
-export { decide } from './decide.js'
+  classifyConflict,
+  decideFirstAttach,
+  evaluateClaim,
+  recognizeWorktree,
+  transitionInbox,
+  validatePin
+} from './policies.js'
+export { planLegacyAttach } from './legacy-attach.js'
+export type { LegacyAttachPlanDecision, LegacyAttachPlanInput } from './legacy-attach.js'
+export { planLegacyDetach } from './legacy-detach.js'
+export type { LegacyDetachPlanDecision, LegacyDetachPlanInput } from './legacy-detach.js'
 export {
-  enqueueSession,
-  extractAcceptanceSummary,
-  extractCodexSessionId,
-  extractSuggestion,
-  finalizeSession,
-  findSession,
-  inProgressSessions,
-  listSessions,
-  markSessionSpawned,
-  presentSession,
-  reapSessions,
-  resumeSession,
-  saveSession,
-  sessionExitFile
-} from './sessions.js'
-export type { PidAlive } from './sessions.js'
+  discoverIngestCandidates,
+  INGEST_WATCHED_PATHS,
+  parseIngestTransactions,
+  planIngest
+} from './ingest-plan.js'
+export { describeDecision, planDecision } from './decision-plan.js'
 export {
-  API_PORT,
-  evaluateDoctor,
-  formatDoctorReport,
-  formatSetupReport,
-  formatUninstallReport,
-  layoutSpec,
-  mergeUserPath,
-  pathHasDir,
-  PRODUCT_ALIAS,
-  PRODUCT_COMMAND,
-  PRODUCT_NAME,
-  removeFromUserPath,
-  renderShims,
-  resolveInstallDir,
-  resolveInstallPaths,
-  TASK_NAME,
-  toGitBashPath
-} from './install.js'
+  projectHubStatus,
+  projectSkillInventory,
+  projectWorktreeList
+} from './query-projections.js'
+export { extractInboxSuggestion, planAnalyzeCompletion } from './analyze-completion-plan.js'
+export { isEphemeralPath, parseCheckoutRules, parseWorktreePorcelain } from './worktree-facts.js'
 export type {
-  DaemonStatus,
-  DoctorFacts,
-  DoctorReport,
-  InstallPaths,
-  SetupFlags,
-  SetupResult,
-  UninstallResult
-} from './install.js'
-export type { HubContext } from './ports.js'
-export type { DecideAction } from './decide.js'
+  ClaimEvaluation,
+  ConflictClassification,
+  ConflictInput,
+  ConflictKind,
+  FirstAttachDecision,
+  InboxTransition,
+  InboxTransitionAction,
+  PinValidation,
+  PinValidationErrorCode,
+  SkillPinCandidate,
+  TreePin,
+  TreePinCandidate,
+  WorktreeRecognition,
+  WorktreeRecognitionInput
+} from './policies.js'
 export type {
-  GitWorktreeRef,
-  HubSession,
-  HubState,
-  HubStateFile,
-  InboxItem,
-  IngestTransaction,
-  SkillNode,
-  WorktreeInfo,
-  WorktreeList
-} from './types.js'
+  IngestCandidateSnapshot,
+  IngestDiscovery,
+  IngestPlan,
+  IngestPlanDecision,
+  IngestSnapshotFile,
+  IngestTransactionFact,
+  IngestUnitSeed,
+  ParsedIngestTransaction
+} from './ingest-plan.js'
+export type {
+  DecisionDescription,
+  DecisionDescriptionDecision,
+  DecisionInput,
+  DecisionNoop,
+  DecisionPlan,
+  DecisionPlanDecision
+} from './decision-plan.js'
+export type {
+  AnalyzeCompletionFact,
+  AnalyzeCompletionPlanDecision
+} from './analyze-completion-plan.js'
+export type {
+  ArtifactEffect,
+  ArtifactFact,
+  ArtifactInspectionRequest,
+  ArtifactRef,
+  HubStateDocument,
+  PlannedHistoryWrite
+} from './use-case-plan-types.js'
+export type { CheckoutRules, GitWorktreeFact } from './worktree-facts.js'
+export type {
+  HubStatusFacts,
+  SkillHostFact,
+  WorktreeCloneObservation,
+  WorktreeDiscoveryFacts,
+  WorktreeProjectionFact,
+  WorktreeRecognitionHostFact,
+  WorktreeSeedFact
+} from './query-projections.js'

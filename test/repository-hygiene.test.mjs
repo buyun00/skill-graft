@@ -13,6 +13,8 @@ test('runtime state, session text, history, and raw verification artifacts are i
   for (const rel of [
     'skill-review/state.json',
     'skill-review/sessions.json',
+    'skill-review/application-ledger.json',
+    'skill-review/application-audit.json',
     'skill-review/history/example.json',
     'skill-review/resume-example.txt',
     '.artifacts-local/verification/P0/raw.log'

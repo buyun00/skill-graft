@@ -1,0 +1,35 @@
+import type { JsonObject } from './common.js'
+
+export const HUB_ERROR_CODES = [
+  'UNSUPPORTED_CONTRACT_VERSION',
+  'INVALID_COMMAND_META',
+  'INVALID_ARGUMENT',
+  'REQUEST_ID_REQUIRED',
+  'REQUEST_ID_CONFLICT',
+  'REQUEST_IN_PROGRESS',
+  'NOT_FOUND',
+  'WORKTREE_NOT_RECOGNIZED',
+  'WORKTREE_BLOCKED',
+  'WORKTREE_ALREADY_CLAIMED',
+  'FIRST_ATTACH_SESSION_REQUIRED',
+  'DETACH_SESSION_REQUIRED',
+  'INVALID_INBOX_TRANSITION',
+  'INVALID_PIN',
+  'CONFLICT_DIRTY',
+  'CONFLICT_EXTERNAL_LINK',
+  'CONFLICT_CONTENT',
+  'STATE_VERSION_UNSUPPORTED',
+  'RUNNER_UNAVAILABLE',
+  'PORT_FAILURE',
+  'UNSUPPORTED_COMMAND',
+  'INTERNAL_ERROR'
+] as const
+
+export type HubErrorCode = (typeof HUB_ERROR_CODES)[number]
+
+export type HubError = {
+  code: HubErrorCode
+  message: string
+  retryable: boolean
+  details?: JsonObject
+}

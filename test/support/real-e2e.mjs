@@ -51,6 +51,38 @@ function absoluteEnvPath(env, name) {
   return path.resolve(value)
 }
 
+export function createIsolatedGitEnvironment(baseEnv, homeRoot, { platform = process.platform } = {}) {
+  if (!baseEnv || typeof baseEnv !== 'object') throw new Error('base Git environment must be an object')
+  if (!path.isAbsolute(homeRoot)) throw new Error('isolated Git HOME must be absolute')
+  const isolatedHome = path.resolve(homeRoot)
+  const env = { ...baseEnv }
+  for (const name of Object.keys(env)) {
+    if (/^GIT_/i.test(name)) delete env[name]
+  }
+  Object.assign(env, {
+    HOME: isolatedHome,
+    USERPROFILE: isolatedHome,
+    GIT_CONFIG_GLOBAL: platform === 'win32' ? 'NUL' : '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_OPTIONAL_LOCKS: '0'
+  })
+  return env
+}
+
+export function assertSourceOutsideProtectedRoots(source, protectedRoots, label = 'fixture source') {
+  if (!path.isAbsolute(source)) throw new Error(`${label} must be absolute`)
+  const canonicalSource = canonicalize(source)
+  for (const candidate of protectedRoots || []) {
+    if (!candidate) continue
+    if (!path.isAbsolute(candidate)) throw new Error(`protected source root must be absolute: ${candidate}`)
+    const canonicalProtected = canonicalize(candidate)
+    if (isSameOrInside(canonicalProtected, canonicalSource) || isSameOrInside(canonicalSource, canonicalProtected)) {
+      throw new Error(`${label} must not overlap a protected or live source: ${canonicalProtected}`)
+    }
+  }
+  return canonicalSource
+}
+
 function assertChild(root, target, label, firstSegment) {
   const canonicalRoot = canonicalize(root)
   const canonicalTarget = canonicalize(target)

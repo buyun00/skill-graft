@@ -31,13 +31,13 @@
 
 - 只加载与当前任务直接相关的 reference；不要恢复旧 Cursor、Claude Code、飞书或通知流程。
 - 本分支额外启用 `unity-skills`；运行 `.codex/local-overlay/register-unity-skills.ps1` 可幂等恢复工作树根目录的注册入口。
-- 3 Skill、`AGENTS.override.md` 与 overlay 的权威源是独立仓 `E:/ozdqp-skill-hub`。已挂接的游戏树只打链接，不持有副本。
+- 3 Skill、`AGENTS.override.md` 与 overlay 的权威源是 `git config --get ozdqp.localOverlaySource` 返回的 Skill Graft 安装/数据源。已挂接的游戏树只打链接，不持有副本。
 - 旧 `.agents`、`.claude` 和 `.codex` 助手文件已从已挂接工作树本地移除；除 Git 同步临时恢复或用户明确要求外，不要恢复。
 - `fetch`/`pull` 到的官方新 Skill 由 hook 写入中心仓 inbox。功能分支对话只提示打开 http://127.0.0.1:18765/ ，不要在分支里做语义归类或合入。
 
 ## 新工作树初始化
 
-- 权威源：`git config --get ozdqp.localOverlaySource`（应为 `E:/ozdqp-skill-hub`）。
+- 权威源：`git config --get ozdqp.localOverlaySource`（应指向当前 Skill Graft 安装/数据源，不得假定固定盘符）。
 - 新签出的分支不要只跑脚本。在中心仓面板点「用 Codex 改用本地 Skill」，或把 `ozdqp.skillHubAutoAttach` 设为 true 后由 hook **拉起 Codex 对话**做剥离与挂接。对话须先侦察、等确认、再验收。
 - 已有未挂接的旧 worktree 默认不自动处理。
 - `unity-skills` 仍按游戏树单独注册，不进中心仓。

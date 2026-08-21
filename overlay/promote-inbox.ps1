@@ -9,58 +9,55 @@ param(
     [string]$MergeTarget
 )
 
+# Deprecated v0 compatibility facade. Decision policy and every state, inbox,
+# history, file, Git, link, and audit effect are owned by Application v1.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'HubLib.ps1')
 
-$hubRoot = Get-HubRoot
-$statePath = Join-Path $hubRoot 'skill-review\state.json'
-$state = Read-JsonFile $statePath ([pscustomobject]@{ version = 1; items = @() })
-$item = @($state.items) | Where-Object { $_.id -eq $Id } | Select-Object -First 1
-if ($null -eq $item) { throw "Unknown inbox item: $Id" }
+function Resolve-SkillGraftCommand {
+    $command = Get-Command -Name 'sg' -CommandType Application,ExternalScript -ErrorAction Stop |
+        Select-Object -First 1
+    if ($null -eq $command -or [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+        throw 'installed sg command was not found on PATH'
+    }
+    return [string]$command.Source
+}
 
-$inboxAbs = Join-Path $hubRoot ([string]$item.inboxPath).Replace('/', '\')
-if ($Action -eq 'adopt') {
-    $name = if ($item.name) { [string]$item.name } else { Split-Path -Leaf $inboxAbs }
-    $dest = Join-Path $hubRoot "skills\adopted\$name"
-    if (Test-Path -LiteralPath $dest) { throw "adopted already exists: $dest" }
-    if (-not (Test-Path -LiteralPath $inboxAbs)) { throw "inbox missing: $inboxAbs" }
-    [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest))
-    Move-Item -LiteralPath $inboxAbs -Destination $dest
-    $item.status = 'adopted'
-    $item.adoptedPath = "skills/adopted/$name"
-    $gameRepo = (& git -C $hubRoot config --get ozdqp.gameRepo 2>$null)
-    if (-not [string]::IsNullOrWhiteSpace($gameRepo) -and (Test-HubListContains (Join-Path $hubRoot 'overlay\attached-worktrees.txt') $gameRepo)) {
-        [void](New-HubDirectoryLink (Join-Path $gameRepo ".agents\skills\$name") $dest)
-    }
-} elseif ($Action -eq 'merge') {
-    if ([string]::IsNullOrWhiteSpace($MergeTarget)) { throw 'merge requires -MergeTarget (hub-relative path)' }
-    $targetAbs = Join-Path $hubRoot ($MergeTarget.Replace('/', '\'))
-    if (-not (Test-Path -LiteralPath $targetAbs)) { throw "merge target missing: $MergeTarget" }
-    $item.status = 'merged-into-3skill'
-    $item.mergeTarget = $MergeTarget
-    if (Test-Path -LiteralPath $inboxAbs) {
-        Remove-Item -LiteralPath $inboxAbs -Recurse -Force
-    }
-} else {
-    $item.status = 'rejected'
-    if (Test-Path -LiteralPath $inboxAbs) {
-        Remove-Item -LiteralPath $inboxAbs -Recurse -Force
+if ([string]::IsNullOrWhiteSpace($Id)) {
+    throw 'Id must not be empty'
+}
+
+$hubRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$arguments = @(
+    'decide',
+    '--id', $Id,
+    '--action', $Action.ToLowerInvariant()
+)
+if (-not [string]::IsNullOrWhiteSpace($Note)) {
+    $arguments += @('--note', $Note)
+}
+if (-not [string]::IsNullOrWhiteSpace($MergeTarget)) {
+    $arguments += @('--merge-target', $MergeTarget)
+}
+$arguments += '--contract-v1'
+
+$sg = Resolve-SkillGraftCommand
+$hadHubRoot = Test-Path -LiteralPath 'Env:HUB_ROOT'
+$previousHubRoot = $env:HUB_ROOT
+try {
+    $env:HUB_ROOT = $hubRoot
+    & $sg @arguments
+    $sgExitCode = $LASTEXITCODE
+    $sgSucceeded = $?
+} finally {
+    if ($hadHubRoot) {
+        $env:HUB_ROOT = $previousHubRoot
+    } else {
+        Remove-Item -LiteralPath 'Env:HUB_ROOT' -ErrorAction SilentlyContinue
     }
 }
 
-$item.updatedAt = [DateTimeOffset]::Now.ToString('o')
-$item.note = $Note
-Write-JsonFile $statePath $state
-New-HistoryRecord $hubRoot @{
-    type = 'decide'
-    id = $Id
-    action = $Action
-    note = $Note
-    mergeTarget = $MergeTarget
+if ($null -eq $sgExitCode) {
+    $sgExitCode = if ($sgSucceeded) { 0 } else { 1 }
 }
-
-$commitMessage = "skill-hub: $Action $($item.name)"
-& git -C $hubRoot add -- 'skills' 'skill-review'
-& git -C $hubRoot commit -m $commitMessage 2>$null
-Write-Output ($item | ConvertTo-Json -Depth 8)
+exit ([int]$sgExitCode)

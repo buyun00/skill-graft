@@ -1,5 +1,7 @@
-import type { HubContext } from './ports.js'
-import type { HubSession, HubStateFile, InboxSuggestion } from './types.js'
+import type { SessionKind, SessionStatus, SessionTarget, SessionView } from '../../contracts/state.js'
+import type { LocalHostContext as HubContext } from '../../adapters/host-context.js'
+import { worktreeTargetId } from '../../adapters/worktree-target.js'
+import type { HubSession } from './types.js'
 
 const SESSION_KINDS = new Set(['attach', 'detach', 'edit', 'chat', 'analyze'])
 
@@ -22,11 +24,11 @@ function saveSessions(ctx: HubContext, sessions: HubSession[]) {
   ctx.persist.writeJson(sessionsFile(ctx), { sessions })
 }
 
-function newId() {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+function newId(ctx: HubContext) {
+  return ctx.ids.next('session')
 }
 
-function buildPrompt(ctx: HubContext, input: { kind: string; skillPath: string; intent: string; worktree: string }) {
+function buildPrompt(ctx: HubContext, input: { kind: string; sessionId: string; skillPath: string; intent: string; worktree: string }) {
   const templateName = input.kind === 'analyze-note' ? 'chat' : input.kind
   const templateFile = ctx.path.join(ctx.hubRoot, 'overlay', 'prompts', `${templateName}.txt`)
   const template = ctx.fs.readText(templateFile)
@@ -36,6 +38,7 @@ function buildPrompt(ctx: HubContext, input: { kind: string; skillPath: string; 
     .replaceAll('{{PATH}}', input.skillPath || '')
     .replaceAll('{{INTENT}}', input.intent || '')
     .replaceAll('{{WORKTREE}}', input.worktree || '')
+    .replaceAll('{{SESSION_ID}}', input.sessionId || '')
     .trim()
 }
 
@@ -77,72 +80,15 @@ function resolveExitCode(ctx: HubContext, session: HubSession): number {
   return 1
 }
 
-function applyFinalize(session: HubSession, exitCode: number, error?: string) {
+function applyFinalize(ctx: HubContext, session: HubSession, exitCode: number, error?: string) {
   session.exitCode = exitCode
   session.status = exitCode === 0 ? 'waiting' : 'failed'
-  session.endedAt = new Date().toISOString()
+  session.endedAt = ctx.clock.nowIso()
   if (exitCode !== 0) {
     session.error = error || session.error || `process exited with code ${exitCode}`
   } else if (!session.error) {
     session.error = ''
   }
-}
-
-export function extractSuggestion(text: string): InboxSuggestion | null {
-  const raw = String(text || '')
-  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)
-  const body = fenced ? fenced[1] : raw
-  const start = body.search(/[\[{]/)
-  if (start < 0) return null
-  const sliced = body.slice(start)
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(sliced)
-  } catch {
-    const endObj = sliced.lastIndexOf('}')
-    const endArr = sliced.lastIndexOf(']')
-    const end = Math.max(endObj, endArr)
-    if (end < 0) return null
-    try {
-      parsed = JSON.parse(sliced.slice(0, end + 1))
-    } catch {
-      return null
-    }
-  }
-  const row = Array.isArray(parsed) ? parsed[0] : parsed
-  if (!row || typeof row !== 'object') return null
-  const rec = row as Record<string, unknown>
-  const action = String(rec.action || rec.suggestion || '').trim()
-  if (!action) return null
-  return {
-    action,
-    target: String(rec.target || ''),
-    reason: String(rec.reason || rec.summary || ''),
-    confidence: String(rec.confidence || '')
-  }
-}
-
-function applyInboxSuggestions(ctx: HubContext, session: HubSession) {
-  if (session.kind !== 'analyze' || session.exitCode !== 0) return
-  const suggestion = extractSuggestion(session.lastMessage || session.summary || '')
-  if (!suggestion) return
-  const file = ctx.path.join(ctx.hubRoot, 'skill-review', 'state.json')
-  const state: HubStateFile = ctx.persist.readState(file)
-  const items = Array.isArray(state.items) ? state.items : []
-  const ids = new Set((session.inboxIds || []).filter(Boolean))
-  const now = new Date().toISOString()
-  let changed = false
-  for (const item of items) {
-    if (ids.size > 0 && !ids.has(item.id)) continue
-    if (ids.size === 0 && item.status !== 'queued' && item.status !== 'proposed') continue
-    item.suggestion = suggestion
-    item.status = 'proposed'
-    item.updatedAt = now
-    changed = true
-  }
-  if (!changed) return
-  state.items = items
-  ctx.persist.writeState(file, state)
 }
 
 export function enqueueSession(
@@ -154,9 +100,10 @@ export function enqueueSession(
   if (kind === 'edit' && !input.skillPath) throw new Error('edit requires --path')
   if ((kind === 'attach' || kind === 'detach') && !input.worktree) throw new Error(`${kind} requires --worktree`)
 
-  const id = newId()
+  const id = newId(ctx)
   const prompt = buildPrompt(ctx, {
     kind,
+    sessionId: id,
     skillPath: input.skillPath || '',
     intent: input.intent || '',
     worktree: input.worktree || ''
@@ -176,7 +123,7 @@ export function enqueueSession(
     promptFile,
     logFile,
     lastFile,
-    startedAt: new Date().toISOString(),
+    startedAt: ctx.clock.nowIso(),
     status: 'queued',
     exitCode: null,
     error: '',
@@ -244,6 +191,71 @@ export function presentSession(ctx: HubContext, session: HubSession): HubSession
   }
 }
 
+function toSessionKind(value: string): SessionKind {
+  return SESSION_KINDS.has(value) ? (value as SessionKind) : 'chat'
+}
+
+function toSessionStatus(value: string): SessionStatus {
+  switch (value) {
+    case 'queued':
+    case 'running':
+    case 'waiting':
+    case 'completed':
+    case 'failed':
+    case 'cancelled':
+      return value
+    default:
+      return 'failed'
+  }
+}
+
+function logicalName(ctx: HubContext, value: string): string {
+  if (!value) return ''
+  const name = ctx.path.basename(value)
+  return name.toLowerCase() === 'skill.md' ? ctx.path.basename(ctx.path.dirname(value)) : name
+}
+
+function toSessionTarget(ctx: HubContext, session: HubSession): SessionTarget {
+  if (session.kind === 'attach' || session.kind === 'detach') {
+    return { kind: 'worktree', id: worktreeTargetId(ctx, session.worktree) }
+  }
+  if (session.kind === 'edit') {
+    return { kind: 'skill', id: logicalName(ctx, session.path) || 'skill' }
+  }
+  if (session.kind === 'analyze') {
+    return { kind: 'inbox', id: session.inboxIds?.[0] || 'inbox' }
+  }
+  if (session.worktree) {
+    return { kind: 'worktree', id: worktreeTargetId(ctx, session.worktree) }
+  }
+  return { kind: 'hub', id: 'hub' }
+}
+
+export function toSessionView(ctx: HubContext, session: HubSession): SessionView {
+  const current = presentSession(ctx, session)
+  return {
+    id: current.id,
+    kind: toSessionKind(current.kind),
+    status: toSessionStatus(current.status),
+    target: toSessionTarget(ctx, current),
+    intent: current.intent || undefined,
+    runnerId: current.pid ? `local:${current.id}` : undefined,
+    continuationToken: current.codexSessionId || undefined,
+    startedAt: current.startedAt,
+    endedAt: current.endedAt || undefined,
+    exitCode: current.exitCode,
+    error: current.error || undefined,
+    summary: current.summary || undefined,
+    lastMessage: current.lastMessage || undefined,
+    canResume: Boolean(current.canResume),
+    inboxIds: current.inboxIds
+  }
+}
+
+export function toSessionViews(ctx: HubContext, sessions: readonly HubSession[]): SessionView[] {
+  return sessions.map((session) => toSessionView(ctx, session))
+}
+
 export function listSessions(ctx: HubContext): HubSession[] {
   return loadSessions(ctx).map((item) => presentSession(ctx, item))
 }
@@ -258,24 +270,40 @@ export function finalizeSession(
   result: { exitCode: number; error?: string }
 ): HubSession {
   refreshFromDisk(ctx, session)
-  applyFinalize(session, result.exitCode, result.error)
-  applyInboxSuggestions(ctx, session)
+  applyFinalize(ctx, session, result.exitCode, result.error)
   saveSession(ctx, session)
   return presentSession(ctx, session)
 }
 
-export function reapSessions(ctx: HubContext, pidAlive: PidAlive): HubSession[] {
+export function sessionsNeedReap(
+  ctx: HubContext,
+  pidAlive: PidAlive,
+  sessionIds?: readonly string[]
+): boolean {
+  const allowed = sessionIds === undefined ? null : new Set(sessionIds)
+  return loadSessions(ctx).some((session) => {
+    if (allowed && !allowed.has(session.id)) return false
+    return session.status === 'running' && (!session.pid || !pidAlive(session.pid))
+  })
+}
+
+export function reapSessions(
+  ctx: HubContext,
+  pidAlive: PidAlive,
+  sessionIds?: readonly string[]
+): HubSession[] {
   const sessions = loadSessions(ctx)
+  const allowed = sessionIds === undefined ? null : new Set(sessionIds)
   const finalized: HubSession[] = []
   let dirty = false
   for (const session of sessions) {
+    if (allowed && !allowed.has(session.id)) continue
     const before = JSON.stringify(session)
     refreshFromDisk(ctx, session)
     if (session.status === 'running') {
       const alive = Boolean(session.pid) && pidAlive(session.pid)
       if (!alive) {
-        applyFinalize(session, resolveExitCode(ctx, session))
-        applyInboxSuggestions(ctx, session)
+        applyFinalize(ctx, session, resolveExitCode(ctx, session))
         finalized.push(session)
       }
     }

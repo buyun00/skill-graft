@@ -1,5 +1,4 @@
-import type { FsPort, PersistPort } from '../core/ports.js'
-import type { HubStateFile } from '../core/types.js'
+import type { FsPort, LocalHubStateFile, PersistPort } from './host-context.js'
 
 export function createNodePersist(fs: FsPort): PersistPort {
   return {
@@ -19,7 +18,7 @@ export function createNodePersist(fs: FsPort): PersistPort {
     readState(file) {
       const text = fs.readText(file)
       if (text === null) return { version: 1, items: [], lastIngest: null }
-      return JSON.parse(text) as HubStateFile
+      return JSON.parse(text) as LocalHubStateFile
     },
     writeState(file, state) {
       fs.writeText(file, `${JSON.stringify(state, null, 2)}\n`)

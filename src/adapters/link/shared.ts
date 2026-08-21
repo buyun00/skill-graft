@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { FsPort, LinkPort, PathPort } from '../../core/ports.js'
+import type { FsPort, LinkPort, PathPort } from '../host-context.js'
 
 export function createSharedLinkPort(
   fsPort: FsPort,

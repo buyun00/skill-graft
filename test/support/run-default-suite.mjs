@@ -6,10 +6,101 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
-const readOnlyGitEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+const isolationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-default-suite-'))
+const isolation = {
+  home: path.join(isolationRoot, 'home'),
+  appData: path.join(isolationRoot, 'appdata'),
+  localAppData: path.join(isolationRoot, 'localappdata'),
+  temp: path.join(isolationRoot, 'temp'),
+  dshHome: path.join(isolationRoot, 'dsh-home'),
+  hubRoot: path.join(isolationRoot, 'hub'),
+  npmCache: path.join(isolationRoot, 'npm-cache'),
+  npmPrefix: path.join(isolationRoot, 'npm-prefix'),
+  blockedBin: path.join(isolationRoot, 'blocked-bin')
+}
+for (const dir of Object.values(isolation)) fs.mkdirSync(dir, { recursive: true })
+const isolatedNpmConfig = {
+  user: path.join(isolationRoot, 'npm-userconfig'),
+  global: path.join(isolationRoot, 'npm-globalconfig')
+}
+fs.writeFileSync(isolatedNpmConfig.user, '')
+fs.writeFileSync(isolatedNpmConfig.global, '')
+
+function commandPath(command) {
+  const locator = process.platform === 'win32' ? 'where.exe' : 'which'
+  const found = spawnSync(locator, [command], { encoding: 'utf8', windowsHide: true })
+  if (found.status !== 0) return ''
+  return String(found.stdout || '').split(/\r?\n/).map((line) => line.trim()).find(Boolean) || ''
+}
+
+function writeBlockedCommand(name) {
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(isolation.blockedBin, `${name}.cmd`), '@echo off\r\necho blocked by isolated default suite 1>&2\r\nexit /b 86\r\n')
+    return
+  }
+  const target = path.join(isolation.blockedBin, name)
+  fs.writeFileSync(target, '#!/bin/sh\necho "blocked by isolated default suite" >&2\nexit 86\n', { mode: 0o700 })
+}
+writeBlockedCommand('sg')
+writeBlockedCommand('ozdqp-hub')
+writeBlockedCommand('dsh')
+
+function scrubInheritedChildEnvironment(source) {
+  return Object.fromEntries(Object.entries(source).filter(([name]) => {
+    const normalized = name.toUpperCase()
+    return !normalized.startsWith('GIT_')
+      && !normalized.startsWith('NPM_CONFIG_')
+      && normalized !== 'NODE_OPTIONS'
+      && normalized !== 'NODE_PATH'
+      && normalized !== 'NODE_TEST_CONTEXT'
+  }))
+}
+
+function safeGitArgs(args) {
+  return ['--no-optional-locks', '-c', 'core.fsmonitor=false', ...args]
+}
+
+const systemRoot = process.env.SystemRoot || process.env.WINDIR || ''
+const gitPath = commandPath('git')
+const safePath = [...new Set([
+  isolation.blockedBin,
+  path.dirname(process.execPath),
+  gitPath ? path.dirname(gitPath) : '',
+  process.env.ComSpec ? path.dirname(process.env.ComSpec) : '',
+  systemRoot ? path.join(systemRoot, 'System32') : '',
+  systemRoot ? path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0') : '',
+  ...(process.platform === 'win32' ? [] : ['/usr/bin', '/bin'])
+].filter(Boolean))].join(path.delimiter)
+const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null'
+const isolatedBaseEnv = {
+  ...scrubInheritedChildEnvironment(process.env),
+  HOME: isolation.home,
+  USERPROFILE: isolation.home,
+  APPDATA: isolation.appData,
+  LOCALAPPDATA: isolation.localAppData,
+  TEMP: isolation.temp,
+  TMP: isolation.temp,
+  DSH_HOME: isolation.dshHome,
+  HUB_ROOT: isolation.hubRoot,
+  SKILL_GRAFT_HOME: isolation.hubRoot,
+  PATH: safePath,
+  Path: safePath,
+  npm_config_cache: isolation.npmCache,
+  npm_config_prefix: isolation.npmPrefix,
+  npm_config_userconfig: isolatedNpmConfig.user,
+  npm_config_globalconfig: isolatedNpmConfig.global,
+  GIT_CONFIG_GLOBAL: nullDevice,
+  GIT_CONFIG_SYSTEM: nullDevice,
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_OPTIONAL_LOCKS: '0',
+  GIT_TERMINAL_PROMPT: '0'
+}
+const readOnlyGitEnv = { ...isolatedBaseEnv }
+const cleanupIsolation = () => fs.rmSync(isolationRoot, { recursive: true, force: true })
+process.once('exit', cleanupIsolation)
 
 function gitStatus() {
-  const result = spawnSync('git', ['--no-optional-locks', 'status', '--short', '--untracked-files=all'], {
+  const result = spawnSync('git', safeGitArgs(['status', '--short', '--untracked-files=all']), {
     cwd: repoRoot,
     encoding: 'utf8',
     windowsHide: true,
@@ -33,7 +124,7 @@ function writeResult(result) {
   if (result.stderr) process.stderr.write(result.stderr)
 }
 
-async function startIsolatedApi() {
+async function startIsolatedApi(environment) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-default-api-'))
   const readyFile = path.join(root, 'port.txt')
   const code = [
@@ -48,7 +139,8 @@ async function startIsolatedApi() {
   ].join('; ')
   const child = spawn(process.execPath, ['-e', code, readyFile], {
     stdio: 'ignore',
-    windowsHide: true
+    windowsHide: true,
+    env: environment
   })
   const deadline = Date.now() + 5000
   const waitArray = new Int32Array(new SharedArrayBuffer(4))
@@ -165,24 +257,24 @@ function protectedFingerprint() {
     probe: { exists: fs.existsSync(probe) }
   }
   if (!result.probe.exists) return result
-  const git = spawnSync('git', ['--no-optional-locks', '-C', probe, 'status', '--porcelain=v1', '--untracked-files=all'], {
+  const git = spawnSync('git', safeGitArgs(['-C', probe, 'status', '--porcelain=v1', '--untracked-files=all']), {
     encoding: 'utf8',
     windowsHide: true,
     env: readOnlyGitEnv
   })
-  const head = spawnSync('git', ['--no-optional-locks', '-C', probe, 'rev-parse', 'HEAD'], {
+  const head = spawnSync('git', safeGitArgs(['-C', probe, 'rev-parse', 'HEAD']), {
     encoding: 'utf8', windowsHide: true, env: readOnlyGitEnv
   })
-  const index = spawnSync('git', ['--no-optional-locks', '-C', probe, 'rev-parse', '--git-path', 'index'], {
+  const index = spawnSync('git', safeGitArgs(['-C', probe, 'rev-parse', '--git-path', 'index']), {
     encoding: 'utf8', windowsHide: true, env: readOnlyGitEnv
   })
-  const stage = spawnSync('git', ['--no-optional-locks', '-C', probe, 'ls-files', '--stage', '-z'], {
+  const stage = spawnSync('git', safeGitArgs(['-C', probe, 'ls-files', '--stage', '-z']), {
     encoding: 'utf8',
     windowsHide: true,
     env: readOnlyGitEnv,
     maxBuffer: 64 * 1024 * 1024
   })
-  const visibility = spawnSync('git', ['--no-optional-locks', '-C', probe, 'ls-files', '-v', '-z'], {
+  const visibility = spawnSync('git', safeGitArgs(['-C', probe, 'ls-files', '-v', '-z']), {
     encoding: 'utf8',
     windowsHide: true,
     env: readOnlyGitEnv,
@@ -207,17 +299,15 @@ function protectedFingerprint() {
 
 const before = gitStatus()
 const protectedBefore = protectedFingerprint()
-const isolatedApi = await startIsolatedApi()
+const isolatedApi = await startIsolatedApi(isolatedBaseEnv)
 process.once('exit', isolatedApi.forceStop)
-const env = { ...process.env }
+const env = { ...isolatedBaseEnv }
 for (const name of [
-  'HUB_ROOT',
-  'SKILL_GRAFT_HOME',
   'SKILL_GRAFT_RUN_ID',
   'SKILL_GRAFT_E2E_ROOT',
   'SKILL_GRAFT_REAL_PROBE',
   'SKILL_GRAFT_CLI',
-  'DSH_HOME'
+  'SKILL_GRAFT_INVOCATION_TRACE'
 ]) {
   delete env[name]
 }
@@ -227,6 +317,8 @@ for (const name of Object.keys(env)) {
 env.SKILL_GRAFT_REAL_E2E = '0'
 env.HUB_SPAWN_CODEX = '0'
 env.HUB_API_PORT = String(isolatedApi.port)
+env.SG_SKIP_PATH = '1'
+env.SG_SKIP_TASK = '1'
 
 const tsc = path.join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc')
 if (!fs.existsSync(tsc)) {
@@ -270,4 +362,5 @@ const succeeded = (
   && JSON.stringify(protectedAfter) === JSON.stringify(protectedBefore)
 )
 await isolatedApi.stop()
+cleanupIsolation()
 process.exit(succeeded ? 0 : 1)

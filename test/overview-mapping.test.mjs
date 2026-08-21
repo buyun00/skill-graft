@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import {
@@ -203,8 +205,13 @@ test('queuedSessionView unwraps the real CLI {ok,action,session} envelope', () =
   assert.equal(codexSessionHref({ ok: true, action: 'chat', session: { id: 'abc', status: 'running' } }), '/codex?id=abc')
 })
 
-test('queuedSessionView reads a real CLI attach --no-spawn envelope', () => {
-  const fakeWorktree = path.join(testHubRoot, 'fake-worktree')
+test('queuedSessionView reads a real CLI attach --no-spawn envelope', (t) => {
+  const fakeWorktree = fs.mkdtempSync(path.join(testHubRoot, 'recognized-worktree-overview-'))
+  t.after(() => fs.rmSync(fakeWorktree, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(fakeWorktree, 'baloot_client'))
+  fs.writeFileSync(path.join(fakeWorktree, 'AGENTS.md'), '# temporary recognized checkout\n')
+  const initialized = spawnSync('git', ['-C', fakeWorktree, 'init'], { encoding: 'utf8', windowsHide: true })
+  assert.equal(initialized.status, 0, initialized.stderr || initialized.stdout)
   const cli = spawnHub([
     'attach',
     '--worktree',

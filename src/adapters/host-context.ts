@@ -1,4 +1,4 @@
-import type { HubStateFile } from './types.js'
+import type { InboxItemView, LastIngestView } from '../contracts/index.js'
 
 export type DirEntry = {
   name: string
@@ -11,17 +11,28 @@ export type FileId = {
   dev: number
 }
 
+export type LocalHubStateFile = {
+  version?: number
+  items?: InboxItemView[]
+  lastIngest?: LastIngestView | null
+}
+
 export interface PathPort {
   join(...parts: string[]): string
   resolve(...parts: string[]): string
   dirname(value: string): string
   basename(value: string): string
+  /** Platform-aware stable key for comparing host paths; never expose it as a contract path. */
+  comparisonKey(value: string): string
+  /** True only when target is root itself or a lexical/canonical descendant on this host. */
+  isSameOrInside(root: string, target: string): boolean
 }
 
 export interface FsPort {
   exists(target: string): boolean
   isDirectory(target: string): boolean
   isFile(target: string): boolean
+  isSymbolicLink?(target: string): boolean
   readDir(target: string): DirEntry[]
   readText(target: string): string | null
   writeText(target: string, contents: string): void
@@ -50,15 +61,32 @@ export interface PersistPort {
   readJson<T>(file: string, fallback: T): T
   writeJson(file: string, value: unknown): void
   readList(file: string): string[]
-  readState(file: string): HubStateFile
-  writeState(file: string, state: HubStateFile): void
+  readState(file: string): LocalHubStateFile
+  writeState(file: string, state: LocalHubStateFile): void
 }
 
-export interface HubContext {
+export interface ClockPort {
+  nowIso(): string
+  nowMs(): number
+}
+
+export interface IdPort {
+  next(scope: string): string
+}
+
+export interface HashPort {
+  sha256(value: string): string
+}
+
+/** Local/Node composition context. It is intentionally outside shared Core. */
+export interface LocalHostContext {
   hubRoot: string
   path: PathPort
   fs: FsPort
   link: LinkPort
   git: GitPort
   persist: PersistPort
+  clock: ClockPort
+  ids: IdPort
+  hash: HashPort
 }

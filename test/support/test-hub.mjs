@@ -25,6 +25,15 @@ export function createTemporaryTestHub(sourceRoot) {
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'SKILL.md'), `# ${name}\n\nTemporary default-test fixture.\n`, 'utf8')
   }
+  fs.copyFileSync(path.join(sourceRoot, 'skills', 'README.md'), path.join(root, 'skills', 'README.md'))
+  for (const name of [
+    'checkout-rules.txt',
+    'attach-library.ps1',
+    'manage-skill-visibility.ps1',
+    'analyze-remote-skill-update.ps1'
+  ]) {
+    fs.copyFileSync(path.join(sourceRoot, 'overlay', name), path.join(root, 'overlay', name))
+  }
   for (const name of ['attach', 'detach', 'edit', 'chat', 'analyze']) {
     const source = path.join(sourceRoot, 'overlay', 'prompts', `${name}.txt`)
     const target = path.join(root, 'overlay', 'prompts', `${name}.txt`)
@@ -48,6 +57,13 @@ export function createTemporaryCliPackage(sourceRoot) {
   const root = assertTemporaryRoot(fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-cli-package-')))
   fs.cpSync(path.join(sourceRoot, 'dist'), path.join(root, 'dist'), { recursive: true })
   fs.cpSync(path.join(sourceRoot, 'server'), path.join(root, 'server'), { recursive: true })
+  fs.cpSync(path.join(sourceRoot, 'overlay'), path.join(root, 'overlay'), { recursive: true })
+  fs.copyFileSync(path.join(sourceRoot, 'AGENTS.override.md'), path.join(root, 'AGENTS.override.md'))
+  for (const name of RESIDENT) {
+    const dir = path.join(root, 'skills', name)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), `# ${name}\n\nTemporary packaged-skill fixture.\n`, 'utf8')
+  }
   fs.copyFileSync(path.join(sourceRoot, 'package.json'), path.join(root, 'package.json'))
   // The legacy setup path only checks for this directory before deciding to
   // invoke npm. An empty directory keeps the integration test fully offline.

@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { TASK_NAME } from '../core/install.js'
+import { TASK_NAME } from '../local/lifecycle/install-domain.js'
 
 export type CommandResult = {
   status: number
@@ -30,7 +30,9 @@ export interface InstallHost {
   registerLogonTask(taskName: string, vbsPath: string): void
   unregisterTask(taskName: string): void
   pidAlive(pid: number): boolean
-  killPid(pid: number): void
+  processCommandLine(pid: number): string
+  killPid(pid: number): boolean
+  waitForPidsExit(pids: readonly number[], timeoutMs: number): boolean
   wmiCreate(commandLine: string, cwd: string): number
   run(command: string, args: string[], opts?: { cwd?: string; timeout?: number; env?: NodeJS.ProcessEnv }): CommandResult
   runNpm(args: string[], cwd: string, timeout?: number): CommandResult
@@ -160,7 +162,10 @@ export function createInstallHost(overrides: Partial<InstallHost> = {}): Install
     unregisterTask(taskName) {
       if (host.skipTask) return
       if (platform !== 'win32') return
-      spawnSync('schtasks.exe', ['/Delete', '/TN', taskName, '/F'], { encoding: 'utf8', windowsHide: true })
+      const ran = spawnSync('schtasks.exe', ['/Delete', '/TN', taskName, '/F'], { encoding: 'utf8', windowsHide: true })
+      if (ran.status !== 0 && host.taskExists(taskName)) {
+        throw new Error(ran.stderr || ran.stdout || `failed to unregister ${taskName}`)
+      }
     },
     pidAlive(pid) {
       if (!pid || pid <= 0) return false
@@ -171,17 +176,59 @@ export function createInstallHost(overrides: Partial<InstallHost> = {}): Install
         return false
       }
     },
-    killPid(pid) {
-      if (!pid || pid <= 0) return
+    processCommandLine(pid) {
+      if (!pid || pid <= 0) return ''
       if (platform === 'win32') {
-        spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { encoding: 'utf8', windowsHide: true })
-        return
+        const ran = runPowerShell(
+          [
+            '$processId = [int]$env:SG_PROCESS_ID',
+            '$process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId=" + $processId) -ErrorAction SilentlyContinue',
+            'if ($process) { [Console]::Out.Write([string]$process.CommandLine) }'
+          ].join('; '),
+          { SG_PROCESS_ID: String(pid) }
+        )
+        return ran.status === 0 ? String(ran.stdout || '').trim() : ''
+      }
+      if (platform === 'linux') {
+        try {
+          return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim()
+        } catch {
+          return ''
+        }
+      }
+      const ran = spawnSync('ps', ['-p', String(pid), '-o', 'command='], {
+        encoding: 'utf8',
+        windowsHide: true
+      })
+      return ran.status === 0 ? String(ran.stdout || '').trim() : ''
+    },
+    killPid(pid) {
+      if (!pid || pid <= 0) return true
+      if (platform === 'win32') {
+        const ran = spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+          encoding: 'utf8',
+          windowsHide: true
+        })
+        return ran.status === 0 || !host.pidAlive(pid)
       }
       try {
         process.kill(pid, 'SIGTERM')
+        return true
       } catch {
-        /* already gone */
+        return !host.pidAlive(pid)
       }
+    },
+    waitForPidsExit(pids, timeoutMs) {
+      const targets = [...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))]
+      if (targets.length === 0) return true
+      const deadline = Date.now() + Math.max(0, timeoutMs)
+      const waiter = new Int32Array(new SharedArrayBuffer(4))
+      while (targets.some((pid) => host.pidAlive(pid))) {
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) return false
+        Atomics.wait(waiter, 0, 0, Math.min(50, remaining))
+      }
+      return true
     },
     wmiCreate(commandLine, cwd) {
       if (platform !== 'win32') {

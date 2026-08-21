@@ -1,35 +1,38 @@
 [CmdletBinding()]
 param()
 
+# Deprecated v0 compatibility facade. Session creation, concurrency policy,
+# analysis, and suggestion persistence are owned by Application contract v1.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'HubLib.ps1')
 
-$hubRoot = Get-HubRoot
-$lockPath = Join-Path $hubRoot 'skill-review\hub-codex.lock'
-if (Test-Path -LiteralPath $lockPath) {
-    $existing = Get-Content -LiteralPath $lockPath -Raw -ErrorAction SilentlyContinue
-    if ($existing -match 'pid=(\d+)') {
-        $pidValue = [int]$Matches[1]
-        $running = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
-        if ($running) {
-            Write-Output "Hub Codex analyze already running (pid $pidValue); queued only."
-            return
-        }
+function Resolve-SkillGraftCommand {
+    $command = Get-Command -Name 'sg' -CommandType Application,ExternalScript -ErrorAction Stop |
+        Select-Object -First 1
+    if ($null -eq $command -or [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+        throw 'installed sg command was not found on PATH'
+    }
+    return [string]$command.Source
+}
+
+$hubRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$sg = Resolve-SkillGraftCommand
+$hadHubRoot = Test-Path -LiteralPath 'Env:HUB_ROOT'
+$previousHubRoot = $env:HUB_ROOT
+try {
+    $env:HUB_ROOT = $hubRoot
+    & $sg 'analyze' '--contract-v1'
+    $sgExitCode = $LASTEXITCODE
+    $sgSucceeded = $?
+} finally {
+    if ($hadHubRoot) {
+        $env:HUB_ROOT = $previousHubRoot
+    } else {
+        Remove-Item -LiteralPath 'Env:HUB_ROOT' -ErrorAction SilentlyContinue
     }
 }
 
-$prompt = @'
-你在中心仓工作。只读 skills/inbox 与 skills/ozdqp-*，只更新 skill-review/state.json 里 status=queued 的条目：
-写成 proposed，填 suggestion.action（adopt|merge|reject）、suggestion.target、suggestion.reason、suggestion.confidence。
-禁止修改 skills/ozdqp-* 和 skills/adopted。禁止写游戏仓。
-'@
-
-$proc = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru -ArgumentList @(
-    '-NoProfile',
-    '-ExecutionPolicy', 'Bypass',
-    '-Command',
-    "Set-Location -LiteralPath '$hubRoot'; try { codex exec -C '$hubRoot' --sandbox workspace-write -- $(ConvertTo-Json $prompt -Compress) } finally { if (Test-Path -LiteralPath '$lockPath') { Remove-Item -LiteralPath '$lockPath' -Force } }"
-)
-[System.IO.File]::WriteAllText($lockPath, "pid=$($proc.Id)`nat=$([DateTimeOffset]::Now.ToString('o'))`n", [System.Text.UTF8Encoding]::new($false))
-Write-Output "Started hidden codex exec pid=$($proc.Id)"
+if ($null -eq $sgExitCode) {
+    $sgExitCode = if ($sgSucceeded) { 0 } else { 1 }
+}
+exit ([int]$sgExitCode)

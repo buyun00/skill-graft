@@ -1,0 +1,154 @@
+import type {
+  AuditEvent,
+  HistoryRecordView,
+  ApprovedLegacyAttachPlan,
+  ApprovedLegacyDetachPlan,
+  HubCommandKind,
+  HubCommandResult,
+  LegacyAttachApplyReport,
+  LegacyAttachInspection,
+  LegacyDetachApplyReport,
+  LegacyDetachInspection,
+  LegacyAttachWorktreeInspection,
+  SessionKind,
+  SessionRequestOptions,
+  SessionTarget,
+  SessionView
+} from '../contracts/index.js'
+import type {
+  HubStatusFacts,
+  SkillHostFact,
+  WorktreeDiscoveryFacts
+} from '../core/query-projections.js'
+
+export type MaybePromise<T> = T | Promise<T>
+
+/**
+ * Host-provided deterministic runtime primitives. Keeping these capabilities
+ * explicit prevents the shared Application from receiving a filesystem-sized
+ * context object.
+ */
+export interface ApplicationRuntimePort {
+  nowIso(): string
+  nextId(scope: string): string
+  sha256(value: string): string
+}
+
+type InvocationTraceBase = {
+  sequence: number
+  transport: string
+  commandKind: HubCommandKind
+  requestHash: string
+  handlerIdentity: 'application.commandBus'
+}
+
+export type InvocationTraceEvent =
+  | InvocationTraceBase & {
+    phase: 'entry'
+  }
+  | InvocationTraceBase & {
+    phase: 'result'
+    ok: boolean
+    replayed: boolean
+  }
+
+/**
+ * Optional diagnostic boundary. The Application supplies only an opaque hash
+ * and allowlisted command metadata; raw request or result payloads never cross
+ * this port.
+ */
+export interface InvocationTracePort {
+  hashRequestId(requestId: string): MaybePromise<string>
+  append(event: InvocationTraceEvent): MaybePromise<void>
+}
+
+export type SkillReadPortResult =
+  | { status: 'found'; content: string }
+  | { status: 'invalid-path'; reason: 'escaped' | 'escaped-link' }
+  | { status: 'not-found'; reason: 'missing' | 'skill-md-missing' }
+
+export type WorktreeInspection = LegacyAttachWorktreeInspection
+
+/**
+ * Host observation boundary. Adapters report flat facts and safe file reads;
+ * shared Core/Application own grouping, counts, recognition, dedupe, and sort.
+ */
+export interface HubQueryPort {
+  readStatusFacts(): MaybePromise<HubStatusFacts>
+  listSkillFacts(): MaybePromise<readonly SkillHostFact[]>
+  readWorktreeFacts(): MaybePromise<WorktreeDiscoveryFacts>
+  readSkill(path: string): MaybePromise<SkillReadPortResult>
+  listHistory(limit: number): MaybePromise<readonly HistoryRecordView[]>
+  inspectWorktree(worktree: string): MaybePromise<WorktreeInspection>
+}
+
+/**
+ * Host effect boundary for the legacy live-link attach path. The adapter only
+ * observes host facts and applies a Core-approved, path-bounded plan.
+ */
+export interface LegacyAttachPort {
+  inspect(worktree: string): MaybePromise<LegacyAttachInspection>
+  apply(plan: ApprovedLegacyAttachPlan): MaybePromise<LegacyAttachApplyReport>
+}
+
+/**
+ * Host effect boundary for restoring an attached legacy worktree. The adapter
+ * rechecks host facts and applies only a Core-approved transactional plan.
+ */
+export interface LegacyDetachPort {
+  inspect(worktree: string): MaybePromise<LegacyDetachInspection>
+  apply(plan: ApprovedLegacyDetachPlan): MaybePromise<LegacyDetachApplyReport>
+}
+
+export type SessionStartRequest = {
+  kind: SessionKind
+  /** Host locator used only to launch the session; it must not be exposed as target.id. */
+  locator?: {
+    kind: 'worktree' | 'skill'
+    value: string
+  }
+  target?: SessionTarget
+  intent?: string
+  inboxIds?: readonly string[]
+  options?: SessionRequestOptions
+}
+
+export type SessionResumeRequest = {
+  sessionId: string
+  message: string
+  options?: SessionRequestOptions
+}
+
+/**
+ * Host-owned session boundary. The shared Application never sees a process id,
+ * a runner-specific continuation id format, or a runner-owned file path.
+ */
+export interface SessionPort {
+  list(): MaybePromise<readonly SessionView[]>
+  get(sessionId: string): MaybePromise<SessionView | null>
+  start(input: SessionStartRequest): MaybePromise<SessionView>
+  resume(input: SessionResumeRequest): MaybePromise<SessionView>
+  reap(sessionIds?: readonly string[]): MaybePromise<readonly SessionView[]>
+}
+
+export type RequestLedgerEntry = {
+  requestId: string
+  digest: string
+  commandKind: HubCommandKind
+  status: 'started' | 'completed'
+  startedAt: string
+  completedAt?: string
+  result?: HubCommandResult
+}
+
+/**
+ * A host persists this ledger outside the shared layer. P1 intentionally
+ * guarantees sequential cross-process replay and single-process concurrency;
+ * cross-process locking and crash transactions are introduced in P2.
+ */
+export interface RequestLedgerPort {
+  read(requestId: string): MaybePromise<RequestLedgerEntry | null>
+  begin(entry: RequestLedgerEntry): MaybePromise<void>
+  complete(entry: RequestLedgerEntry, events: AuditEvent | readonly AuditEvent[]): MaybePromise<void>
+  listEvents(limit: number): MaybePromise<readonly AuditEvent[]>
+}

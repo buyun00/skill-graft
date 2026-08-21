@@ -1,167 +1,145 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { createLocalHost } from '../dist/local/create-local-host.js'
+import { projectLegacyResult } from '../dist/local/compat/legacy-projector.js'
+import { daemonStatus } from '../dist/control/install.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const hubRoot = path.resolve(__dirname, '..')
-const cliPath = path.join(hubRoot, 'dist', 'control', 'cli.js')
 const port = Number(process.env.HUB_API_PORT || 18765)
 
 function hubDataRoot() {
   return path.resolve(process.env.HUB_ROOT || hubRoot)
 }
 
-function runHub(args, options = {}) {
-  const result = spawnSync(process.execPath, [cliPath, ...args], {
-    cwd: hubRoot,
-    encoding: 'utf8',
-    windowsHide: true,
-    env: { ...process.env, HUB_ROOT: hubDataRoot() },
-    input: options.input
-  })
-  if (result.status !== 0) {
-    const err = new Error((result.stderr || result.stdout || 'hub command failed').trim())
-    err.status = 500
-    throw err
-  }
-  const text = result.stdout || ''
-  if (!text.trim()) throw new Error(`hub ${args[0]} produced empty stdout`)
-  return JSON.parse(text)
-}
+let localHostCache = { root: '', host: null }
 
-function readJson(file, fallback) {
-  if (!fs.existsSync(file)) return fallback
-  return JSON.parse(fs.readFileSync(file, 'utf8'))
-}
-
-function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, JSON.stringify(value, null, 2), 'utf8')
-}
-
-function sessionsPath() {
-  return path.join(hubDataRoot(), 'skill-review', 'sessions.json')
-}
-
-function loadSessions() {
-  return readJson(sessionsPath(), { sessions: [] })
-}
-
-function saveSessions(data) {
-  writeJson(sessionsPath(), data)
-}
-
-function extractCodexSessionId(text) {
-  const match = String(text || '').match(/session id:\s*([0-9a-fA-F-]{16,})/i)
-  return match ? match[1] : ''
-}
-
-function hydrateSession(session) {
-  if (!session) return session
-  if (!session.codexSessionId && session.logFile && fs.existsSync(session.logFile)) {
-    session.codexSessionId = extractCodexSessionId(fs.readFileSync(session.logFile, 'utf8'))
-  }
-  if (!session.lastMessage && session.lastFile && fs.existsSync(session.lastFile)) {
-    session.lastMessage = fs.readFileSync(session.lastFile, 'utf8')
-  }
-  if (session.status === 'completed' && session.exitCode === 0 && session.codexSessionId) {
-    session.status = 'waiting'
-  }
-  session.canResume = Boolean(session.codexSessionId) && session.status !== 'running'
-  return session
-}
-
-function loadAndHydrateSessions() {
-  const data = loadSessions()
-  let dirty = false
-  for (const session of data.sessions || []) {
-    const before = `${session.codexSessionId || ''}|${session.status}|${session.lastMessage || ''}`
-    hydrateSession(session)
-    const after = `${session.codexSessionId || ''}|${session.status}|${session.lastMessage || ''}`
-    if (before !== after) dirty = true
-  }
-  if (dirty) saveSessions(data)
-  return data
-}
-
-let worktreeCache = { at: 0, root: '', data: null }
-
-function collectWorktreesCached() {
-  const now = Date.now()
+function localHost() {
   const root = hubDataRoot()
-  if (worktreeCache.data && worktreeCache.root === root && now - worktreeCache.at < 30000) return worktreeCache.data
-  const data = runHub(['list-worktrees'])
-  worktreeCache = { at: now, root, data }
-  return data
+  if (!localHostCache.host || localHostCache.root !== root) {
+    localHostCache = {
+      root,
+      host: createLocalHost({ packageRoot: hubRoot, dataRoot: root, hostId: 'local-http' })
+    }
+  }
+  return localHostCache.host
 }
 
-function sessionFromHub(kind, body) {
-  const args = [kind]
-  if (body.path) args.push('--path', body.path)
-  if (body.intent) args.push('--intent', body.intent)
-  if (body.worktree) args.push('--worktree', body.worktree)
-  return runHub(args)
+function requestId(req, body, suffix = '') {
+  const header = String(req.headers?.['x-skill-graft-request-id'] || '').trim()
+  const supplied = String(body?.requestId || body?.meta?.requestId || header).trim()
+  if (supplied) return suffix ? `${supplied}:${suffix}` : supplied
+  return localHost().commandMeta('http').requestId
+}
+
+function typedCommand(req, body, kind, input = {}, suffix = '') {
+  const host = localHost()
+  return {
+    kind,
+    ...input,
+    meta: host.commandMeta('http', requestId(req, body, suffix))
+  }
+}
+
+async function executeTyped(command) {
+  const host = localHost()
+  if (command.kind === 'status' || command.kind === 'listSessions' || command.kind === 'getSession') {
+    const sessionIds = command.kind === 'getSession' && command.sessionId ? [command.sessionId] : undefined
+    if (host.localSessions?.needsReap(sessionIds)) {
+      const reaped = await host.application.execute({
+        kind: 'reapSessions',
+        meta: host.commandMeta('http-session-reap'),
+        sessionIds
+      })
+      if (!reaped.ok) return reaped
+    }
+  }
+  return host.application.execute(command)
+}
+
+async function executeLegacy(req, body, kind, input = {}, suffix = '') {
+  const result = await executeTyped(typedCommand(req, body, kind, input, suffix))
+  return projectLegacyResult(result, localHost())
+}
+
+function sessionInput(kind, body) {
+  const runner = {
+    ...(body.model ? { profile: body.model } : {}),
+    ...(body.effort ? { quality: body.effort } : {}),
+    ...(typeof body.start === 'boolean' ? { start: body.start } : {}),
+    ...(typeof body.wait === 'boolean' ? { wait: body.wait } : {})
+  }
+  if (kind === 'edit') return { path: body.path || '', intent: body.intent, runner }
+  if (kind === 'attach' || kind === 'detach') {
+    return { worktree: body.worktree || body.path || '', intent: body.intent, runner }
+  }
+  if (kind === 'analyze') return { inboxId: body.id || body.inboxId, intent: body.intent, runner }
+  return { intent: body.intent, worktree: body.worktree, runner }
 }
 
 export async function handleApi(req, url, body) {
+  if (url.pathname === '/api/command') {
+    const input = body && typeof body === 'object' ? body : {}
+    const kind = String(input.kind || '')
+    const { meta: suppliedMeta, requestId: _requestId, ...payload } = input
+    const host = localHost()
+    const command = {
+      ...payload,
+      kind,
+      meta: {
+        ...host.commandMeta('http', String(suppliedMeta?.requestId || requestId(req, body))),
+        ...(suppliedMeta && typeof suppliedMeta === 'object' ? suppliedMeta : {}),
+        hostId: host.hostId,
+        transport: 'http'
+      }
+    }
+    return executeTyped(command)
+  }
+
   if (url.pathname === '/api/state') {
-    return runHub(['status'])
+    return executeLegacy(req, body, 'status')
   }
 
   if (url.pathname === '/api/daemon') {
-    return runHub(['daemon', 'status'])
+    return daemonStatus(hubRoot, undefined, hubDataRoot())
   }
 
   if (url.pathname === '/api/skill') {
     const rel = url.searchParams.get('path') || ''
-    const dataRoot = hubDataRoot()
-    const abs = path.resolve(dataRoot, rel)
-    if (abs !== dataRoot && !abs.startsWith(dataRoot + path.sep)) throw new Error('path escaped hub')
-    if (!fs.existsSync(abs)) throw new Error('missing ' + rel)
-    const target = fs.statSync(abs).isDirectory()
-      ? (fs.existsSync(path.join(abs, 'SKILL.md')) ? path.join(abs, 'SKILL.md') : abs)
-      : abs
-    if (fs.statSync(target).isDirectory()) throw new Error('no SKILL.md')
-    return { path: rel, content: fs.readFileSync(target, 'utf8') }
+    return executeLegacy(req, body, 'readSkill', { path: rel })
   }
 
   if (url.pathname === '/api/history') {
-    const dir = path.join(hubDataRoot(), 'skill-review', 'history')
-    if (!fs.existsSync(dir)) return { records: [] }
-    const files = fs.readdirSync(dir).filter((name) => name.endsWith('.json')).sort().reverse().slice(0, 50)
-    return { records: files.map((name) => readJson(path.join(dir, name), {})) }
+    return executeLegacy(req, body, 'listHistory', { limit: 50 })
   }
 
   if (url.pathname === '/api/codex/sessions') {
-    const data = loadAndHydrateSessions()
-    const sessions = (data.sessions || []).map((session) => {
-      let logTail = ''
-      if (session.logFile && fs.existsSync(session.logFile)) {
-        const text = fs.readFileSync(session.logFile, 'utf8')
-        logTail = text.slice(-8000)
-      }
-      return { ...hydrateSession(session), logTail }
-    })
+    const data = await executeLegacy(req, body, 'listSessions')
+    const sessions = (data.sessions || []).map((session) => ({
+      ...session,
+      logTail: localHost().localSessions?.readLog(session.id).slice(-8000) || ''
+    }))
     return { sessions }
   }
 
   if (url.pathname === '/api/codex/session') {
     const id = url.searchParams.get('id')
-    const session = hydrateSession((loadAndHydrateSessions().sessions || []).find((item) => item.id === id))
-    if (!session) {
+    const result = await executeTyped(typedCommand(req, body, 'getSession', { sessionId: id || '' }))
+    if (!result.ok && result.error.code === 'NOT_FOUND') {
       const err = new Error('session not found')
       err.status = 404
       throw err
     }
-    let log = ''
-    if (session.logFile && fs.existsSync(session.logFile)) log = fs.readFileSync(session.logFile, 'utf8')
+    const projected = projectLegacyResult(result, localHost())
+    const session = projected.session
+    const log = localHost().localSessions?.readLog(id || '') || ''
     return { session, log }
   }
 
   if (url.pathname === '/api/worktrees') {
-    return collectWorktreesCached()
+    return executeLegacy(req, body, 'listWorktrees')
   }
 
   if (req.method !== 'POST') {
@@ -171,31 +149,41 @@ export async function handleApi(req, url, body) {
   }
 
   if (url.pathname === '/api/decide') {
-    const args = ['decide', '--id', body.id, '--action', body.action]
-    if (body.note) args.push('--note', body.note)
-    if (body.mergeTarget) args.push('--merge-target', body.mergeTarget)
-    return runHub(args)
+    return executeLegacy(req, body, 'decide', {
+      id: body.id,
+      action: body.action,
+      note: body.note,
+      mergeTarget: body.mergeTarget
+    })
   }
 
   if (url.pathname === '/api/analyze') {
-    return runHub(['chat', '--intent', 'Analyze queued inbox skill updates'])
+    return executeLegacy(req, body, 'analyze', sessionInput('analyze', {
+      ...body,
+      intent: body.intent || 'Analyze queued inbox skill updates',
+      start: typeof body.start === 'boolean' ? body.start : true
+    }))
   }
 
   if (url.pathname === '/api/codex/start') {
     const kind = body.kind === 'analyze-note' ? 'chat' : (body.kind || 'chat')
-    return sessionFromHub(kind, body)
+    return executeLegacy(req, body, kind, sessionInput(kind, body))
   }
 
   if (url.pathname === '/api/codex/resume') {
-    return runHub(['resume', '--id', body.id, '--message', body.message])
+    return executeLegacy(req, body, 'resumeSession', {
+      sessionId: body.id,
+      message: body.message,
+      runner: sessionInput('chat', body).runner
+    })
   }
 
   if (url.pathname === '/api/worktree/attach') {
-    return sessionFromHub('attach', { worktree: body.path, intent: body.intent })
+    return executeLegacy(req, body, 'attach', sessionInput('attach', { ...body, worktree: body.path }))
   }
 
   if (url.pathname === '/api/worktree/detach') {
-    return sessionFromHub('detach', { worktree: body.path, intent: body.intent })
+    return executeLegacy(req, body, 'detach', sessionInput('detach', { ...body, worktree: body.path }))
   }
 
   const err = new Error('not found')
@@ -203,9 +191,17 @@ export async function handleApi(req, url, body) {
   throw err
 }
 
-function send(res, status, payload, contentType = 'application/json; charset=utf-8') {
-  res.writeHead(status, { 'Content-Type': contentType })
+function send(res, status, payload, contentType = 'application/json; charset=utf-8', headers = {}) {
+  res.writeHead(status, { 'Content-Type': contentType, ...headers })
   res.end(payload)
+}
+
+function compatibilityHeaders(pathname) {
+  if (!pathname.startsWith('/api/') || pathname === '/api/health' || pathname === '/api/command') return {}
+  return {
+    Deprecation: 'true',
+    Link: '</api/command>; rel="successor-version"'
+  }
 }
 
 const webRoot = path.join(hubRoot, 'web')
@@ -272,9 +268,16 @@ function serveWeb(url, res) {
   return false
 }
 
-function findSession(id) {
-  const session = (loadAndHydrateSessions().sessions || []).find((item) => item.id === id) || null
-  return session ? hydrateSession(session) : null
+async function findSession(id) {
+  const host = localHost()
+  const command = {
+    kind: 'getSession',
+    sessionId: id,
+    meta: host.commandMeta('http-sse')
+  }
+  const result = await host.application.execute(command)
+  if (!result.ok) return null
+  return result.data.session
 }
 
 function streamSession(id, req, res) {
@@ -282,27 +285,27 @@ function streamSession(id, req, res) {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no'
+    'X-Accel-Buffering': 'no',
+    Deprecation: 'true',
+    Link: '</api/command>; rel="successor-version"'
   })
   let lastSize = -1
   let lastStatus = ''
   const writeEvent = (event, payload) => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
   }
-  const tick = () => {
-    const session = findSession(id)
+  const tick = async () => {
+    const session = await findSession(id)
     if (!session) {
       writeEvent('status', { status: 'missing' })
+      clearInterval(timer)
+      res.end()
       return
     }
-    let log = ''
-    if (session.logFile && fs.existsSync(session.logFile)) {
-      const size = fs.statSync(session.logFile).size
-      if (size !== lastSize) {
-        lastSize = size
-        log = fs.readFileSync(session.logFile, 'utf8')
-        writeEvent('log', { text: log })
-      }
+    const log = localHost().localSessions?.readLog(id) || ''
+    if (log.length !== lastSize) {
+      lastSize = log.length
+      writeEvent('log', { text: log })
     }
     if (session.status !== lastStatus) {
       lastStatus = session.status
@@ -311,7 +314,8 @@ function streamSession(id, req, res) {
         lastMessage: session.lastMessage || '',
         error: session.error || '',
         exitCode: session.exitCode,
-        codexSessionId: session.codexSessionId || ''
+        continuationToken: session.continuationToken || '',
+        codexSessionId: session.continuationToken || ''
       })
     }
     if (session.status && session.status !== 'running') {
@@ -319,8 +323,8 @@ function streamSession(id, req, res) {
       res.end()
     }
   }
-  const timer = setInterval(tick, 250)
-  tick()
+  const timer = setInterval(() => void tick(), 250)
+  void tick()
   req.on('close', () => {
     clearInterval(timer)
   })
@@ -330,7 +334,10 @@ export const onRequest = async (req, res) => {
   const url = new URL(req.url || '/', `http://127.0.0.1:${port}`)
   try {
     if (url.pathname === '/api/health') {
-      send(res, 200, JSON.stringify({ ok: true }))
+      send(res, 200, JSON.stringify({ ok: true }), 'application/json; charset=utf-8', {
+        'X-Skill-Graft-Package-Root': encodeURIComponent(path.resolve(hubRoot)),
+        'X-Skill-Graft-Data-Root': encodeURIComponent(hubDataRoot())
+      })
       return
     }
     if (url.pathname === '/api/codex/session/stream') {
@@ -354,7 +361,7 @@ export const onRequest = async (req, res) => {
         body = raw ? JSON.parse(raw) : {}
       }
       const data = await handleApi(req, url, body)
-      send(res, 200, JSON.stringify(data))
+      send(res, 200, JSON.stringify(data), 'application/json; charset=utf-8', compatibilityHeaders(url.pathname))
       return
     }
     send(res, 404, JSON.stringify({ error: 'not found' }))

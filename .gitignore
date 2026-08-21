@@ -23,6 +23,8 @@ skill-review/session-*.last.txt
 skill-review/session-*.exit
 skill-review/state.json
 skill-review/sessions.json
+skill-review/application-ledger.json
+skill-review/application-audit.json
 skill-review/history/
 skill-review/*.log
 skill-review/last-attach-cli.json

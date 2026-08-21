@@ -1,0 +1,25 @@
+.artifacts-local/
+.agents/
+.codex/
+.github/
+artifacts/
+docs/
+node_modules/
+panel/
+scripts/
+skill-review/
+src/
+test/
+.gitattributes
+tsconfig*.json
+*.tgz
+setup.cmd
+
+# Runtime-owned Local configuration must never carry machine paths in a release.
+overlay/attached-worktrees.txt
+overlay/do-not-auto-attach.txt
+overlay/scan-roots.txt
+
+# The local corpus is installed or linked separately; only its marker ships.
+skills/*
+!skills/README.md

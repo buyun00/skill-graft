@@ -1,4 +1,4 @@
-import type { PathPort } from './ports.js'
+import type { PathPort } from '../../adapters/host-context.js'
 
 export const PRODUCT_NAME = 'skill-graft'
 export const PRODUCT_COMMAND = 'sg'
@@ -12,6 +12,10 @@ export type InstallPaths = {
   command: string
   alias: string
   taskName: string
+  /** Package-owned code and static assets. */
+  packageRoot: string
+  /** Mutable Local-host data. `hubRoot` remains its compatibility alias. */
+  dataRoot: string
   hubRoot: string
   nodePath: string
   cliPath: string
@@ -29,6 +33,27 @@ export type InstallPaths = {
   extraShimAliasCmd: string | null
   port: number
   apiUrl: string
+}
+
+/** Values copied into the detached daemon launcher only after the Local trace gate is validated. */
+export type DaemonTraceEnvironment = {
+  runId: string
+  runRoot: string
+  pinned: {
+    PATH: string
+    DSH_HOME: string
+    HOME: string
+    USERPROFILE: string
+    APPDATA: string
+    LOCALAPPDATA: string
+    TEMP: string
+    TMP: string
+    HUB_SPAWN_CODEX: string
+    SKILL_GRAFT_HOME: string
+    GIT_CONFIG_GLOBAL: string
+    GIT_CONFIG_NOSYSTEM: string
+    GIT_OPTIONAL_LOCKS: string
+  }
 }
 
 export type LayoutFile = {
@@ -170,13 +195,17 @@ export function resolveInstallPaths(
   path: PathPort,
   input: {
     hubRoot: string
+    packageRoot?: string
+    dataRoot?: string
     nodePath: string
     installDir: string
     extraShimDir?: string | null
     port?: number
   }
 ): InstallPaths {
-  const hubRoot = path.resolve(input.hubRoot)
+  const packageRoot = path.resolve(input.packageRoot || input.hubRoot)
+  const dataRoot = path.resolve(input.dataRoot || input.hubRoot)
+  const hubRoot = dataRoot
   const installDir = path.resolve(input.installDir)
   const binDir = path.join(installDir, 'bin')
   const extraShimDir = input.extraShimDir ? path.resolve(input.extraShimDir) : null
@@ -186,10 +215,12 @@ export function resolveInstallPaths(
     command: PRODUCT_COMMAND,
     alias: PRODUCT_ALIAS,
     taskName: TASK_NAME,
+    packageRoot,
+    dataRoot,
     hubRoot,
     nodePath: input.nodePath,
-    cliPath: path.join(hubRoot, 'dist', 'control', 'cli.js'),
-    serverPath: path.join(hubRoot, 'server', 'index.mjs'),
+    cliPath: path.join(packageRoot, 'dist', 'control', 'cli.js'),
+    serverPath: path.join(packageRoot, 'server', 'index.mjs'),
     installDir,
     binDir,
     shimCmd: path.join(binDir, `${PRODUCT_COMMAND}.cmd`),
@@ -282,7 +313,7 @@ export function toGitBashPath(winPath: string): string {
   return normalized
 }
 
-export function renderShims(paths: InstallPaths): {
+export function renderShims(paths: InstallPaths, daemonTrace?: DaemonTraceEnvironment): {
   sgCmd: string
   aliasCmd: string
   unix: string
@@ -290,17 +321,19 @@ export function renderShims(paths: InstallPaths): {
   runDaemonCmd: string
   manifest: string
 } {
-  const hub = stripTrailingSep(paths.hubRoot)
+  const packageRoot = stripTrailingSep(paths.packageRoot)
+  const dataRoot = stripTrailingSep(paths.dataRoot)
   const node = stripTrailingSep(paths.nodePath)
   const cli = stripTrailingSep(paths.cliPath)
-  const sgCmd = renderCmdShim(hub, node, cli, paths.port)
+  const sgCmd = renderCmdShim(dataRoot, node, cli, paths.port)
   const unixNode = toGitBashPath(node)
   const unixCli = toGitBashPath(cli)
-  const unixHub = toGitBashPath(hub)
+  const unixData = toGitBashPath(dataRoot)
+  const unixDataDefault = unixData.replace(/([\\$"`])/g, '\\$1')
   const unix = [
     '#!/bin/sh',
-    `export HUB_ROOT='${unixHub.replace(/'/g, `'\\''`)}'`,
-    `export HUB_API_PORT='${paths.port}'`,
+    `export HUB_ROOT="\${HUB_ROOT:-${unixDataDefault}}"`,
+    `export HUB_API_PORT="\${HUB_API_PORT:-${paths.port}}"`,
     `exec '${unixNode.replace(/'/g, `'\\''`)}' '${unixCli.replace(/'/g, `'\\''`)}' "$@"`,
     ''
   ].join('\n')
@@ -314,9 +347,18 @@ export function renderShims(paths: InstallPaths): {
     '@echo off',
     'setlocal',
     'chcp 65001 >nul',
-    `set "HUB_ROOT=${bat(hub)}"`,
+    `set "HUB_ROOT=${bat(dataRoot)}"`,
     `set "HUB_API_PORT=${paths.port}"`,
-    `cd /d "${bat(hub)}"`,
+    ...(daemonTrace ? [
+      'for /f "tokens=1 delims==" %%G in (\'set GIT_ 2^>nul\') do set "%%G="',
+      'for /f "tokens=1 delims==" %%D in (\'set DSH_ 2^>nul\') do set "%%D="',
+      ...Object.entries(daemonTrace.pinned).map(([name, value]) => `set "${name}=${batEnvironment(value)}"`),
+      'set "SKILL_GRAFT_INVOCATION_TRACE=1"',
+      'set "SKILL_GRAFT_REAL_E2E=1"',
+      `set "SKILL_GRAFT_RUN_ID=${bat(daemonTrace.runId)}"`,
+      `set "SKILL_GRAFT_E2E_ROOT=${bat(daemonTrace.runRoot)}"`
+    ] : []),
+    `cd /d "${bat(packageRoot)}"`,
     `"${bat(node)}" "${bat(cli)}" daemon run`,
     ''
   ].join('\r\n')
@@ -325,6 +367,8 @@ export function renderShims(paths: InstallPaths): {
       product: paths.product,
       command: paths.command,
       alias: paths.alias,
+      packageRoot: paths.packageRoot,
+      dataRoot: paths.dataRoot,
       hubRoot: paths.hubRoot,
       nodePath: paths.nodePath,
       cliPath: paths.cliPath,
@@ -481,8 +525,8 @@ function renderCmdShim(hubRoot: string, nodePath: string, cliPath: string, port:
   return [
     '@echo off',
     'setlocal',
-    `set "HUB_ROOT=${bat(hubRoot)}"`,
-    `set "HUB_API_PORT=${port}"`,
+    `if not defined HUB_ROOT set "HUB_ROOT=${bat(hubRoot)}"`,
+    `if not defined HUB_API_PORT set "HUB_API_PORT=${port}"`,
     `"${bat(nodePath)}" "${bat(cliPath)}" %*`,
     ''
   ].join('\r\n')
@@ -509,4 +553,8 @@ function joinPosix(left: string, right: string): string {
 
 function bat(value: string): string {
   return stripTrailingSep(value).replace(/%/g, '%%')
+}
+
+function batEnvironment(value: string): string {
+  return value.replace(/%/g, '%%')
 }
