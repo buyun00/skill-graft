@@ -127,15 +127,6 @@ function lstatIfPresent(target) {
   }
 }
 
-function ensurePlainContainedDirectory(target, boundary, label) {
-  const existing = lstatIfPresent(target)
-  if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) {
-    throw new Error(`${label} must be a plain directory, not a link or reparse point: ${target}`)
-  }
-  if (!existing) fs.mkdirSync(target)
-  assertPlainDirectoryChain(boundary, target, label)
-}
-
 function assertIsolatedGitAttributesEnvironment(context, gitEnv) {
   const expectedXdgRoot = path.join(path.resolve(context.homeRoot), 'xdg-config')
   if (gitEnv.XDG_CONFIG_HOME !== expectedXdgRoot) {
@@ -146,9 +137,21 @@ function assertIsolatedGitAttributesEnvironment(context, gitEnv) {
   }
 
   assertPlainDirectoryChain(context.runRoot, context.homeRoot, 'isolated Git home')
-  ensurePlainContainedDirectory(expectedXdgRoot, context.runRoot, 'isolated Git XDG_CONFIG_HOME')
+  const xdgStat = lstatIfPresent(expectedXdgRoot)
+  if (!xdgStat) return
+  if (!xdgStat.isDirectory() || xdgStat.isSymbolicLink()) {
+    throw new Error(`isolated Git XDG_CONFIG_HOME must be a plain directory, not a link or reparse point: ${expectedXdgRoot}`)
+  }
+  assertPlainDirectoryChain(context.runRoot, expectedXdgRoot, 'isolated Git XDG_CONFIG_HOME')
+
   const globalGitRoot = path.join(expectedXdgRoot, 'git')
-  ensurePlainContainedDirectory(globalGitRoot, context.runRoot, 'isolated Git global attributes directory')
+  const globalGitStat = lstatIfPresent(globalGitRoot)
+  if (!globalGitStat) return
+  if (!globalGitStat.isDirectory() || globalGitStat.isSymbolicLink()) {
+    throw new Error(`isolated Git global attributes directory must be a plain directory, not a link or reparse point: ${globalGitRoot}`)
+  }
+  assertPlainDirectoryChain(context.runRoot, globalGitRoot, 'isolated Git global attributes directory')
+
   const globalAttributes = path.join(globalGitRoot, 'attributes')
   if (lstatIfPresent(globalAttributes)) {
     throw new Error('isolated Git global attributes file must not exist before source preflight')

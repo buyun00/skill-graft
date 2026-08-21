@@ -512,6 +512,7 @@ test('P0 fixture preparation rejects source alternates and hostile Git injection
   const prepared = spawnPrepare()
   assert.equal(prepared.error, undefined, `P0 preparation spawn error: ${prepared.error?.message || ''}`)
   assert.equal(prepared.status, 0, `P0 preparation failed: ${prepared.stderr || prepared.stdout}`)
+  assert.deepEqual(fs.readdirSync(context.homeRoot), [], 'P0 preparation must leave the target home empty')
   const manifest = JSON.parse(fs.readFileSync(path.join(context.runRoot, '.skill-graft-p0-fixture.json'), 'utf8'))
   assert.equal(manifest.version, 2)
   assert.equal(manifest.probeCloneMode, 'independent-no-local-no-hardlinks-no-checkout')
