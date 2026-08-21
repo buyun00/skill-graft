@@ -239,6 +239,7 @@ function createHistoricalV1(parent, homeRoot, {
   nonUtf8Crlf = false,
   omitClaim = false,
   probeAttributes = '',
+  probeNestedAttributes = '',
   realSkillShape29 = false,
   rootAttributes = '',
   secondFollowup = false,
@@ -253,6 +254,7 @@ function createHistoricalV1(parent, homeRoot, {
     'baloot_client/fixture.txt': 'fixture\n'
   }
   if (probeAttributes) probeFiles['.gitattributes'] = probeAttributes
+  if (probeNestedAttributes) probeFiles['baloot_client/.gitattributes'] = probeNestedAttributes
   const probeCommit = initializeRepo(seed, homeRoot, probeFiles, 'probe seed')
 
   const runId = `p0-source-${path.basename(parent).slice(-8)}`
@@ -545,7 +547,8 @@ test('historical P0 v1 shared source converts to a marker-owned v2 fixture witho
   const historical = createHistoricalV1(parent, homeRoot, {
     exactBinary: true,
     nonUtf8Crlf: true,
-    probeAttributes: 'AGENTS.md text eol=lf diff merge\n',
+    probeAttributes: '# 根目录中文注释：仅注释可使用 UTF-8\nAGENTS.md text eol=lf diff merge\n',
+    probeNestedAttributes: '  # 嵌套中文注释\nfixture.txt text eol=lf diff merge\n',
     realSkillShape29: true,
     worktreeProjection: 'crlf'
   })
@@ -1117,6 +1120,44 @@ test('converter requires probe physical index and HEAD attributes identity befor
   assert.match(`${refused.stderr}\n${refused.stdout}`, /physical, index, and HEAD \.gitattributes are not identical/i)
   assertConversionTargetUntouched(paths)
 })
+
+for (const scenario of [
+  {
+    name: 'non-ASCII active attributes syntax',
+    probeAttributes: '技能/** text eol=lf\n',
+    expected: /active \.gitattributes syntax must remain ASCII/i
+  },
+  {
+    name: 'invalid UTF-8 in an attributes comment',
+    probeAttributes: Buffer.from([0x23, 0x20, 0xff, 0x0a]),
+    expected: /must contain valid UTF-8/i
+  }
+]) {
+  test(`converter rejects probe ${scenario.name} before status or target writes`, { timeout: 60000 }, (t) => {
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p0-probe-utf8-refuse-'))
+    t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
+    const homeRoot = path.join(parent, 'fixture-home')
+    fs.mkdirSync(homeRoot)
+    const packageSource = createPackageSource(parent, homeRoot)
+    const historical = createHistoricalV1(parent, homeRoot, {
+      probeAttributes: scenario.probeAttributes
+    })
+    const paths = targetPaths(parent, `p0-probe-utf8-refuse-${Date.now().toString(36)}`)
+    prepareTarget(paths, packageSource, [historical.runRoot])
+    const refused = spawnConverter({
+      ...process.env,
+      ...targetEnv(paths),
+      HOME: homeRoot,
+      USERPROFILE: homeRoot,
+      SKILL_GRAFT_FIXTURE_SOURCE: packageSource,
+      SKILL_GRAFT_P0_SOURCE_RUN: historical.runRoot
+    })
+    assert.equal(refused.error, undefined, `converter spawn error: ${refused.error?.message || ''}`)
+    assert.notEqual(refused.status, 0)
+    assert.match(`${refused.stderr}\n${refused.stdout}`, scenario.expected)
+    assertConversionTargetUntouched(paths)
+  })
+}
 
 test('Git protected-root fingerprint never executes a hostile clean filter', { timeout: 120000 }, (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p0-fingerprint-filter-'))

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { TextDecoder } from 'node:util'
 import {
   assertRunLayoutOwned,
   createIsolatedGitEnvironment,
@@ -19,6 +20,7 @@ const GENERATED_ATTRIBUTES_HEADER = '# Skill Graft generated skills worktree pol
 const P0_V2_CLEAN_PROJECTION_SHA256 = createHash('sha256')
   .update('skill-graft:p0-v2-clean-projection:v1\0', 'utf8')
   .digest('hex')
+const FATAL_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
 function required(name) {
   const value = String(process.env[name] || '').trim()
@@ -1231,20 +1233,27 @@ function expectedV1Projection(sourceRun, sourceHub, sourceProbe) {
 }
 
 function assertSafeProbeAttributesBytes(contents) {
-  for (const byte of contents) {
-    if (byte !== 0x09
-      && byte !== 0x0a
-      && byte !== 0x0d
-      && (byte < 0x20 || byte > 0x7e)) {
-      throw new Error('historical probe .gitattributes must use bounded ASCII syntax')
+  let text
+  try {
+    text = FATAL_UTF8_DECODER.decode(contents)
+  } catch {
+    throw new Error('historical probe .gitattributes must contain valid UTF-8')
+  }
+  for (const character of text) {
+    const codePoint = character.codePointAt(0)
+    if ((codePoint < 0x20 && ![0x09, 0x0a, 0x0d].includes(codePoint))
+      || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+      throw new Error('historical probe .gitattributes contains a NUL or control character')
     }
   }
-  const text = contents.toString('latin1')
   if (/\r(?!\n)/.test(text)) throw new Error('historical probe .gitattributes contains a bare CR byte')
   const allowed = new Set(['text', 'eol', 'diff', 'merge'])
   for (const rawLine of text.split(/\r?\n/)) {
+    if (/^[ \t]*$/.test(rawLine) || /^[ \t]*#/.test(rawLine)) continue
+    if ([...rawLine].some((character) => character.codePointAt(0) > 0x7e)) {
+      throw new Error('historical probe active .gitattributes syntax must remain ASCII')
+    }
     const line = rawLine.trim()
-    if (!line || line.startsWith('#')) continue
     const tokens = line.split(/[ \t]+/)
     const pattern = tokens.shift()
     if (!pattern
