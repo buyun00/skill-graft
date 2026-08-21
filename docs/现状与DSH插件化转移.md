@@ -1,10 +1,14 @@
-# Skill Hub：现状、理念、已实现，以及下一步（DSH 插件化）
+# Skill Hub：现状、理念、已实现，以及下一步（双宿主发行）
 
-> 写于 2026-08-21（同日补：落盘从「硬链接实时挂载」改为「中心库 + 按树领取/复制」）。给**新对话**当开工说明书。
-> 层边界仍见 `系统设计与理念.md` 第 9 节和 `三层本阶段规格.md`。**落盘语义以本文为准**，不要再把「改一处所有树立刻变」当硬目标。
-> 清单第 10 项（多机 / 小团队）仍然以后再做，但本文的 DSH 插件**不是**第 10 项。
+> 写于 2026-08-21，同日按最终产品决定修正为：**同一独立核心，两个对等完整发行**。给新对话作现状说明。
+> 详细步骤、真实环境和进度真相见 `双宿主独立核心改造实施计划.md`；本文只保留现状、理念和迁移摘要。
+> 清单第 10 项（多机 / 小团队）仍然以后再做，本轮双宿主改造不是多机服务。
 
-新对话建议：工作目录 `E:\ozdqp-skill-hub`；先读本文全文，再读 `系统设计与理念.md` 第 2、9 节和 `三层本阶段规格.md` 的端口表。不要进入 plan 模式才动手——但动手前必须把「SessionRunner 端口」和「禁止第二套认挂算法」写进实现，而不是先抄一套 DSH 业务逻辑。
+新对话建议：工作目录 `E:\ozdqp-skill-hub`；先读 `双宿主独立核心改造实施计划.md`，再读本文、`系统设计与理念.md` 第 2、9 节和 `三层本阶段规格.md` 的历史合同。
+
+**产品决定（2026-08-21，必须遵守）：**
+1. **落盘：** 不再坚持硬链接实时挂载。Hub 是版本库；按树 pin + 复制；不同树可以钉不同版本。不需要「改了一处另一处直接就变」。第一次从官方树切过来仍走对话。详见 §2.2 与 §5.3。
+2. **双宿主：** 核心/Application 完全独立，不依赖 Codex / DSH / 网页 / 某一种安装方式。本地完整安装和 DSH 完整插件是两个对等发行，差异只在宿主适配、生命周期、会话执行、UI 和打包。DSH 发行在进程内装配共享 Application，**不依赖外置 `sg` 或 18765 daemon**；本地发行也不依赖 DSH。详见 §2.4、§5 与实施计划。
 
 ---
 
@@ -15,14 +19,14 @@
 
 | 面 | 现在怎样 |
 |---|---|
-| 命令 | `sg` / `ozdqp-hub` → `dist/control/cli.js`。**唯一命令面。** |
+| 本地命令 | `sg` / `ozdqp-hub` → `dist/control/cli.js`；这是当前本地发行入口，不是未来唯一业务入口。 |
 | HTTP | 守护进程 `:18765`，只 `exec` CLI，禁止 `import src/core` |
 | 网页 | `panel/` Next 14 + `graft-glass-ui`，开发 **3320**，静态导出到 `web/`，由 daemon 同域托管 |
 | 组件库 | `E:\graft-glass-ui`（库预览仍 **3310**）；panel 依赖 `file:../../graft-glass-ui` |
 | 挂接 | 第一次走 **Codex 后台对话**（默认 `gpt-5.6-luna` + max）；已挂树断链走 `repair-links` |
 | 探针 | 冒烟只用 `E:\ozdqp-cli-attach-probe`，禁止改活树 |
 | 测试 | `npm test` 须绿；前端不算挂接，`attached` / `overrideLinked` / `officialPresent` 以 API/CLI 为准 |
-| 未做 | DSH 插件、SessionRunner 端口、把 Codex 会话执行从 CLI 里抽出去 |
+| 未做 | 共享 Application 合同、per-tree pin / snapshot / `MaterializePort`、双宿主锁、两个 `SessionRunner`、完整 DSH bundle/Host/Client 发行 |
 
 开发清单 **1–9 已完成**（含玻璃控制台）。指针不要倒回去重做，除非冒烟证明坏了。
 
@@ -47,7 +51,7 @@
 | 中心仓是库，树是领取 | hub 存正文与版本；某棵树用哪几个 Skill、哪个版本，记在该树（或 hub 侧 per-tree pin）。更新时复制过去（自动或手动），不要假设「改一处另一处立刻变」。 |
 | 危险动作走对话 | **第一次**从官方大树切到本机 3 Skill = attach 会话（剥官方、写 pin、第一次物化）。不要静默脚本冒充第一次 attach。 |
 | 已领取的更新才走脚本 | 已有 pin 的树：打开编辑器 / 点同步时按 pin 复制或按「升到最新」复制。树上有未提交的 Skill 脏改动则拒绝覆盖，不要悄悄盖。 |
-| CLI 是唯一命令面 | HTTP、hook、以后的网页/插件：只 `exec sg`，或经明确的控制层调 core。HTTP **禁止** `import src/core`。 |
+| Application 是唯一业务契约 | 本地 CLI/HTTP/网页与 DSH Host/Client 都调用同一组 Application commands。宿主不得直调 core 内部或重写领域规则；DSH 不通过外置 CLI 绕一圈。 |
 | 前端不算挂接 | 展示字段以 `list-worktrees` / `/api/worktrees` 为准。 |
 | 两套对话不要混 | Hub 里的 agent：cwd 永远是中心仓，可改 Skill/inbox/overlay，禁止写游戏仓玩法。日常开发对话在游戏树里用 3 Skill 写业务。碰某棵树用 `--add-dir`（或 DSH 的 cwd/workspace）。 |
 | 官方更新进 inbox | hook → `ingest`；人 `decide` adopt / merge / reject。不要自动 adopt。 |
@@ -62,19 +66,23 @@
 
 ### 2.4 分层
 
+核心功能必须能在两个发行中独立运行，所以**不能依赖任何一个平台或安装方式**。宿主差异和 UI 差异都拆出去。
+
 ```text
-人 / 网页 / Git hook / （下一步）DSH 插件
-        │  控制面：时机、UI、把对话拉起来
-        ▼
-   sg CLI  ← 对外唯一命令面（HTTP 必须走这里）
-        ▼
-      core   库存、认树、pin、物化（复制）、decide、ingest、会话记录
-        ▼
-     适配层  path / fs / git / persist / MaterializePort（复制；链接仅兼容旧树）
+            contracts + core + Application commands
+           库存、认树、pin、物化计划、decide、ingest、会话状态
+                  不出现 Codex / DSH / HTTP / 安装方式分支
+                              │ ports
+                 ┌────────────┴────────────┐
+                 ▼                         ▼
+        本地发行适配与装配             DSH 发行适配与装配
+        CLI/HTTP/daemon/panel           Cordis Host/Client/UI
+        Node/Windows/Codex Runner       DSH services/in-process Runner
 ```
 
-核心禁止 `node:http`、`powershell.exe`、Win32、`APPDATA`。  
+核心禁止 `node:http`、`powershell.exe`、Win32、`APPDATA`，也禁止 `dsh` / Codex 宿主 SDK。
 控制层禁止出现 `preferLibrary`、inode 比较、认仓规则（认仓在 core + checkout-rules）。
+适配层禁止出现「算不算领了」「第一次必须走对话」——那是核心的事。
 
 ---
 
@@ -84,20 +92,20 @@
 
 近期产品目标（本文范围）：
 
-1. **安装只要两极，不要半套。**  
-   - 完全不装：树继续用游戏仓官方 Skill。  
-   - 完全安装：`sg setup`（CLI + 守护 + 链接 + 控制台）。  
-   - 例外：**只用 DeepSeek Harness 的人**，允许「只装 DSH 插件」作为完整安装面——因为 DSH 插件是宿主进程内运行时，不是 CC/Codex 那种开场 spawn 一条命令。  
-   - 不要再做「小同步器 + 插件」两头不讨好的第三套安装包。
+1. **核心先独立，两个发行随后分别装配。**
+   pin / snapshot / 物化 / 认领 / inbox / 会话状态由共享 core + Application 完成；本地与 DSH 都是完整宿主。
 
-2. **看起来像两个入口，代码仍是一套核心。**  
-   DSH 插件与 CLI/网页只换控制面和「对话怎么拉起」，不叉开「这棵树领了哪版 Skill」。
+2. **Codex 独立跑 vs DSH 内部跑，都是适配层。**
+   核心只 `enqueue` 会话任务。谁去执行（WMI 拉 `codex exec`，或 DSH `subagents`）是 `SessionRunner` 的不同实现。
 
-3. **Skill 只给编辑器用。**  
-   关编辑器不必同步。DSH 开着时，插件按各树的 pin **复制**需要的版本（或跳过已是该版本的树）。不必为关着 Web 再养同步 daemon。
+3. **共享 Application 是唯一业务契约。**
+   本地 CLI/HTTP/网页调用本地装配的 Application；DSH Host/Client 在进程内调用 DSH 装配的同一 Application。两边都不能直调 core 私有实现或复制认领算法，DSH 也不能要求用户先装外置 CLI。
 
-4. **开场对齐，不是实时推送。**  
-   在拼系统提示词 / 扫 Skill 目录之前对齐一次。整份 `SKILL.md` 一般是调用时才读盘；`AGENTS.override.md` 类总则开场就会进上下文，更要卡在第一拍之前。
+4. **安装只有三种清晰状态。**
+   完全不装：树继续用游戏仓官方 Skill；本地发行：完整 `sg setup`；DSH 发行：完整 `dsh plugin add`。两发行可单装也可并存，不做半套同步器。
+
+5. **Skill 只给编辑器用；开场对齐，不是实时推送。**
+   关编辑器不必同步。在拼系统提示词 / 扫 Skill 目录之前按 pin 复制一次。`AGENTS.override.md` 类总则开场就会进上下文，更要卡在第一拍之前。
 
 ---
 
@@ -133,6 +141,8 @@ Attach/detach 显示「已入队」，不把 POST 成功当成 `attached=true`�
 
 ### 4.4 树上挂接后的形态
 
+以下为 **2026-08 现状实现**（Junction / HardLink）。产品下一步按 pin 复制到同样这些路径，见 §5.3；不要把实时硬链接当新功能做回去。
+
 ```text
 <worktree>\.agents\skills\ozdqp-development     → Junction → hub
 <worktree>\.agents\skills\ozdqp-ui-development
@@ -155,113 +165,39 @@ Attach/detach 显示「已入队」，不把 POST 成功当成 `attached=true`�
 
 ---
 
-## 5. 下一步要做：DSH 插件化转移
+## 5. 下一步要做：同一核心，两个完整宿主发行
 
-### 5.1 为什么看起来像两套、实际应是一套
+详细实现顺序和验收门禁以 `双宿主独立核心改造实施计划.md` 的 P0–P10 为准。本节只冻结架构边界。
 
-DeepSeek Harness 的插件是 **Cordis 进程内运行时**（`apply(ctx)`，可设设置页、可 `ctx.skills.register`、可在 **setup 窗口（第一句提示词之前）** 干活，可 `ctx.subagents` 拉起一轮 DS 对话）。  
-Codex / Claude Code 的插件基本是技能包 + 开场 spawn 命令，**撑不起**「宿主里常驻对齐 + 开挂接对话 + 设置页」。它们的远端市场也**不能**代替本机 pin、复制物化和 attach 会话。
+### 5.1 共享层与宿主层
 
-因此产品入口两极：
-
-| 用户 | 安装 |
-|---|---|
-| 只用 DSH | `dsh plugin add` 一个 Hub 插件（完整能力面，关 DSH 就不同步） |
-| 用 Codex / CC，或要 CLI / Git hook / 现有网页 | `sg setup` 完整 Hub |
-
-代码上：**不要两套「这棵树领了哪版」。** 只换控制面和 SessionRunner。
-
-### 5.2 层怎么拆
-
-```text
-DSH 插件（控制）          CLI / HTTP / hook / 网页（控制）
-  启动时按 pin 物化已领取树
-  设置卡片（升版本 / 钉住 / 手动复制）
-  登记 ctx.skills / prompt section
-  第一次 attach → SessionRunner(ds)
-                              │
-                              ▼
-                     core（同一份）
-                     status / list-worktrees / pin / materialize
-                     decide / ingest / 会话记录（数据）
-                              │
-                              ▼
-                     适配（同一份盘）
-                     fs / git / persist / MaterializePort（复制为主）
-                              │
-              SessionRunner 端口（新，很小）
-              enqueue attach|detach|edit|chat
-                  ├─ 实现 A：现有 Codex WMI exec
-                  └─ 实现 B：DSH spawn-in-process / continuable
-```
-
-- HTTP 仍只 exec CLI。  
-- DSH 插件调同一份 core 的 pin/物化，禁止插件里再实现「算不算领了」。  
-- 现有 `LinkPort` / `repair-links` 继续服务**已经 Junction 上去的旧树**，新路径默认复制。不要在新对话里先拆掉旧链接，除非探针上迁移动过。
-
-### 5.3 落盘：复制 + 钉版本（新约定）
-
-Hub 是版本库。每棵已领取的树有一份 pin（例如要哪些 Skill、各自哪个 commit/版本号）。打开 DSH 或点「同步到 pin」时，把对应正文 **复制** 到该树的 `.agents/skills/…` 和 `AGENTS.override.md`。
-
-| 动作 | 谁做 | 说明 |
+| 层 | 共享内容 | 宿主差异 |
 |---|---|---|
-| 第一次领取 | attach 会话 | 剥官方大树、写 pin（默认钉当前 hub HEAD）、第一次复制。仍禁止静默。 |
-| 同步到已钉版本 | 脚本 / 插件启动 | 树上已是该版本则跳过；脏改动则拒绝覆盖。 |
-| 升到 hub 最新 | 人在设置页点 | 改 pin 再复制。A 树升、B 树不升 = 版本控制。 |
-| 手动复制 | 设置页 / CLI | 同上，只是不自动。 |
+| **contracts** | command/result/event/state/pin/snapshot schema | 无 |
+| **core** | 认树、pin、物化计划、inbox、attach 策略、迁移判断 | 无 |
+| **application** | `HubApplication.execute(command)`、事务、锁和审计编排 | 只依赖 ports |
+| **本地发行** | — | Node/Windows、CLI/HTTP/daemon/panel、Codex Runner、setup/doctor |
+| **DSH 发行** | — | Cordis Host/Client、workspace/settings/skills、DSH Runner、bundle 生命周期 |
 
-不要把复制进游戏仓的工作流文件提交上去（`skip-worktree` 或只写 override）。`unity-skills` 仍不进 hub、不要剥。
+本地 CLI 与 DSH Host 都是 Application 的调用方。DSH 插件不得通过 `exec sg` 或 18765 daemon 才能工作；本地发行也不得依赖 DSH。两个发行若共用数据根，必须共用 schema、snapshot、pin 和跨进程锁。
 
-DSH 还可以 **同时** `ctx.skills.register` 指向 hub 缓存里的钉定版本，减少对盘上副本的依赖；但只要还用 Codex/CC 打开同一棵树，盘上副本仍要在。
+### 5.2 落盘与版本
 
-### 5.4 插件要做的功能（范围）
+Hub 是版本库。`runtimeRevision`（运行时代码）和 `librarySnapshot`（Skill 内容）必须分开；因为 `skills/**` 默认不进公开 Git，不能把仓库 HEAD 直接当 Skill pin。
 
-1. **宿主启动**  
-   扫树。对 **已有 pin** 的树：按 pin 复制（自动）。未领取的只列出，不静默 attach、不覆盖官方 Skill。
+每棵已领取树 pin 到一个内容快照。Application 先生成无副作用的 `planSync`，宿主 MaterializePort 再在取得锁、复检脏改后原子复制。脏文件拒绝覆盖；`unity-skills` 与项目自有 Skill 不删除；旧 Junction/HardLink 只通过显式兼容/迁移命令处理。
 
-2. **设置页**  
-   hub 路径、远程、每棵树当前 pin / 是否落后 hub、是否脏。按钮：同步到 pin、升到最新、连接（第一次）、断开。
+### 5.3 两个完整发行
 
-3. **进提示词之前**  
-   原生 setup / `agent/session-start`（不要 CC/Codex 钩子桥）。登记当前 workspace 钉定的 skills；section 读该树的 override 副本，不改仓库 `AGENTS.md`。
+**本地发行：** `sg setup` 后提供 CLI、daemon/API、独立网页、hooks 和 Codex SessionRunner，适配 Codex/CC/插件能力不足的编辑器。没有 DSH 也必须完整可用。
 
-4. **第一次连接**  
-   SessionRunner 开 DS 对话；语义同现 attach 提示词。写 pin + 第一次复制。写盘权限要够。
+**DSH 发行：** `dsh plugin --profile <name> add <bundle>` 后提供 Host/Client、设置、工作区、Skills、pin/sync/inbox 和 DSH 进程内 SessionRunner。没有外置 `sg`、18765 daemon 和 Codex 也必须完整可用。
 
-5. **工具**  
-   `hub_status` / `hub_sync`（按 pin 复制）。不要给模型 `mklink`。
+DSH 可用 `ctx.skills.register()` 注册当前 workspace 的钉定 Skill，可用 `ctx.subagents` 实现会话；这些都是 DSH 适配，不进入 shared core。设置页无父会话时，必须使用合法的顶层 Agent/任务入口，不能假设随时存在可续接的 parent。
 
-6. **不要做**  
-   第二个守护进程、第二个认仓、自动 adopt、静默第一次 attach、GRAFT 商店、多机服务、改活树、把「实时硬链接」当新功能做回去。
+### 5.4 实施与验收入口
 
-### 5.5 Codex/CC 侧（本阶段可后做）
-
-完整 Hub 已覆盖。以后开场钩子只 `sg sync`（按 pin 复制），不要在钩子里实现业务。本阶段专注 DSH 插件 + pin/物化 + SessionRunner。
-
-### 5.6 远程 skills
-
-远端 → 本机 hub/缓存：`git pull` 或复制。  
-hub/缓存 → 各树：按 **该树的 pin** 再复制。不是「拉完远程所有树立刻同一份」。  
-未配置远程：只用本机 hub 版本。不要做成必须在线才能 `status`。
-
-### 5.7 建议实现顺序（新对话按此勾）
-
-1. 抽出 `SessionRunner`；CLI attach 测试仍绿。  
-2. core：per-tree pin + `materialize`（复制；脏则失败）。旧 `repair-links` 先留着给已链接树。  
-3. DSH 插件脚手架 + 设置 schema。  
-4. 启动时对已 pin 树 materialize。  
-5. setup 窗口登记该 workspace 的 skills + override section。  
-6. 设置页：同步 / 升版本 / 连接。  
-7. 「连接」→ SessionRunner DS 实现（仅探针）。  
-8. `npm test` 绿；探针上确认：自动复制到 pin、脏文件不覆盖、未领取树官方 Skill 还在。
-
-### 5.8 DSH 能力边界（调查结论，避免新对话再踩）
-
-- 插件活在 **`dsh` 进程**，不是某一轮聊天。Web 关了，插件停。这符合「关编辑器不用同步」。  
-- 原生插件 >> `dsh-hooks-claude-code` / `codex` 桥。挂接开场必须原生。  
-- 可 `ctx.subagents.start('spawn', …)` 或 `startContinuable` 开 DS 子代理；也可继续用 `codex` provider。  
-- `ctx.systemPrompt.section()` 管总则；`ctx.skills.register()` 管技能目录；调用时再 `inject()` 正文。  
-- 预览版 API 会变；从 GitHub 装插件会跑 `prepare`（用户机器执行作者代码）。优先 npm 预构建或本机 path 开发。
+按 `双宿主独立核心改造实施计划.md` 依次完成：基线隔离、共享 Application、snapshot/pin/锁、物化、本地发行、Codex Runner、DSH bundle、DSH UI、DSH Runner、双宿主并存、最终打包。每一步都要真实构建安装环境并启动宿主验证，完成后更新进度、提交并推送；单测不能替代真实安装和真实会话证据。
 
 ---
 
@@ -270,19 +206,22 @@ hub/缓存 → 各树：按 **该树的 pin** 再复制。不是「拉完远程�
 1. 不要改活树；冒烟 `E:\ozdqp-cli-attach-probe`。  
 2. 不要把 `skills/`、session log、`skill-review/history` 推进 git。  
 3. `npm test` 必须绿。  
-4. HTTP 仍禁止 `import src/core`。  
-5. 第一次 attach 必须是会话，不是修链冒充。  
+4. 所有宿主只调共享 Application 公共合同，不直调 core 私有实现；DSH 不通过外置 CLI/18765 才能工作。
+5. 第一次 attach 必须是会话，不是修链 / `sg sync` 冒充。
 6. 不要第二套「这棵树领了哪版 / 算不算挂上」。  
 7. 不要静默 `-PromoteFromWorktree` / `-Force`。  
 8. 不要做清单第 10 项的多机服务本体。
+9. 不要把「实时硬链接 / 改一处所有树立刻变」当新功能做回去；新路径默认复制 + pin。
+10. shared core/Application 禁止出现 Codex / DSH 宿主 API、安装方式分支；宿主差异只进 adapters/composition。
+11. 本地发行和 DSH 发行都是完整成品，任何一边都不能成为另一边的运行前提。
 
 ---
 
 ## 7. 新对话开场应读的文件
 
-1. **本文** `docs/现状与DSH插件化转移.md`  
-2. `docs/系统设计与理念.md` §2 理念、§3 两套 Skill、挂接脚本语义  
-3. `docs/三层本阶段规格.md` 端口与测试风格  
-4. `src/core/ports.ts`、`src/core/worktrees.ts`、`src/control/cli.ts` 里 attach 入队  
-5. `overlay/prompts/attach.txt`  
-6. DeepSeek Harness：`docs/user/develop/basic/`、`docs/cookbook/extension-cookbook.md`（本地若无则 github.com/deepseek-ai/deepseek-harness）
+1. **执行真相** `docs/双宿主独立核心改造实施计划.md`
+2. **现状摘要** `docs/现状与DSH插件化转移.md`
+3. `docs/系统设计与理念.md` §2、§9
+4. `docs/三层本阶段规格.md`（历史查询合同）
+5. `src/core/ports.ts`、`src/core/worktrees.ts`、`src/control/cli.ts`、`overlay/prompts/attach.txt`
+6. DeepSeek Harness 本机源码：`E:\deepseek-harness-master\docs\user\develop\basic\`、`packages\bundle\README.zh.md`、`apps\cli\reference\README.zh.md`

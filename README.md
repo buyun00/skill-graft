@@ -6,11 +6,11 @@
 ![Status](https://img.shields.io/badge/status-local_experiment-orange.svg)
 ![Platform](https://img.shields.io/badge/platform-windows-lightgrey.svg)
 
-工作树不持有 Skill 副本。中心仓是权威源，各仓库用链接「嫁接」上来：改一处，已挂上的树同时看见。
+中心仓是 Skill **版本库**。每棵工作树领取并钉住要用的版本，更新时复制（自动或手动）；不同树可以钉不同版本。不要求「改一处、已挂树同时看见」。
 
 GitHub 上的是**运行时**（CLI、适配层、面板、overlay）。你本机的 Skill 正文留在 `skills/`，默认不入库、不上传。
 
-**现状 / 理念摘要 / 下一步（DSH 插件化）：** [`docs/现状与DSH插件化转移.md`](./docs/现状与DSH插件化转移.md)。新对话做插件请从那篇开工。
+**双宿主改造实施、真实环境与当前进度：** [`docs/双宿主独立核心改造实施计划.md`](./docs/双宿主独立核心改造实施计划.md)。现状摘要见 [`docs/现状与DSH插件化转移.md`](./docs/现状与DSH插件化转移.md)。
 
 ---
 
@@ -19,10 +19,10 @@ GitHub 上的是**运行时**（CLI、适配层、面板、overlay）。你本�
 很多仓库会在每个 worktree 里再摊一套助手目录（Skill、agent、规则）。结果是：
 
 1. **新签出就再摊一份。** 体积大、条目多，和你真正在用的那套往往还对不上。
-2. **复制会漂。** 同一条 Skill 改了要同步到每一棵树，漏一次就两套真相。
+2. **不同树可能要钉不同版本。** 不要求 hub 一改、所有已领树立刻同一份文件；对齐靠 pin + 复制，而不是实时链接。
 3. **上游更新不该在功能分支上当场归类。** 写业务的对话不该停下来决定「这条官方 Skill 要不要吸收」。
 
-skill-graft 把「本地工作流的权威源」放到**另一个仓库**里。工作树只挂 Junction / HardLink；官方更新进 inbox，人拍板；第一次剥官方、改挂中心，走后台 Codex 对话，不静默改盘。
+skill-graft 把「本地工作流的权威源」放到**另一个仓库**里。树上是领取结果（按 pin 复制），不是实时挂载；官方更新进 inbox，人拍板；第一次从官方树切过来走后台对话，不静默改盘。现状实现仍是 Junction / HardLink；下一步改为复制 + 钉版本，见 [`docs/现状与DSH插件化转移.md`](./docs/现状与DSH插件化转移.md)。
 
 理念上不绑死某一类项目。当前实现里「认不认这棵树」仍默认：根上同时有 `AGENTS.md` 和 `baloot_client`（先在游戏客户端仓上跑通的判定）。以后会收成可配置规则。
 
@@ -42,22 +42,22 @@ skill-graft 把「本地工作流的权威源」放到**另一个仓库**里。�
 | 拍板 inbox | `sg decide --id … --action adopt\|merge\|reject` | 采用 / 并入 / 拒绝 |
 | 改 Skill / 闲聊 / 剥离 | `sg edit` / `chat` / `detach` / `resume` | 同样入队 Codex 会话 |
 | 保活 | `sg daemon status` / `GET /api/daemon` | 无窗口守护本地 HTTP API（:18765），挂了会拉起来 |
-| HTTP | 守护进程自动起；也可 `npm run api` | 查询与会话接口，只转发 CLI；网页已撤，以后重做 |
+| HTTP / 网页 | 守护进程自动起；也可 `npm run api` | `:18765` API + 已有玻璃控制台；当前仍以 CLI 转发为主，双宿主改造时迁到共享 Application |
 
-控制面漏斗：
+当前实现漏斗（迁移前）：
 
 ```text
 人 / HTTP / Git hook
         │
         ▼
-   sg / ozdqp-hub（CLI）  ← 对外唯一命令面
+   sg / ozdqp-hub（CLI）  ← 当前本地入口
         ▼
       core
         ▼
-     适配层（路径 / 盘 / 链接 / git）
+     适配层（路径 / 盘 / 链接或复制 / git）
 ```
 
-HTTP 和 hook **不** `import` 核心函数，只执行 `dist/control/cli.js`。
+目标不是让 DSH 再调用这条 CLI。改造后唯一业务契约是共享 `HubApplication.execute(command)`：本地完整发行由 CLI/HTTP/网页装配调用，DSH 完整发行在 DSH 进程内装配调用；两边只在宿主适配、生命周期、UI 和打包上分叉，彼此不构成运行前提。
 
 第一次挂接由对话去做：侦察 → `manage-skill-visibility -Mode Disable` → `attach-library -ConfigureGit -PreferLibrary` → 验收。CLI 进程退出后对话仍在跑（Windows 上用 WMI 拉起，避免被 Job Object 一起杀掉）。
 
@@ -124,7 +124,7 @@ sg --help
 sg attach --worktree D:\your-checkout
 ```
 
-CLI 立刻返回 session（`status: running`、带 pid），Codex 在后台做剥离和链接。可选：
+CLI 立刻返回 session（`status: running`、带 pid），Codex 在后台做剥离和领取（现状：建链接）。可选：
 
 ```text
 --intent "…"           额外意图
@@ -133,7 +133,9 @@ CLI 立刻返回 session（`status: running`、带 pid），Codex 在后台做�
 --no-spawn             只入队，不拉对话（测试用）
 ```
 
-挂上之后，树上应是：常驻 Skill 目录 → hub 的 Junction；`AGENTS.override.md` → hub 的 HardLink（或 symlink）；官方 `.claude/skills` / `.codex/skills` 不在磁盘。用 `list-worktrees` 看 `attached` / `overrideLinked` / `officialPresent`。
+**现状实现：** 挂上之后，树上应是：常驻 Skill 目录 → hub 的 Junction；`AGENTS.override.md` → hub 的 HardLink（或 symlink）；官方 `.claude/skills` / `.codex/skills` 不在磁盘。用 `list-worktrees` 看 `attached` / `overrideLinked` / `officialPresent`。
+
+**产品下一步：** 按树 pin + 复制同一批路径，不再要求实时硬链接。详见转移文档。
 
 已挂树链接断了，不要再走第一次 attach：
 

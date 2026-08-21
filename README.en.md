@@ -6,9 +6,11 @@
 ![Status](https://img.shields.io/badge/status-local_experiment-orange.svg)
 ![Platform](https://img.shields.io/badge/platform-windows-lightgrey.svg)
 
-Worktrees do not hold their own copy of Skills. The hub repo is the source of truth; each repository is **grafted** on via links — change it once and every attached tree sees the update immediately.
+The hub is a Skill **version library**. Each worktree pins the Skill versions it uses; updates are **copied** (automatically or by hand). Different trees may pin different versions. Live “change once, every attached tree updates instantly” is not a goal.
 
 What lives on GitHub is the **runtime** (CLI, adapters, panel, overlay). Your local Skill content stays in `skills/` and is, by default, neither committed nor uploaded.
+
+**Dual-host implementation plan, real-environment acceptance, and current progress:** [`docs/双宿主独立核心改造实施计划.md`](./docs/双宿主独立核心改造实施计划.md). The status summary is in [`docs/现状与DSH插件化转移.md`](./docs/现状与DSH插件化转移.md).
 
 ---
 
@@ -17,10 +19,10 @@ What lives on GitHub is the **runtime** (CLI, adapters, panel, overlay). Your lo
 Many repos materialize a full assistant directory (Skill, agent, rules) inside every worktree. The consequences:
 
 1. **A fresh checkout re-materializes the whole set.** It is large, noisy, and often out of sync with what you actually use.
-2. **Copies drift.** Changing one Skill means propagating it to every tree — miss once and you have two sources of truth.
+2. **Different trees may pin different versions.** The hub changing does not have to update every claimed tree at once; alignment is pin + copy, not a live link.
 3. **Upstream updates should not be triaged on a feature branch.** A business-coding conversation should not stop to decide whether an official Skill ought to be absorbed.
 
-skill-graft puts the "authority for the local workflow" in **a separate repository**. Worktrees only carry Junction / HardLink grafts; official updates land in an inbox for a human to decide; the first detachment and re-grafting goes through a background Codex conversation rather than silently rewriting the disk.
+skill-graft puts the "authority for the local workflow" in **a separate repository**. What lands on a tree is a claimed result (copy to that tree's pin), not a live mount; official updates go to an inbox for a human to decide; the first switch off the official tree goes through a background conversation, not a silent script. The current implementation still uses Junction / HardLink; the next step is copy + pin — see [`docs/现状与DSH插件化转移.md`](./docs/现状与DSH插件化转移.md).
 
 The idea is not bound to one kind of project. The current "do we recognize this tree?" check still hard-codes: root must have both `AGENTS.md` and `baloot_client` (the rule it was first validated against on the game-client repo). It will later collapse into a configurable rule.
 
@@ -40,22 +42,22 @@ The idea is not bound to one kind of project. The current "do we recognize this 
 | Decide inbox | `sg decide --id … --action adopt\|merge\|reject` | Adopt / merge-in / reject |
 | Edit Skill / chat / detach | `sg edit` / `chat` / `detach` / `resume` | Also enqueued as Codex sessions |
 | Keep-alive | `sg daemon status` / `GET /api/daemon` | Windowless daemon guarding the local HTTP API (:18765), restarts if killed |
-| HTTP | Started by the daemon; or `npm run api` | Query and session endpoints that only forward to the CLI; web panel removed, to be redone |
+| HTTP / web | Started by the daemon; or `npm run api` | `:18765` API plus the current glass panel; transport is still CLI-oriented and will move to the shared Application |
 
-Control-plane funnel:
+Current pre-migration funnel:
 
 ```text
 Human / HTTP / Git hook
         │
         ▼
-   sg / ozdqp-hub (CLI)   ← the only command surface exposed outward
+   sg / ozdqp-hub (CLI)   ← current local entry point
         ▼
       core
         ▼
      adapters (paths / fs / links / git)
 ```
 
-HTTP and hooks **do not** `import` core functions — they execute `dist/control/cli.js`.
+The target is not to make DSH call this external CLI. The single business contract will be shared `HubApplication.execute(command)`: the complete local distribution calls it through CLI/HTTP/web adapters, while the complete DSH distribution composes it in-process. Only host adapters, lifecycle, UI, and packaging differ; neither distribution is a runtime prerequisite for the other.
 
 The first graft is driven by a conversation: recon → `manage-skill-visibility -Mode Disable` → `attach-library -ConfigureGit -PreferLibrary` → acceptance. After the CLI process exits the conversation keeps running (on Windows it is launched via WMI so it is not killed off together with the Job Object).
 
@@ -122,7 +124,7 @@ On success stdout is UTF-8 JSON. You can also set `HUB_ROOT` to point at another
 sg attach --worktree D:\your-checkout
 ```
 
-The CLI returns a session immediately (`status: running`, with a pid); Codex does the detachment and linking in the background. Options:
+The CLI returns a session immediately (`status: running`, with a pid); Codex does the detachment and claim in the background (today: creating links). Options:
 
 ```text
 --intent "…"           extra intent
@@ -131,7 +133,9 @@ The CLI returns a session immediately (`status: running`, with a pid); Codex doe
 --no-spawn             enqueue only, do not start a conversation (for testing)
 ```
 
-Once grafted, the tree should have: resident Skill directories → Junctions into the hub; `AGENTS.override.md` → a HardLink (or symlink) into the hub; the official `.claude/skills` / `.codex/skills` absent from disk. Use `list-worktrees` to read `attached` / `overrideLinked` / `officialPresent`.
+**Current implementation:** once grafted, the tree should have: resident Skill directories → Junctions into the hub; `AGENTS.override.md` → a HardLink (or symlink) into the hub; the official `.claude/skills` / `.codex/skills` absent from disk. Use `list-worktrees` to read `attached` / `overrideLinked` / `officialPresent`.
+
+**Product next:** copy those same paths to a per-tree pin; live hardlinks are not required. See the transfer doc.
 
 If links on an already-grafted tree are broken, do **not** run a first-time attach again:
 
