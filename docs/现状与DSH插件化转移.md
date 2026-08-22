@@ -28,7 +28,7 @@
 | 测试 | P1 已封口结果见 [P1 证据](../artifacts/verification/P1/README.md)；P2 源码外安装真实验收 1/1（`32.76s`），锁修复另通过 contender 200/200、独立 seal 2×100、dual sweeper 50/50、focused 51/51；最终默认 403 项回归连续两轮均为 401 pass、0 fail、2 platform skip。 |
 | 未做 | `MaterializePort` copy 物化与旧链接迁移、完整 Local/DSH SessionRunner、DSH bundle/Host/Client/UI、双宿主并存与发布候选。 |
 
-P1 共享 Contracts/Core/Application 与 P2 snapshot/pin/迁移/跨进程锁均已于 2026-08-22 完成并封口，见 [P1 证据](../artifacts/verification/P1/README.md)和 [P2 证据](../artifacts/verification/P2/README.md)。当前实施指针为 P3，但 P3 尚未开始；开发清单 **1–9 已完成**（含玻璃控制台），不要倒回去重做，除非冒烟证明坏了。
+P1 共享 Contracts/Core/Application 与 P2 snapshot/pin/迁移/跨进程锁均已于 2026-08-22 完成并封口，见 [P1 证据](../artifacts/verification/P1/README.md)和 [P2 证据](../artifacts/verification/P2/README.md)。当前实施指针为 P3，已开始冻结 copy 物化、冲突与旧链接显式迁移合同；开发清单 **1–9 已完成**（含玻璃控制台），不要倒回去重做，除非冒烟证明坏了。
 
 活数据典型形态：若干 worktree 已挂（链接完整），inbox 可能空，总览走「一切正常」；有事件路径由 `test/overview-mapping.test.mjs` 用夹具 JSON 覆盖。
 
@@ -200,7 +200,7 @@ DSH 可用 `ctx.skills.register()` 注册当前 workspace 的钉定 Skill，可�
 
 ### 5.4 实施与验收入口
 
-P0 基线隔离、P1 共享 Application 和 P2 snapshot/pin/迁移/跨进程锁已完成并封口。下一阶段是 P3 copy 物化与旧链接迁移，但尚未开始；之后才依次进入本地发行、Codex Runner、DSH bundle、DSH UI、DSH Runner、双宿主并存与最终打包。每一步都要真实构建安装环境并启动宿主验证，完成后更新进度、提交并推送；单测不能替代真实安装和真实会话证据。
+P0 基线隔离、P1 共享 Application 和 P2 snapshot/pin/迁移/跨进程锁已完成并封口。P3 copy 物化与旧链接迁移已开始，当前只在冻结共享合同、冲突与回滚边界；之后才依次进入本地发行、Codex Runner、DSH bundle、DSH UI、DSH Runner、双宿主并存与最终打包。每一步都要真实构建安装环境并启动宿主验证，完成后更新进度、提交并推送；单测不能替代真实安装和真实会话证据。
 
 ---
 
