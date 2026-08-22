@@ -9,6 +9,11 @@ export const PORT_FAULT_REASONS = [
   'content-conflict',
   'state-version-unsupported',
   'request-in-progress',
+  'lock-busy',
+  'lock-not-owned',
+  'transaction-failure',
+  'state-corrupt',
+  'snapshot-invalid',
   'unavailable'
 ] as const
 
@@ -65,6 +70,31 @@ const MAPPINGS: Readonly<Record<PortFaultReason, {
     code: 'REQUEST_IN_PROGRESS',
     message: 'request is already in progress',
     retryable: true
+  },
+  'lock-busy': {
+    code: 'LOCK_BUSY',
+    message: 'write lock is busy',
+    retryable: true
+  },
+  'lock-not-owned': {
+    code: 'LOCK_NOT_OWNED',
+    message: 'write lease is no longer owned',
+    retryable: true
+  },
+  'transaction-failure': {
+    code: 'PORT_FAILURE',
+    message: 'write transaction failed',
+    retryable: true
+  },
+  'state-corrupt': {
+    code: 'STATE_CORRUPT',
+    message: 'durable state is corrupt',
+    retryable: false
+  },
+  'snapshot-invalid': {
+    code: 'SNAPSHOT_INVALID',
+    message: 'library snapshot is invalid',
+    retryable: false
   },
   unavailable: {
     code: 'PORT_FAILURE',

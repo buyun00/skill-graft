@@ -307,10 +307,10 @@ export function pathHasDir(current: string, dir: string, sep: string, caseInsens
 }
 
 export function toGitBashPath(winPath: string): string {
-  const normalized = winPath.replace(/\\/g, '/')
-  const drive = normalized.match(/^([A-Za-z]):(\/.*)$/)
-  if (drive) return `/${drive[1].toLowerCase()}${drive[2]}`
-  return normalized
+  const drive = winPath.match(/^([A-Za-z]):([\\/].*)$/)
+  if (drive) return `/${drive[1]?.toLowerCase()}${drive[2]?.replace(/\\/g, '/')}`
+  if (/^\\\\/.test(winPath)) return winPath.replace(/\\/g, '/')
+  return winPath
 }
 
 export function renderShims(paths: InstallPaths, daemonTrace?: DaemonTraceEnvironment): {
@@ -329,12 +329,21 @@ export function renderShims(paths: InstallPaths, daemonTrace?: DaemonTraceEnviro
   const unixNode = toGitBashPath(node)
   const unixCli = toGitBashPath(cli)
   const unixData = toGitBashPath(dataRoot)
-  const unixDataDefault = unixData.replace(/([\\$"`])/g, '\\$1')
   const unix = [
     '#!/bin/sh',
-    `export HUB_ROOT="\${HUB_ROOT:-${unixDataDefault}}"`,
-    `export HUB_API_PORT="\${HUB_API_PORT:-${paths.port}}"`,
-    `exec '${unixNode.replace(/'/g, `'\\''`)}' '${unixCli.replace(/'/g, `'\\''`)}' "$@"`,
+    'if [ -z "${SKILL_GRAFT_HOME-}" ] && [ -z "${HUB_ROOT-}" ]; then',
+    `  SKILL_GRAFT_HOME=${shellSingleQuote(unixData)}`,
+    `  HUB_ROOT=${shellSingleQuote(unixData)}`,
+    'elif [ -z "${SKILL_GRAFT_HOME-}" ]; then',
+    '  SKILL_GRAFT_HOME="${HUB_ROOT}"',
+    'elif [ -z "${HUB_ROOT-}" ]; then',
+    '  HUB_ROOT="${SKILL_GRAFT_HOME}"',
+    'fi',
+    'if [ -z "${HUB_API_PORT-}" ]; then',
+    `  HUB_API_PORT=${shellSingleQuote(String(paths.port))}`,
+    'fi',
+    'export SKILL_GRAFT_HOME HUB_ROOT HUB_API_PORT',
+    `exec ${shellSingleQuote(unixNode)} ${shellSingleQuote(unixCli)} "$@"`,
     ''
   ].join('\n')
   const runCmd = stripTrailingSep(paths.runDaemonCmd)
@@ -345,14 +354,17 @@ export function renderShims(paths: InstallPaths, daemonTrace?: DaemonTraceEnviro
   ].join('\r\n')
   const runDaemonCmd = [
     '@echo off',
-    'setlocal',
+    'setlocal DisableDelayedExpansion',
     'chcp 65001 >nul',
+    `set "SKILL_GRAFT_HOME=${bat(dataRoot)}"`,
     `set "HUB_ROOT=${bat(dataRoot)}"`,
     `set "HUB_API_PORT=${paths.port}"`,
     ...(daemonTrace ? [
       'for /f "tokens=1 delims==" %%G in (\'set GIT_ 2^>nul\') do set "%%G="',
       'for /f "tokens=1 delims==" %%D in (\'set DSH_ 2^>nul\') do set "%%D="',
-      ...Object.entries(daemonTrace.pinned).map(([name, value]) => `set "${name}=${batEnvironment(value)}"`),
+      ...Object.entries(daemonTrace.pinned)
+        .filter(([name]) => name !== 'SKILL_GRAFT_HOME')
+        .map(([name, value]) => `set "${name}=${batEnvironment(value)}"`),
       'set "SKILL_GRAFT_INVOCATION_TRACE=1"',
       'set "SKILL_GRAFT_REAL_E2E=1"',
       `set "SKILL_GRAFT_RUN_ID=${bat(daemonTrace.runId)}"`,
@@ -521,15 +533,26 @@ export function formatUninstallReport(result: UninstallResult): string {
   ].join('\n')
 }
 
-function renderCmdShim(hubRoot: string, nodePath: string, cliPath: string, port: number): string {
+function renderCmdShim(dataRoot: string, nodePath: string, cliPath: string, port: number): string {
   return [
     '@echo off',
-    'setlocal',
-    `if not defined HUB_ROOT set "HUB_ROOT=${bat(hubRoot)}"`,
+    'setlocal DisableDelayedExpansion',
+    ...renderInteractiveCmdDataRootDefaults(dataRoot),
     `if not defined HUB_API_PORT set "HUB_API_PORT=${port}"`,
     `"${bat(nodePath)}" "${bat(cliPath)}" %*`,
     ''
   ].join('\r\n')
+}
+
+function renderInteractiveCmdDataRootDefaults(dataRoot: string): string[] {
+  const fallback = bat(dataRoot)
+  return [
+    'set "_SKILL_GRAFT_DATA_ROOT_DEFAULT="',
+    'if not defined SKILL_GRAFT_HOME if not defined HUB_ROOT set "_SKILL_GRAFT_DATA_ROOT_DEFAULT=1"',
+    `if defined _SKILL_GRAFT_DATA_ROOT_DEFAULT set "SKILL_GRAFT_HOME=${fallback}"`,
+    `if defined _SKILL_GRAFT_DATA_ROOT_DEFAULT set "HUB_ROOT=${fallback}"`,
+    'set "_SKILL_GRAFT_DATA_ROOT_DEFAULT="'
+  ]
 }
 
 function sameDir(left: string, right: string, caseInsensitive: boolean): boolean {
@@ -557,4 +580,8 @@ function bat(value: string): string {
 
 function batEnvironment(value: string): string {
   return value.replace(/%/g, '%%')
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
 }

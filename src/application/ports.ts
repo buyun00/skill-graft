@@ -3,6 +3,7 @@ import type {
   HistoryRecordView,
   ApprovedLegacyAttachPlan,
   ApprovedLegacyDetachPlan,
+  HubStateV2,
   HubCommandKind,
   HubCommandResult,
   LegacyAttachApplyReport,
@@ -10,11 +11,18 @@ import type {
   LegacyDetachApplyReport,
   LegacyDetachInspection,
   LegacyAttachWorktreeInspection,
+  LibrarySnapshotSourceV1,
+  LibrarySnapshotManifestV1,
+  Sha256Identifier,
   SessionKind,
   SessionRequestOptions,
   SessionTarget,
   SessionView
 } from '../contracts/index.js'
+import type {
+  LegacyWorktreeMigrationFact
+} from '../core/migration.js'
+import type { LibrarySnapshotFileFact } from '../core/snapshot.js'
 import type {
   HubStatusFacts,
   SkillHostFact,
@@ -32,6 +40,15 @@ export interface ApplicationRuntimePort {
   nowIso(): string
   nextId(scope: string): string
   sha256(value: string): string
+}
+
+/**
+ * Host recovery preflight. Application invokes this after command validation
+ * and before any query/write handler so late durable journals are never
+ * bypassed and adapter failures use the normal result envelope.
+ */
+export interface ApplicationRecoveryPort {
+  recover(): MaybePromise<void>
 }
 
 type InvocationTraceBase = {
@@ -80,6 +97,48 @@ export interface HubQueryPort {
   readSkill(path: string): MaybePromise<SkillReadPortResult>
   listHistory(limit: number): MaybePromise<readonly HistoryRecordView[]>
   inspectWorktree(worktree: string): MaybePromise<WorktreeInspection>
+}
+
+export type WorktreeIdentity = {
+  pathKey: Sha256Identifier
+  worktreeId: string
+}
+
+/** Host canonicalization boundary; raw locators never become persistent keys. */
+export interface WorktreeIdentityPort {
+  resolve(worktree: string): MaybePromise<WorktreeIdentity>
+}
+
+/** Host observation only. Application/Core exclusively construct the manifest. */
+export type LibrarySnapshotObservation = {
+  captureId: string
+  source: LibrarySnapshotSourceV1
+  files: readonly LibrarySnapshotFileFact[]
+}
+
+/** Validated immutable snapshot storage; it cannot choose canonical identity. */
+export interface LibrarySnapshotRepositoryPort {
+  observe(): MaybePromise<LibrarySnapshotObservation>
+  store(captureId: string, approved: LibrarySnapshotManifestV1): MaybePromise<{
+    manifest: LibrarySnapshotManifestV1
+    deduplicated: boolean
+  }>
+  list(): MaybePromise<readonly LibrarySnapshotManifestV1[]>
+  read(snapshotId: Sha256Identifier): MaybePromise<LibrarySnapshotManifestV1 | null>
+}
+
+/** Raw state/facts only. Application validates and projects schema status. */
+export interface HubStateV2RepositoryPort {
+  readDocument(): MaybePromise<unknown | null>
+  writeV2(state: HubStateV2): MaybePromise<void>
+  runtimeRevision(): MaybePromise<string>
+  observeV1Worktrees(): MaybePromise<readonly LegacyWorktreeMigrationFact[]>
+}
+
+export type P2ApplicationPorts = {
+  identities: WorktreeIdentityPort
+  snapshots: LibrarySnapshotRepositoryPort
+  state: HubStateV2RepositoryPort
 }
 
 /**

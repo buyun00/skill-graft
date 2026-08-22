@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLocalHost } from '../dist/local/create-local-host.js'
 import { projectLegacyResult } from '../dist/local/compat/legacy-projector.js'
+import { resolveLocalDataRoot } from '../dist/local/data-root.js'
 import { daemonStatus } from '../dist/control/install.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -11,7 +12,7 @@ const hubRoot = path.resolve(__dirname, '..')
 const port = Number(process.env.HUB_API_PORT || 18765)
 
 function hubDataRoot() {
-  return path.resolve(process.env.HUB_ROOT || hubRoot)
+  return resolveLocalDataRoot({ packageRoot: hubRoot })
 }
 
 let localHostCache = { root: '', host: null }
@@ -377,6 +378,8 @@ function isMainModule() {
 }
 
 function startApiListeners() {
+  // Resolve both environment names before the first listener is created.
+  hubDataRoot()
   for (const bindHost of ['127.0.0.1', '::1']) {
     const server = http.createServer(onRequest)
     server.listen(port, bindHost, () => {

@@ -102,13 +102,14 @@ async function startCliBlockedServer(dataRoot) {
 const fs = require('node:fs')
 const childProcess = require('node:child_process')
 const { syncBuiltinESMExports } = require('node:module')
+const { promisify } = require('node:util')
 const marker = process.env.SKILL_GRAFT_HTTP_CLI_MARKER
 const flatten = (value) => Array.isArray(value)
   ? value.flatMap(flatten)
   : (typeof value === 'string' || typeof value === 'number' ? [String(value)] : [])
 for (const method of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
   const original = childProcess[method]
-  childProcess[method] = function (...args) {
+  const wrapped = function (...args) {
     const command = flatten(args).join(' ')
     const normalized = command.replaceAll('\\', '/').toLowerCase()
     if (normalized.includes('dist/control/cli.js')) {
@@ -117,6 +118,20 @@ for (const method of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'exe
     }
     return original.apply(this, args)
   }
+  if (method === 'exec' || method === 'execFile') {
+    wrapped[promisify.custom] = (...args) => new Promise((resolve, reject) => {
+      wrapped(...args, (error, stdout, stderr) => {
+        if (error) {
+          error.stdout = stdout
+          error.stderr = stderr
+          reject(error)
+        } else {
+          resolve({ stdout, stderr })
+        }
+      })
+    })
+  }
+  childProcess[method] = wrapped
 }
 syncBuiltinESMExports()
 `, 'utf8')
@@ -128,6 +143,7 @@ syncBuiltinESMExports()
     cwd: hubRoot,
     env: {
       ...process.env,
+      SKILL_GRAFT_HOME: dataRoot,
       HUB_ROOT: dataRoot,
       HUB_API_PORT: String(port),
       HUB_SPAWN_CODEX: '0',
@@ -194,7 +210,7 @@ function seedHttpApplicationFixture(root) {
   }, null, 2)}\n`, 'utf8')
   fs.writeFileSync(
     path.join(root, 'skill-review', 'history', '000-http-fixture.json'),
-    '{"type":"http-fixture-history","safe":true}\n',
+    '{"type":"decide","id":"http-fixture","action":"reject","note":"fixture"}\n',
     'utf8'
   )
 
@@ -333,7 +349,7 @@ test('real isolated HTTP server uses Application without CLI child and keeps ses
   assert.match(skill.content, /Temporary default-test fixture/)
 
   const history = await getJson(runtime.base, '/api/history')
-  assert.ok(history.records.some((record) => record.type === 'http-fixture-history'))
+  assert.ok(history.records.some((record) => record.type === 'decide' && record.id === 'http-fixture'))
   assert.equal(fs.existsSync(requestLedger), false, 'read-only HTTP routes must not create a request ledger')
   assert.equal(fs.existsSync(auditLog), false, 'read-only HTTP routes must not create audit events')
 

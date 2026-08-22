@@ -8,6 +8,9 @@ import type {
   LegacyVisibilityMode
 } from './legacy-attach.js'
 import type { LegacyDetachApplyEffect } from './legacy-detach.js'
+import type { HubStateV2 } from './hub-state-v2.js'
+import type { MigrationPlanV1 } from './migration.js'
+import type { LibrarySnapshotManifestV1, Sha256Identifier } from './snapshot.js'
 import type {
   HistoryRecordView,
   HubStatusView,
@@ -18,6 +21,7 @@ import type {
   WorktreeListView
 } from './state.js'
 import type { ContractVersion } from './version.js'
+import type { WorktreePinV1 } from './worktree-pin.js'
 
 export type RepairLegacyResult = {
   action: 'repairLegacy'
@@ -114,6 +118,56 @@ export type ReapSessionsResult = {
   sessions: readonly SessionView[]
 }
 
+export type HubSchemaStatus = 'empty' | 'legacy' | 'current' | 'unsupported'
+
+export type InspectSchemaResult = {
+  action: 'inspectSchema'
+  status: HubSchemaStatus
+  detectedSchemaVersion: number | null
+  currentSchemaVersion: 2
+  stateRevision: number | null
+  runtimeRevision: string
+  writable: boolean
+  migrationRequired: boolean
+}
+
+export type ListSnapshotsResult = {
+  snapshots: readonly LibrarySnapshotManifestV1[]
+}
+
+export type GetSnapshotResult = {
+  snapshot: LibrarySnapshotManifestV1
+}
+
+export type GetPinResult = {
+  worktree: string
+  pathKey: Sha256Identifier
+  worktreeId: string
+  pin: WorktreePinV1 | null
+}
+
+export type CreateSnapshotResult = {
+  action: 'createSnapshot'
+  snapshot: LibrarySnapshotManifestV1
+  deduplicated: boolean
+}
+
+export type SetPinResult = {
+  action: 'setPin'
+  pathKey: Sha256Identifier
+  worktreeId: string
+  pin: WorktreePinV1
+  changed: boolean
+}
+
+export type MigrateStateResult = {
+  action: 'migrateState'
+  mode: 'dryRun' | 'commit'
+  status: 'planned' | 'committed' | 'already-current'
+  plan: MigrationPlanV1 | null
+  state: HubStateV2 | null
+}
+
 export type CommandDataByKind = {
   status: HubStatusView
   listSkills: SkillInventoryView
@@ -122,6 +176,10 @@ export type CommandDataByKind = {
   listHistory: { records: readonly HistoryRecordView[]; cursor?: string }
   listSessions: { sessions: readonly SessionView[] }
   getSession: { session: SessionView }
+  inspectSchema: InspectSchemaResult
+  listSnapshots: ListSnapshotsResult
+  getSnapshot: GetSnapshotResult
+  getPin: GetPinResult
   repairLegacy: RepairLegacyResult
   applyLegacyAttach: ApplyLegacyAttachResult
   applyLegacyDetach: ApplyLegacyDetachResult
@@ -134,6 +192,9 @@ export type CommandDataByKind = {
   analyze: SessionCommandResult<'analyze'>
   resumeSession: SessionCommandResult<'resumeSession'>
   reapSessions: ReapSessionsResult
+  createSnapshot: CreateSnapshotResult
+  setPin: SetPinResult
+  migrateState: MigrateStateResult
 }
 
 export const UNKNOWN_COMMAND_KIND = 'unknown' as const

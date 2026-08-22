@@ -19,8 +19,17 @@ export type {
   RequestLedgerPort,
   SessionPort
 } from './application/index.js'
-export { createLocalHost } from './local/create-local-host.js'
+export { createLocalHost, openLocalHost } from './local/create-local-host.js'
 export type { CreateLocalHostOptions, LocalHost } from './local/create-local-host.js'
+export {
+  coherentDataRootEnvironment,
+  LEGACY_DATA_ROOT_ENV,
+  localDataRootsEqual,
+  LocalDataRootError,
+  PRIMARY_DATA_ROOT_ENV,
+  resolveLocalDataRoot
+} from './local/data-root.js'
+export type { LocalDataRootEnvironment, ResolveLocalDataRootOptions } from './local/data-root.js'
 export {
   API_PORT,
   evaluateDoctor,

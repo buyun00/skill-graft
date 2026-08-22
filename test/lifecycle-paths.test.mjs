@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { createInstallHost } from '../dist/adapters/install-host.js'
+import { createInstallHost as createInstallHostAdapter } from '../dist/adapters/install-host.js'
 import {
   daemonStatus,
   doctorHub,
@@ -29,6 +29,23 @@ const pathApi = {
   resolve: (...parts) => path.resolve(...parts),
   dirname: (value) => path.dirname(value),
   basename: (value) => path.basename(value)
+}
+
+const INSTALL_ENVIRONMENT_NAMES = [
+  'SKILL_GRAFT_HOME', 'HUB_ROOT', 'SG_INSTALL_DIR', 'HUB_API_PORT',
+  'SKILL_GRAFT_INVOCATION_TRACE', 'SKILL_GRAFT_REAL_E2E', 'SKILL_GRAFT_RUN_ID', 'SKILL_GRAFT_E2E_ROOT',
+  'PATH', 'DSH_HOME', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP',
+  'HUB_SPAWN_CODEX', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_OPTIONAL_LOCKS'
+]
+
+function createInstallHost(overrides = {}) {
+  if (!overrides.environment && !overrides.env) return createInstallHostAdapter(overrides)
+  const environment = overrides.environment || (() => Object.fromEntries(
+    INSTALL_ENVIRONMENT_NAMES
+      .map((name) => [name, overrides.env?.(name)])
+      .filter((entry) => entry[1] !== undefined)
+  ))
+  return createInstallHostAdapter({ ...overrides, environment })
 }
 
 function tempRoot(t) {
@@ -125,17 +142,23 @@ test('install paths keep package assets separate from mutable HUB_ROOT data', (t
   assert.equal(paths.serverPath, path.join(path.resolve(packageRoot), 'server', 'index.mjs'))
 
   const shims = renderShims(paths)
-  assert.match(shims.sgCmd, /if not defined HUB_ROOT set "HUB_ROOT=/)
+  assert.match(shims.sgCmd, /if not defined SKILL_GRAFT_HOME if not defined HUB_ROOT set "_SKILL_GRAFT_DATA_ROOT_DEFAULT=1"/)
+  assert.match(shims.sgCmd, /if defined _SKILL_GRAFT_DATA_ROOT_DEFAULT set "SKILL_GRAFT_HOME=/)
+  assert.match(shims.sgCmd, /if defined _SKILL_GRAFT_DATA_ROOT_DEFAULT set "HUB_ROOT=/)
   assert.match(shims.sgCmd, new RegExp(escapeRegex(path.resolve(dataRoot))))
   assert.match(shims.runDaemonCmd, new RegExp(`cd /d "${escapeRegex(path.resolve(packageRoot))}"`))
+  assert.match(shims.runDaemonCmd, /set "SKILL_GRAFT_HOME=/)
   assert.match(shims.runDaemonCmd, /set "HUB_ROOT=/)
-  assert.doesNotMatch(shims.runDaemonCmd, /if not defined HUB_ROOT/)
+  assert.doesNotMatch(shims.runDaemonCmd, /if not defined (?:SKILL_GRAFT_HOME|HUB_ROOT)/)
   assert.doesNotMatch(shims.runDaemonCmd, /SKILL_GRAFT_INVOCATION_TRACE|SKILL_GRAFT_REAL_E2E|SKILL_GRAFT_RUN_ID|SKILL_GRAFT_E2E_ROOT/)
-  assert.match(shims.unix, /export HUB_ROOT="\$\{HUB_ROOT:-/)
+  assert.match(shims.unix, /if \[ -z "\$\{SKILL_GRAFT_HOME-\}" \] && \[ -z "\$\{HUB_ROOT-\}" \]; then/)
+  assert.match(shims.unix, /export SKILL_GRAFT_HOME HUB_ROOT HUB_API_PORT/)
+  assert.doesNotMatch(shims.unix, /\$\{(?:SKILL_GRAFT_HOME|HUB_ROOT):-/)
 
   const traceRunRoot = path.join(root, 'trace-render-1234')
   const pinned = tracePinnedEnvironment(traceRunRoot)
-  const trace = renderShims(paths, {
+  const tracePaths = { ...paths, dataRoot: pinned.SKILL_GRAFT_HOME, hubRoot: pinned.SKILL_GRAFT_HOME }
+  const trace = renderShims(tracePaths, {
     runId: 'trace-render-1234',
     runRoot: traceRunRoot,
     pinned
@@ -145,6 +168,10 @@ test('install paths keep package assets separate from mutable HUB_ROOT data', (t
   for (const [name, value] of Object.entries(pinned)) {
     assert.match(trace.runDaemonCmd, new RegExp(`set "${name}=${escapeRegex(value)}"`), `${name} pin`)
   }
+  const primaryAssignments = [...trace.runDaemonCmd.matchAll(/^set "SKILL_GRAFT_HOME=([^\r\n]*)"\r?$/gm)]
+  const legacyAssignments = [...trace.runDaemonCmd.matchAll(/^set "HUB_ROOT=([^\r\n]*)"\r?$/gm)]
+  assert.deepEqual(primaryAssignments.map((match) => match[1]), [pinned.SKILL_GRAFT_HOME])
+  assert.deepEqual(legacyAssignments.map((match) => match[1]), [pinned.SKILL_GRAFT_HOME])
   assert.match(trace.runDaemonCmd, /set "SKILL_GRAFT_INVOCATION_TRACE=1"/)
   assert.match(trace.runDaemonCmd, /set "SKILL_GRAFT_REAL_E2E=1"/)
   assert.match(trace.runDaemonCmd, /set "SKILL_GRAFT_RUN_ID=trace-render-1234"/)
@@ -167,17 +194,21 @@ test('setup pins validated trace gates only into the detached daemon launcher', 
     ['SG_INSTALL_DIR', installDir],
     ...Object.entries(gate.env)
   ])
+  const mutatedPath = path.join(gate.runRoot, 'mutated-after-preflight')
   const host = createInstallHost({
     platform: 'win32',
     home: path.join(gate.runRoot, 'home'),
     localAppData: path.join(gate.runRoot, 'home'),
     skipPath: true,
-    skipTask: true,
+    skipTask: false,
     env: (name) => env.get(name),
     extraShimDir: () => null,
     which: (name) => name === 'git' ? 'git.exe' : '',
     commandVersion: () => 'git version fixture',
-    taskExists: () => false,
+    taskExists: () => {
+      env.set('PATH', mutatedPath)
+      return false
+    },
     pidAlive: () => false,
     runNpm: () => { throw new Error('setup unexpectedly invoked npm') }
   })
@@ -215,6 +246,9 @@ test('setup pins validated trace gates only into the detached daemon launcher', 
   ].includes(name))) {
     assert.match(launcher, new RegExp(`set "${name}=${escapeRegex(value)}"`), `${name} detached launcher pin`)
   }
+  assert.equal((launcher.match(/^set "SKILL_GRAFT_HOME=/gm) || []).length, 1)
+  assert.equal((launcher.match(/^set "HUB_ROOT=/gm) || []).length, 1)
+  assert.doesNotMatch(launcher, new RegExp(escapeRegex(mutatedPath)))
   assert.doesNotMatch(launcher, /INVOCATION_TRACE_KEY|invocation-trace-key/)
 
   const normalShim = fs.readFileSync(path.join(installDir, 'bin', 'sg.cmd'), 'utf8')
@@ -266,11 +300,85 @@ test('setup refuses trace-gated detached launchers with unowned or unsafe pinned
       noTask: true,
       rebuild: false
     }, host)
-    const shims = result.steps.find((step) => step.id === 'shims')
-    assert.equal(shims?.ok, false, scenario.name)
-    assert.match(shims?.detail || '', scenario.pattern, scenario.name)
+    const trace = result.steps.find((step) => step.id === 'trace')
+    assert.equal(trace?.ok, false, scenario.name)
+    assert.match(trace?.detail || '', scenario.pattern, scenario.name)
+    assert.equal(result.steps.find((step) => step.id === 'deps')?.skipped, true, scenario.name)
+    assert.equal(result.steps.find((step) => step.id === 'layout')?.skipped, true, scenario.name)
     assert.equal(fs.existsSync(path.join(installDir, 'run-daemon.cmd')), false, scenario.name)
   }
+})
+
+test('setup preflight and detached start reject a trace root that differs from explicit dataRoot before mutations', async (t) => {
+  const container = tempRoot(t)
+  const gate = seedInvocationTraceGate(container)
+  const packageRoot = path.join(gate.runRoot, 'app', 'node_modules', 'ozdqp-skill-hub')
+  const selectedDataRoot = path.join(gate.runRoot, 'selected-other-data')
+  const installDir = path.join(gate.runRoot, 'home', 'install')
+  fs.mkdirSync(path.join(packageRoot, 'src'), { recursive: true })
+  fs.mkdirSync(path.join(packageRoot, 'scripts'), { recursive: true })
+  fs.mkdirSync(path.join(packageRoot, 'node_modules'), { recursive: true })
+  fs.writeFileSync(path.join(packageRoot, 'scripts', 'clean-dist.mjs'), '// fixture\n')
+  fs.writeFileSync(path.join(packageRoot, 'tsconfig.json'), '{}\n')
+  const env = new Map([
+    ['HUB_ROOT', gate.env.SKILL_GRAFT_HOME],
+    ['HUB_API_PORT', '21990'],
+    ['SG_INSTALL_DIR', installDir],
+    ...Object.entries(gate.env)
+  ])
+  let launches = 0
+  let dependencyProcesses = 0
+  let hostEnvReads = 0
+  const host = createInstallHost({
+    platform: 'win32',
+    home: path.join(gate.runRoot, 'home'),
+    localAppData: path.join(gate.runRoot, 'home'),
+    skipPath: true,
+    skipTask: true,
+    environment: () => Object.fromEntries(env),
+    env: (name) => {
+      hostEnvReads += 1
+      if (name === 'SKILL_GRAFT_HOME') return path.join(gate.runRoot, 'contradictory-primary')
+      if (name === 'HUB_ROOT') return path.join(gate.runRoot, 'contradictory-legacy')
+      return 'contradictory-host-env-value'
+    },
+    extraShimDir: () => null,
+    which: () => '',
+    commandVersion: () => '',
+    taskExists: () => false,
+    pidAlive: () => false,
+    wmiCreate: () => { launches += 1; return 0 },
+    launchDetached: () => { launches += 1; return 0 },
+    runNpm: () => { dependencyProcesses += 1; return { status: 0, stdout: '', stderr: '' } }
+  })
+
+  const setup = await setupHub(packageRoot, {
+    dryRun: false,
+    json: true,
+    noDaemon: false,
+    noPath: true,
+    noTask: true,
+    rebuild: false
+  }, host, selectedDataRoot)
+  const trace = setup.steps.find((step) => step.id === 'trace')
+  assert.equal(trace?.ok, false)
+  assert.match(trace?.detail || '', /SKILL_GRAFT_HOME must identify selected data root/)
+  for (const id of ['deps', 'layout', 'shims', 'path', 'env', 'task', 'daemon']) {
+    assert.equal(setup.steps.find((step) => step.id === id)?.skipped, true, id)
+  }
+  assert.equal(dependencyProcesses, 0)
+  assert.equal(hostEnvReads, 0)
+  assert.equal(launches, 0)
+  assert.equal(fs.existsSync(selectedDataRoot), false)
+  assert.equal(fs.existsSync(installDir), false)
+
+  const result = await startDaemonDetached(packageRoot, host, selectedDataRoot)
+  assert.equal(result.ok, false)
+  assert.match(result.detail, /SKILL_GRAFT_HOME must identify selected data root/)
+  assert.equal(hostEnvReads, 0)
+  assert.equal(launches, 0)
+  assert.equal(fs.existsSync(path.join(installDir, 'run-daemon.cmd')), false)
+  assert.equal(fs.existsSync(path.join(installDir, 'silent-run.vbs')), false)
 })
 
 test('setup and detached start fail closed when an explicitly enabled trace gate is invalid', async (t) => {
@@ -312,9 +420,11 @@ test('setup and detached start fail closed when an explicitly enabled trace gate
     noTask: true,
     rebuild: false
   }, host)
-  const shims = setup.steps.find((step) => step.id === 'shims')
-  assert.equal(shims?.ok, false)
-  assert.match(shims?.detail || '', /invocation trace gate is invalid/)
+  const trace = setup.steps.find((step) => step.id === 'trace')
+  assert.equal(trace?.ok, false)
+  assert.match(trace?.detail || '', /invocation trace gate is invalid/)
+  assert.equal(setup.steps.find((step) => step.id === 'deps')?.skipped, true)
+  assert.equal(setup.steps.find((step) => step.id === 'layout')?.skipped, true)
   assert.equal(fs.existsSync(path.join(installDir, 'run-daemon.cmd')), false)
 
   const started = await startDaemonDetached(packageRoot, host, dataRoot)
@@ -379,7 +489,9 @@ test('setup preserves explicit HUB_ROOT and initializes only the data root', asy
   assert.match(result.steps.find((step) => step.id === 'deps')?.detail || '', /prebuilt/)
   assert.equal(fs.existsSync(path.join(dataRoot, 'skill-review', 'state.json')), true)
   assert.equal(fs.existsSync(path.join(packageRoot, 'skill-review')), false)
-  assert.equal(userEnvWrites.some(([name]) => name === 'HUB_ROOT'), false)
+  assert.deepEqual(userEnvWrites.filter(([name]) => name === 'SKILL_GRAFT_HOME' || name === 'HUB_ROOT'), [
+    ['SKILL_GRAFT_HOME', path.resolve(dataRoot)]
+  ])
   const shim = fs.readFileSync(paths.shimCmd, 'utf8')
   assert.match(shim, /if not defined HUB_ROOT/)
   assert.match(shim, new RegExp(escapeRegex(path.resolve(dataRoot))))
@@ -480,7 +592,7 @@ test('setup halts every external lifecycle mutation after required data assets f
   assert.equal(fs.existsSync(installDir), false)
 })
 
-test('setup halts PATH, task, and daemon mutations after a hostile trace gate rejects shim generation', async (t) => {
+test('setup trace preflight halts deps, layout, PATH, task, and daemon mutations', async (t) => {
   const root = tempRoot(t)
   const packageRoot = path.join(root, 'package')
   const dataRoot = path.join(root, 'data')
@@ -527,8 +639,8 @@ test('setup halts PATH, task, and daemon mutations after a hostile trace gate re
   }, host)
 
   assert.equal(result.ok, false)
-  assert.equal(result.steps.find((step) => step.id === 'shims')?.ok, false)
-  for (const id of ['path', 'env', 'task', 'daemon']) {
+  assert.equal(result.steps.find((step) => step.id === 'trace')?.ok, false)
+  for (const id of ['deps', 'layout', 'shims', 'path', 'env', 'task', 'daemon']) {
     assert.equal(result.steps.find((step) => step.id === id)?.skipped, true, `${id} must be skipped`)
   }
   assert.deepEqual(mutations, [])

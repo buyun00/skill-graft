@@ -3,7 +3,7 @@ import type {
   SkillReadPortResult,
   WorktreeInspection
 } from '../application/ports.js'
-import type { HistoryRecordView, SkillKind } from '../contracts/index.js'
+import { validateHubStateV2, type HistoryRecordView, type SkillKind } from '../contracts/index.js'
 import { RESIDENT_SKILLS } from '../core/constants.js'
 import type {
   HubStatusFacts,
@@ -266,7 +266,28 @@ function inspectWorktree(context: LocalHostContext, worktree: string): WorktreeI
 }
 
 function readStatusFacts(context: LocalHostContext): HubStatusFacts {
-  const state = context.persist.readState(context.path.join(context.hubRoot, 'skill-review', 'state.json'))
+  const stateFile = context.path.join(context.hubRoot, 'skill-review', 'state.json')
+  const raw = context.persist.readJson<unknown>(stateFile, { version: 1, items: [], lastIngest: null })
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)
+    && (raw as { schemaVersion?: unknown }).schemaVersion === 2) {
+    const validation = validateHubStateV2(raw)
+    if (!validation.valid) throw new Error('HubStateV2 failed shared validation')
+    const gameRepo = gameRepoOf(context)
+    return {
+      hubRoot: context.hubRoot,
+      gameRepo,
+      lastIngest: validation.value.lastIngest
+        ? {
+            ref: validation.value.lastIngest.ref,
+            old: validation.value.lastIngest.old,
+            new: validation.value.lastIngest.new,
+            gameRepo: gameRepo || validation.value.lastIngest.gameRepoId
+          }
+        : null,
+      items: validation.value.items
+    }
+  }
+  const state = raw as { items?: HubStatusFacts['items']; lastIngest?: HubStatusFacts['lastIngest'] }
   return {
     hubRoot: context.hubRoot,
     gameRepo: gameRepoOf(context),

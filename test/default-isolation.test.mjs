@@ -10,6 +10,18 @@ function readOptional(file) {
   return fs.existsSync(file) ? fs.readFileSync(file) : null
 }
 
+function emittedFileFingerprint(file) {
+  if (!fs.existsSync(file)) return { exists: false }
+  const stat = fs.statSync(file, { bigint: true })
+  return {
+    exists: true,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+    bytes: fs.readFileSync(file)
+  }
+}
+
 function checkedGit(cwd, args) {
   const result = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-C', cwd, ...args], {
     encoding: 'utf8',
@@ -75,6 +87,7 @@ test('default suite isolates host homes, Git configuration, DSH, and global comm
   assert.match(process.env.GIT_CONFIG_SYSTEM || '', /(?:NUL|dev[\\/]null)$/i)
   assert.equal(process.env.SKILL_GRAFT_REAL_E2E, '0')
   assert.equal(process.env.HUB_SPAWN_CODEX, '0')
+  assert.equal(path.resolve(process.env.SKILL_GRAFT_HOME), path.resolve(process.env.HUB_ROOT))
   for (const name of ['npm_config_cache', 'npm_config_prefix', 'npm_config_userconfig', 'npm_config_globalconfig']) {
     const value = process.env[name] || process.env[name.toUpperCase()]
     assert.ok(value, `${name} must be set`)
@@ -141,8 +154,14 @@ test('default-suite child scrubs hostile Git and Node env without touching a vic
     `else fs.appendFileSync(${JSON.stringify(sentinel)}, process.pid + '\\n')`
   ].join('\n'))
 
+  const emittedBefore = [
+    path.join(hubRoot, 'dist', 'control', 'cli.js'),
+    path.join(hubRoot, 'dist', 'control', 'install.js')
+  ].map(emittedFileFingerprint)
+
   const result = spawnSync(process.execPath, [
     path.join(hubRoot, 'test', 'support', 'run-default-suite.mjs'),
+    '--verify-build-no-emit',
     'test/default-isolation.test.mjs'
   ], {
     cwd: hubRoot,
@@ -174,4 +193,8 @@ test('default-suite child scrubs hostile Git and Node env without touching a vic
   assert.equal(fs.readFileSync(environmentAssertion, 'utf8'), 'scrubbed\n')
   assert.deepEqual(victimFingerprint(victim), before)
   assert.equal(fs.existsSync(sentinel), false, 'NODE_OPTIONS preload must not reach build or test children')
+  assert.deepEqual([
+    path.join(hubRoot, 'dist', 'control', 'cli.js'),
+    path.join(hubRoot, 'dist', 'control', 'install.js')
+  ].map(emittedFileFingerprint), emittedBefore, 'nested wrapper verification must not rewrite the shared dist tree')
 })

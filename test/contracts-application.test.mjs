@@ -4,7 +4,9 @@ import path from 'node:path'
 import test from 'node:test'
 
 import {
+  ApplicationTransactionErrorBase,
   createHubApplication,
+  createMemoryApplicationTransactions,
   createMemoryRequestLedger,
   createMemorySessions,
   portFault
@@ -29,9 +31,18 @@ import {
   validatePin
 } from '../dist/core/policies.js'
 import { planLegacyAttach } from '../dist/core/legacy-attach.js'
+import { createLibrarySnapshotManifest } from '../dist/core/snapshot.js'
 
 const posix = path.posix
 const FIXED_NOW = '2030-01-02T03:04:05.000Z'
+
+class TrustedSnapshotInvalidError extends ApplicationTransactionErrorBase {
+  constructor() {
+    super('invalid snapshot')
+    this.code = 'SNAPSHOT_INVALID'
+    this.retryable = false
+  }
+}
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value))
@@ -44,6 +55,99 @@ function normalized(value) {
 function worktreeTargetId(value) {
   const canonical = normalized(value)
   return `worktree:${createHash('sha256').update(canonical).digest('hex').slice(0, 24)}`
+}
+
+function memorySnapshot(seed, createdAt = FIXED_NOW) {
+  const planned = createLibrarySnapshotManifest({
+    source: { kind: 'library', id: 'memory-library', revision: `revision-${seed}` },
+    createdAt,
+    files: [{
+      path: 'ozdqp-development/SKILL.md',
+      size: Buffer.byteLength(seed),
+      sha256: `sha256:${createHash('sha256').update(seed).digest('hex')}`,
+      mode: '100644',
+      isReparsePoint: false
+    }]
+  })
+  assert.equal(planned.ok, true)
+  return planned.manifest
+}
+
+const DEFAULT_MEMORY_SNAPSHOT = memorySnapshot('memory-default')
+const SECOND_MEMORY_SNAPSHOT = memorySnapshot('memory-second')
+
+function createMemoryP2Ports(context, options = {}) {
+  const snapshots = (options.snapshots || [DEFAULT_MEMORY_SNAPSHOT, SECOND_MEMORY_SNAPSHOT]).map(clone)
+  return {
+    identities: {
+      resolve(worktree) {
+        const resolved = context.path.resolve(worktree)
+        const canonical = context.fs.realpath(resolved) || resolved
+        const comparisonKey = context.path.comparisonKey(canonical)
+        return {
+          pathKey: `sha256:${context.hash.sha256(comparisonKey)}`,
+          worktreeId: worktreeTargetId(canonical)
+        }
+      }
+    },
+    snapshots: {
+      observe() {
+        return {
+          captureId: 'memory-capture',
+          source: DEFAULT_MEMORY_SNAPSHOT.source,
+          files: DEFAULT_MEMORY_SNAPSHOT.files.map((file) => ({ ...file, isReparsePoint: false }))
+        }
+      },
+      store(_captureId, approved) {
+        const existing = snapshots.find((manifest) => manifest.snapshotId === approved.snapshotId)
+        if (existing) return { manifest: clone(existing), deduplicated: true }
+        snapshots.push(clone(approved))
+        return { manifest: clone(approved), deduplicated: false }
+      },
+      list: () => snapshots.map(clone),
+      read: (snapshotId) => clone(snapshots.find((manifest) => manifest.snapshotId === snapshotId) || null)
+    },
+    state: {
+      readDocument: () => context.persist.readJson('/hub/skill-review/state.json', null),
+      writeV2: (state) => context.persist.writeJson('/hub/skill-review/state.json', state),
+      runtimeRevision: () => 'memory-runtime',
+      observeV1Worktrees: () => []
+    },
+    memorySnapshots: snapshots
+  }
+}
+
+function installCurrentMemoryState(context, p2, claimedWorktree) {
+  const legacy = context.persist.readState('/hub/skill-review/state.json')
+  const worktrees = {}
+  if (claimedWorktree) {
+    const identity = p2.identities.resolve(claimedWorktree)
+    worktrees[identity.pathKey] = {
+      schemaVersion: 1,
+      pathKey: identity.pathKey,
+      worktreeId: identity.worktreeId,
+      requestedSnapshot: DEFAULT_MEMORY_SNAPSHOT.snapshotId,
+      materializedSnapshot: DEFAULT_MEMORY_SNAPSHOT.snapshotId,
+      selectedSkills: ['ozdqp-development'],
+      claimState: 'claimed'
+    }
+  }
+  context.persist.writeJson('/hub/skill-review/state.json', {
+    schemaVersion: 2,
+    stateRevision: 1,
+    runtimeRevision: 'memory-runtime',
+    librarySnapshots: p2.memorySnapshots.map((manifest) => manifest.snapshotId).sort(),
+    worktrees,
+    items: legacy.items || [],
+    lastIngest: legacy.lastIngest || null
+  })
+}
+
+function memoryApplicationInfrastructure(context, options = {}) {
+  return {
+    p2: createMemoryP2Ports(context, options.p2),
+    transactions: createMemoryApplicationTransactions()
+  }
 }
 
 function createMemoryFs() {
@@ -381,15 +485,20 @@ function createFixture(options = {}) {
   const ledger = createMemoryRequestLedger()
   const legacyAttach = createMemoryLegacyAttachPort(fs, options.legacyAttach)
   const legacyDetach = createMemoryLegacyDetachPort(fs, options.legacyDetach)
+  const p2 = createMemoryP2Ports(context, options.p2)
+  if (options.currentP2) installCurrentMemoryState(context, p2, options.claimedWorktree)
+  const transactions = createMemoryApplicationTransactions()
   const app = createHubApplication({
     ...createLocalApplicationPorts(context),
     legacyAttach,
     legacyDetach,
     sessions,
     ledger,
+    p2,
+    transactions,
     trace: options.trace
   })
-  return { app, context, fs, ledger, legacyAttach, legacyDetach, links, sessions }
+  return { app, context, fs, ledger, legacyAttach, legacyDetach, links, p2, sessions, transactions }
 }
 
 function createMemoryInvocationTrace(overrides = {}) {
@@ -408,6 +517,9 @@ function createObservedFixture(options = {}) {
   const legacyAttach = createMemoryLegacyAttachPort(fs, options.legacyAttach)
   const legacyDetach = createMemoryLegacyDetachPort(fs, options.legacyDetach)
   const ports = createLocalApplicationPorts(context)
+  const p2 = createMemoryP2Ports(context, options.p2)
+  if (options.currentP2) installCurrentMemoryState(context, p2, options.claimedWorktree)
+  const transactions = createMemoryApplicationTransactions()
   const calls = { artifactApply: 0, stateWrite: 0, historyAppend: 0 }
   const queries = { ...ports.queries }
   const useCases = {
@@ -431,9 +543,22 @@ function createObservedFixture(options = {}) {
       }
     }
   }
-  options.configure?.({ calls, context, fs, ledger, legacyAttach, legacyDetach, queries, sessions, useCases })
-  const app = createHubApplication({ ...ports, queries, useCases, legacyAttach, legacyDetach, sessions, ledger })
-  return { app, calls, context, fs, ledger, legacyAttach, legacyDetach, links, queries, sessions, useCases }
+  options.configure?.({ calls, context, fs, ledger, legacyAttach, legacyDetach, p2, queries, sessions, transactions, useCases })
+  const app = createHubApplication({
+    ...ports,
+    queries,
+    useCases,
+    legacyAttach,
+    legacyDetach,
+    sessions,
+    ledger,
+    p2,
+    transactions
+  })
+  return {
+    app, calls, context, fs, ledger, legacyAttach, legacyDetach, links,
+    p2, queries, sessions, transactions, useCases
+  }
 }
 
 function hostEffectSnapshot(fixture) {
@@ -537,7 +662,11 @@ test('contracts publish one stable version, complete command corpora, audit type
     'readSkill',
     'listHistory',
     'listSessions',
-    'getSession'
+    'getSession',
+    'inspectSchema',
+    'listSnapshots',
+    'getSnapshot',
+    'getPin'
   ])
   assert.deepEqual(WRITE_COMMAND_KINDS, [
     'repairLegacy',
@@ -551,9 +680,12 @@ test('contracts publish one stable version, complete command corpora, audit type
     'chat',
     'analyze',
     'resumeSession',
-    'reapSessions'
+    'reapSessions',
+    'createSnapshot',
+    'setPin',
+    'migrateState'
   ])
-  assert.equal(new Set([...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_KINDS]).size, 19)
+  assert.equal(new Set([...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_KINDS]).size, 26)
   assert.deepEqual(HUB_ERROR_CODES, [
     'UNSUPPORTED_CONTRACT_VERSION',
     'INVALID_COMMAND_META',
@@ -573,6 +705,13 @@ test('contracts publish one stable version, complete command corpora, audit type
     'CONFLICT_EXTERNAL_LINK',
     'CONFLICT_CONTENT',
     'STATE_VERSION_UNSUPPORTED',
+    'STATE_CORRUPT',
+    'MIGRATION_REQUIRED',
+    'MIGRATION_PLAN_STALE',
+    'LOCK_BUSY',
+    'LOCK_NOT_OWNED',
+    'SNAPSHOT_NOT_FOUND',
+    'SNAPSHOT_INVALID',
     'RUNNER_UNAVAILABLE',
     'PORT_FAILURE',
     'UNSUPPORTED_COMMAND',
@@ -737,7 +876,6 @@ test('pure policies accept and reject recognition, claims, first attach, inbox t
     schemaVersion: 1,
     worktreeId: ' tree-1 ',
     librarySnapshot: ' library-sha ',
-    runtimeRevision: ' runtime-sha ',
     skills: [{ name: ' ozdqp-development ', snapshot: ' skill-sha ' }]
   }), {
     valid: true,
@@ -745,7 +883,6 @@ test('pure policies accept and reject recognition, claims, first attach, inbox t
       schemaVersion: 1,
       worktreeId: 'tree-1',
       librarySnapshot: 'library-sha',
-      runtimeRevision: 'runtime-sha',
       skills: [{ name: 'ozdqp-development', snapshot: 'skill-sha' }]
     }
   })
@@ -765,7 +902,7 @@ test('pure policies accept and reject recognition, claims, first attach, inbox t
     'unsupported-schema-version',
     'worktree-id-required',
     'library-snapshot-required',
-    'invalid-runtime-revision',
+    'runtime-revision-forbidden',
     'forbidden-skill',
     'duplicate-skill',
     'invalid-skill-name',
@@ -881,7 +1018,7 @@ test('legacy attach planner is pure, fail-closed, and emits only approved host e
 })
 
 test('all query commands execute through the shared Application against pure memory ports', async () => {
-  const { app, ledger, sessions } = createFixture()
+  const { app, ledger, sessions } = createFixture({ currentP2: true })
   const corpus = [
     ['status', {}],
     ['listSkills', {}],
@@ -889,7 +1026,11 @@ test('all query commands execute through the shared Application against pure mem
     ['readSkill', { path: 'skills/ozdqp-development' }],
     ['listHistory', { limit: 10, cursor: 'memory-cursor' }],
     ['listSessions', { statuses: ['waiting'] }],
-    ['getSession', { sessionId: 'waiting-1' }]
+    ['getSession', { sessionId: 'waiting-1' }],
+    ['inspectSchema', {}],
+    ['listSnapshots', {}],
+    ['getSnapshot', { snapshotId: DEFAULT_MEMORY_SNAPSHOT.snapshotId }],
+    ['getPin', { worktree: '/game-tree' }]
   ]
   assert.deepEqual(corpus.map(([kind]) => kind), QUERY_COMMAND_KINDS)
   for (const [index, [kind, input]] of corpus.entries()) {
@@ -906,6 +1047,12 @@ test('all query commands execute through the shared Application against pure mem
   assert.equal((await app.execute(command('listHistory', 'query-history', { limit: 10 }))).data.records[0].id, 'history-1')
   assert.deepEqual((await app.execute(command('listSessions', 'query-sessions', { statuses: ['waiting'] }))).data.sessions.map((item) => item.id), ['waiting-1'])
   assert.equal((await app.execute(command('getSession', 'query-session', { sessionId: 'waiting-1' }))).data.session.id, 'waiting-1')
+  assert.equal((await app.execute(command('inspectSchema', 'query-schema'))).data.status, 'current')
+  assert.equal((await app.execute(command('listSnapshots', 'query-snapshots'))).data.snapshots.length, 2)
+  assert.equal((await app.execute(command('getSnapshot', 'query-snapshot', {
+    snapshotId: DEFAULT_MEMORY_SNAPSHOT.snapshotId
+  }))).data.snapshot.snapshotId, DEFAULT_MEMORY_SNAPSHOT.snapshotId)
+  assert.equal((await app.execute(command('getPin', 'query-pin', { worktree: '/game-tree' }))).data.pin, null)
   assert.equal(ledger.entries.length, 0)
   assert.equal(ledger.events.length, 0)
   assert.ok(sessions.calls.list > 0)
@@ -1035,7 +1182,35 @@ test('every query command has a deterministic pure-memory refusal or port error'
         }
       }
     },
-    { kind: 'getSession', input: { sessionId: 'missing' }, code: 'NOT_FOUND' }
+    { kind: 'getSession', input: { sessionId: 'missing' }, code: 'NOT_FOUND' },
+    {
+      kind: 'inspectSchema',
+      input: {},
+      code: 'PORT_FAILURE',
+      retryable: true,
+      configure({ p2 }) {
+        p2.state.runtimeRevision = () => { throw new Error('runtime revision unavailable') }
+      }
+    },
+    {
+      kind: 'listSnapshots',
+      input: {},
+      code: 'PORT_FAILURE',
+      retryable: true,
+      configure({ p2 }) {
+        p2.snapshots.list = () => { throw new Error('snapshot inventory unavailable') }
+      }
+    },
+    {
+      kind: 'getSnapshot',
+      input: { snapshotId: `sha256:${'f'.repeat(64)}` },
+      code: 'SNAPSHOT_NOT_FOUND'
+    },
+    {
+      kind: 'getPin',
+      input: { worktree: '/game-tree' },
+      code: 'MIGRATION_REQUIRED'
+    }
   ]
   assert.deepEqual(corpus.map(({ kind }) => kind), QUERY_COMMAND_KINDS)
 
@@ -1151,6 +1326,34 @@ test('every write command executes once, replays once, and rejects a semantic re
       input: { sessionIds: ['running-1'] },
       conflict: { sessionIds: ['waiting-1'] },
       effects: expectedHostEffects({ sessionReap: 1 })
+    },
+    {
+      kind: 'createSnapshot',
+      input: {},
+      conflictKind: 'migrateState',
+      conflict: { mode: 'dryRun' },
+      events: 2,
+      effects: expectedHostEffects()
+    },
+    {
+      kind: 'setPin',
+      input: {
+        worktree: '/game-tree',
+        snapshotId: SECOND_MEMORY_SNAPSHOT.snapshotId
+      },
+      conflict: {
+        worktree: '/game-tree',
+        snapshotId: DEFAULT_MEMORY_SNAPSHOT.snapshotId
+      },
+      events: 2,
+      effects: expectedHostEffects(),
+      fixture: { currentP2: true, claimedWorktree: '/game-tree' }
+    },
+    {
+      kind: 'migrateState',
+      input: { mode: 'dryRun' },
+      conflict: { mode: 'commit', planHash: DEFAULT_MEMORY_SNAPSHOT.snapshotId },
+      effects: expectedHostEffects()
     }
   ]
   assert.deepEqual(corpus.map(({ kind }) => kind), WRITE_COMMAND_KINDS)
@@ -1162,15 +1365,16 @@ test('every write command executes once, replays once, and rejects a semantic re
     const first = await fixture.app.execute(request)
     assertSuccess(first, row.kind)
     assert.equal(first.meta.replayed, false)
-    assert.equal(first.events.length, 1)
-    assert.equal(first.events[0].type, 'command.succeeded')
-    assert.equal(first.events[0].requestId, requestId)
+    const eventCount = row.events || 1
+    assert.equal(first.events.length, eventCount)
+    assert.equal(first.events.at(-1).type, 'command.succeeded')
+    assert.equal(first.events.at(-1).requestId, requestId)
     assert.deepEqual(hostEffectSnapshot(fixture), row.effects)
     assert.equal(fixture.ledger.calls.begin, 1)
     assert.equal(fixture.ledger.calls.complete, 1)
     assert.equal(fixture.ledger.entries.length, 1)
     assert.equal(fixture.ledger.entries[0].status, 'completed')
-    assert.equal(fixture.ledger.events.length, 1)
+    assert.equal(fixture.ledger.events.length, eventCount)
 
     const replay = await fixture.app.execute(clone(request))
     assertSuccess(replay, row.kind)
@@ -1180,16 +1384,16 @@ test('every write command executes once, replays once, and rejects a semantic re
     assert.equal(fixture.ledger.calls.begin, 1)
     assert.equal(fixture.ledger.calls.complete, 1)
     assert.equal(fixture.ledger.entries.length, 1)
-    assert.equal(fixture.ledger.events.length, 1)
+    assert.equal(fixture.ledger.events.length, eventCount)
 
-    const conflict = await fixture.app.execute(command(row.kind, requestId, row.conflict))
+    const conflict = await fixture.app.execute(command(row.conflictKind || row.kind, requestId, row.conflict))
     assertFailure(conflict, 'REQUEST_ID_CONFLICT')
     assert.deepEqual(conflict.events, [])
     assert.deepEqual(hostEffectSnapshot(fixture), row.effects)
     assert.equal(fixture.ledger.calls.begin, 1)
     assert.equal(fixture.ledger.calls.complete, 1)
     assert.equal(fixture.ledger.entries.length, 1)
-    assert.equal(fixture.ledger.events.length, 1)
+    assert.equal(fixture.ledger.events.length, eventCount)
   }
 })
 
@@ -1276,6 +1480,29 @@ test('every write command caches one deterministic refusal without replaying hos
       code: 'RUNNER_UNAVAILABLE',
       retryable: true,
       fixture: { configure: runnerFailure('reap') }
+    },
+    {
+      kind: 'createSnapshot',
+      input: {},
+      code: 'SNAPSHOT_INVALID',
+      fixture: {
+        configure({ p2 }) {
+          p2.snapshots.observe = () => {
+            throw new TrustedSnapshotInvalidError()
+          }
+        }
+      }
+    },
+    {
+      kind: 'setPin',
+      input: { worktree: '/game-tree', snapshotId: DEFAULT_MEMORY_SNAPSHOT.snapshotId },
+      code: 'MIGRATION_REQUIRED'
+    },
+    {
+      kind: 'migrateState',
+      input: { mode: 'dryRun' },
+      code: 'SNAPSHOT_NOT_FOUND',
+      fixture: { p2: { snapshots: [] } }
     }
   ]
   assert.deepEqual(corpus.map(({ kind }) => kind), WRITE_COMMAND_KINDS)
@@ -1316,6 +1543,7 @@ test('Application turns a decision into generic low-level facts/effects without 
   const applied = []
   const app = createHubApplication({
     ...ports,
+    ...memoryApplicationInfrastructure(context),
     useCases: {
       ...ports.useCases,
       artifacts: {
@@ -1352,6 +1580,7 @@ test('a terminal same-action decision with a new requestId is a no-op with no se
   const calls = { inspect: 0, apply: 0, writeState: 0, appendHistory: 0 }
   const app = createHubApplication({
     ...ports,
+    ...memoryApplicationInfrastructure(context),
     useCases: {
       ...ports.useCases,
       state: {
@@ -1753,8 +1982,21 @@ test('two Application instances sharing one ledger replay sequentially without a
   const sessionsA = createMemorySessions({ now: () => FIXED_NOW })
   const sessionsB = createMemorySessions({ now: () => FIXED_NOW })
   const applicationPorts = createLocalApplicationPorts(context)
-  const appA = createHubApplication({ ...applicationPorts, sessions: sessionsA, ledger })
-  const appB = createHubApplication({ ...applicationPorts, sessions: sessionsB, ledger })
+  const p2 = createMemoryP2Ports(context)
+  const appA = createHubApplication({
+    ...applicationPorts,
+    sessions: sessionsA,
+    ledger,
+    p2,
+    transactions: createMemoryApplicationTransactions()
+  })
+  const appB = createHubApplication({
+    ...applicationPorts,
+    sessions: sessionsB,
+    ledger,
+    p2,
+    transactions: createMemoryApplicationTransactions()
+  })
   const request = command('chat', 'cross-instance', { intent: 'shared ledger replay' })
 
   const first = await appA.execute(request)
@@ -1857,12 +2099,17 @@ test('a successful handler is not reclassified or rerun when its outcome cannot 
     completions.push({ entry, event })
     throw new Error('ledger disk unavailable')
   }
-  const app = createHubApplication({ ...createLocalApplicationPorts(context), sessions, ledger })
+  const app = createHubApplication({
+    ...createLocalApplicationPorts(context),
+    ...memoryApplicationInfrastructure(context),
+    sessions,
+    ledger
+  })
   const request = command('chat', 'success-persist-failure', { intent: 'run once' })
 
   const result = await app.execute(request)
   assertFailure(result, 'PORT_FAILURE', true)
-  assert.equal(result.error.message, 'request outcome could not be persisted: host operation failed')
+  assert.equal(result.error.message, 'host operation failed')
   assert.doesNotMatch(result.error.message, /ledger disk unavailable/)
   assert.deepEqual(result.events, [])
   assert.equal(sessions.calls.start, 1)
@@ -1891,12 +2138,17 @@ test('a failed handler keeps its original failure audit when that outcome cannot
     completions.push({ entry, event })
     throw new Error('ledger disk unavailable')
   }
-  const app = createHubApplication({ ...createLocalApplicationPorts(context), sessions, ledger })
+  const app = createHubApplication({
+    ...createLocalApplicationPorts(context),
+    ...memoryApplicationInfrastructure(context),
+    sessions,
+    ledger
+  })
   const request = command('chat', 'failure-persist-failure', { intent: 'fail once' })
 
   const result = await app.execute(request)
   assertFailure(result, 'PORT_FAILURE', true)
-  assert.equal(result.error.message, 'request outcome could not be persisted: host operation failed')
+  assert.equal(result.error.message, 'host operation failed')
   assert.doesNotMatch(result.error.message, /ledger disk unavailable/)
   assert.deepEqual(result.events, [])
   assert.equal(sessions.calls.start, 1)
@@ -1964,13 +2216,14 @@ test('runtime and query port failures always resolve to PORT_FAILURE without rer
     const ledger = createMemoryRequestLedger()
     const app = createHubApplication({
       ...ports,
+      ...memoryApplicationInfrastructure(context),
       runtime: { ...ports.runtime, sha256: () => { throw new Error('hash port unavailable') } },
       sessions,
       ledger
     })
     const result = await app.execute(command('chat', 'hash-port-failure', { intent: 'must not start' }))
     assertFailure(result, 'PORT_FAILURE', true)
-    assert.equal(result.error.message, 'application port failed: host operation failed')
+    assert.equal(result.error.message, 'host operation failed')
     assert.doesNotMatch(result.error.message, /hash port unavailable/)
     assert.equal(sessions.calls.start, 0)
     assert.equal(ledger.entries.length, 0)
@@ -1984,6 +2237,7 @@ test('runtime and query port failures always resolve to PORT_FAILURE without rer
     let clockCalls = 0
     const app = createHubApplication({
       ...ports,
+      ...memoryApplicationInfrastructure(context),
       runtime: {
         ...ports.runtime,
         nowIso() {
@@ -1998,7 +2252,7 @@ test('runtime and query port failures always resolve to PORT_FAILURE without rer
     const request = command('chat', 'clock-port-failure', { intent: 'run once' })
     const result = await app.execute(request)
     assertFailure(result, 'PORT_FAILURE', true)
-    assert.equal(result.error.message, 'request outcome audit could not be created: host operation failed')
+    assert.equal(result.error.message, 'host operation failed')
     assert.doesNotMatch(result.error.message, /clock port unavailable during audit/)
     assert.equal(sessions.calls.start, 1)
     assert.equal(ledger.entries.length, 1)
@@ -2014,13 +2268,14 @@ test('runtime and query port failures always resolve to PORT_FAILURE without rer
     const ledger = createMemoryRequestLedger()
     const app = createHubApplication({
       ...ports,
+      ...memoryApplicationInfrastructure(context),
       runtime: { ...ports.runtime, nextId: () => { throw new Error('id port unavailable') } },
       sessions,
       ledger
     })
     const result = await app.execute(command('chat', 'id-port-failure', { intent: 'run once' }))
     assertFailure(result, 'PORT_FAILURE', true)
-    assert.equal(result.error.message, 'request outcome audit could not be created: host operation failed')
+    assert.equal(result.error.message, 'host operation failed')
     assert.doesNotMatch(result.error.message, /id port unavailable/)
     assert.equal(sessions.calls.start, 1)
     assert.equal(ledger.entries[0].status, 'started')
@@ -2033,6 +2288,7 @@ test('runtime and query port failures always resolve to PORT_FAILURE without rer
     const ledger = createMemoryRequestLedger()
     const app = createHubApplication({
       ...ports,
+      ...memoryApplicationInfrastructure(context),
       queries: { ...ports.queries, readStatusFacts: () => { throw new Error('status port unavailable') } },
       sessions,
       ledger
@@ -2153,6 +2409,7 @@ test('low-level state, Git, and artifact fact failures resolve to PORT_FAILURE b
     }
     const app = createHubApplication({
       ...ports,
+      ...memoryApplicationInfrastructure(context),
       useCases,
       sessions: createMemorySessions({ now: () => FIXED_NOW }),
       ledger: createMemoryRequestLedger()
@@ -2172,6 +2429,10 @@ test('every command kind rejects malformed runtime payloads before ports, handle
     ['listHistory', { limit: '10' }],
     ['listSessions', { statuses: ['waiting', 'unknown'] }],
     ['getSession', { sessionId: '   ' }],
+    ['inspectSchema', { unexpected: true }],
+    ['listSnapshots', { unexpected: true }],
+    ['getSnapshot', { snapshotId: 'not-a-snapshot' }],
+    ['getPin', { worktree: '' }],
     ['repairLegacy', { worktree: null }],
     ['applyLegacyAttach', { worktree: '/game-tree', sourcePolicy: 'force' }],
     ['applyLegacyDetach', { worktree: '/game-tree', sessionId: [] }],
@@ -2183,7 +2444,10 @@ test('every command kind rejects malformed runtime payloads before ports, handle
     ['chat', { intent: 42 }],
     ['analyze', { runner: { start: 'yes' } }],
     ['resumeSession', { sessionId: 'waiting-1', message: '' }],
-    ['reapSessions', { sessionIds: ['running-1', 42] }]
+    ['reapSessions', { sessionIds: ['running-1', 42] }],
+    ['createSnapshot', { unexpected: true }],
+    ['setPin', { worktree: '/game-tree', snapshotId: 'invalid' }],
+    ['migrateState', { mode: 'force' }]
   ]
   assert.deepEqual(malformed.map(([kind]) => kind), [...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_KINDS])
 
@@ -2299,6 +2563,7 @@ test('Local composition keeps tracing off by default and fails malformed explici
   const local = createLocalHost({
     packageRoot: '/package-not-needed-with-trace-disabled',
     context,
+    ...memoryApplicationInfrastructure(context),
     sessions,
     ledger,
     traceEnvironment: {}
@@ -2308,6 +2573,7 @@ test('Local composition keeps tracing off by default and fails malformed explici
   assert.throws(() => createLocalHost({
     packageRoot: '/package-not-read-before-gate-failure',
     context,
+    ...memoryApplicationInfrastructure(context),
     sessions,
     ledger,
     traceEnvironment: {

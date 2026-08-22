@@ -7,6 +7,81 @@ import type {
   SessionStartRequest
 } from './ports.js'
 import { portFault } from './port-fault.js'
+import type {
+  ApplicationTransactionDecision,
+  ApplicationTransactionIdentity,
+  ApplicationTransactionPort,
+  ApplicationTransactionSavepoint,
+  ApplicationWriteTransaction
+} from './transaction-port.js'
+
+export type MemoryApplicationTransactions = ApplicationTransactionPort & {
+  identities: ApplicationTransactionIdentity[]
+  calls: { enter: number; commit: number; abort: number }
+}
+
+/**
+ * Test-only transaction control. It verifies the explicit decision protocol;
+ * tests that need staged rollback provide a store-aware implementation.
+ */
+export function createMemoryApplicationTransactions(): MemoryApplicationTransactions {
+  const identities: ApplicationTransactionIdentity[] = []
+  const calls = { enter: 0, commit: 0, abort: 0 }
+  return {
+    identities,
+    calls,
+    async withWriteTransaction<T>(
+      identity: ApplicationTransactionIdentity,
+      callback: (
+        transaction: ApplicationWriteTransaction
+      ) => ApplicationTransactionDecision<T> | Promise<ApplicationTransactionDecision<T>>
+    ): Promise<T> {
+      identities.push({ ...identity })
+      calls.enter += 1
+      let active = true
+      let decided = false
+      let savepointOrdinal = 0
+      const savepoints = new Set<number>()
+      const control: ApplicationWriteTransaction = {
+        savepoint() {
+          if (!active) throw new Error('memory transaction is closed')
+          const ordinal = ++savepointOrdinal
+          savepoints.add(ordinal)
+          return { ordinal } as unknown as ApplicationTransactionSavepoint
+        },
+        rollbackTo(savepoint) {
+          if (!active || !savepoints.has((savepoint as unknown as { ordinal?: number }).ordinal || -1)) {
+            throw new Error('memory transaction savepoint is invalid')
+          }
+        },
+        commit<U>(value: U) {
+          if (!active || decided) throw new Error('memory transaction already has a decision')
+          decided = true
+          calls.commit += 1
+          return { kind: 'commit', value } as ApplicationTransactionDecision<U>
+        },
+        abort(error: unknown) {
+          if (!active || decided) throw new Error('memory transaction already has a decision')
+          decided = true
+          calls.abort += 1
+          return { kind: 'abort', error } as ApplicationTransactionDecision<never>
+        }
+      }
+      try {
+        const decision = await callback(control)
+        if (!decided || !decision || (decision.kind !== 'commit' && decision.kind !== 'abort')) {
+          throw new Error('memory transaction requires an explicit decision')
+        }
+        if (decision.kind === 'abort') {
+          throw decision.error instanceof Error ? decision.error : new Error(String(decision.error))
+        }
+        return decision.value
+      } finally {
+        active = false
+      }
+    }
+  }
+}
 
 export type MemoryLedger = RequestLedgerPort & {
   entries: RequestLedgerEntry[]

@@ -1,5 +1,6 @@
 import type { CommandMeta, JsonObject } from './common.js'
 import type { LegacyAttachSourcePolicy, LegacyVisibilityMode } from './legacy-attach.js'
+import type { Sha256Identifier } from './snapshot.js'
 import type { InboxDecisionAction, SessionStatus } from './state.js'
 
 export const QUERY_COMMAND_KINDS = [
@@ -9,7 +10,11 @@ export const QUERY_COMMAND_KINDS = [
   'readSkill',
   'listHistory',
   'listSessions',
-  'getSession'
+  'getSession',
+  'inspectSchema',
+  'listSnapshots',
+  'getSnapshot',
+  'getPin'
 ] as const
 
 export const WRITE_COMMAND_KINDS = [
@@ -24,7 +29,10 @@ export const WRITE_COMMAND_KINDS = [
   'chat',
   'analyze',
   'resumeSession',
-  'reapSessions'
+  'reapSessions',
+  'createSnapshot',
+  'setPin',
+  'migrateState'
 ] as const
 
 export type QueryCommandKind = (typeof QUERY_COMMAND_KINDS)[number]
@@ -57,6 +65,18 @@ export interface ListSessionsCommand extends BaseCommand<'listSessions'> {
 
 export interface GetSessionCommand extends BaseCommand<'getSession'> {
   sessionId: string
+}
+
+export interface InspectSchemaCommand extends BaseCommand<'inspectSchema'> {}
+
+export interface ListSnapshotsCommand extends BaseCommand<'listSnapshots'> {}
+
+export interface GetSnapshotCommand extends BaseCommand<'getSnapshot'> {
+  snapshotId: Sha256Identifier
+}
+
+export interface GetPinCommand extends BaseCommand<'getPin'> {
+  worktree: string
 }
 
 export interface RepairLegacyCommand extends BaseCommand<'repairLegacy'> {
@@ -138,6 +158,19 @@ export interface ReapSessionsCommand extends BaseCommand<'reapSessions'> {
   sessionIds?: readonly string[]
 }
 
+export interface CreateSnapshotCommand extends BaseCommand<'createSnapshot'> {}
+
+export interface SetPinCommand extends BaseCommand<'setPin'> {
+  worktree: string
+  snapshotId: Sha256Identifier
+  selectedSkills?: readonly string[]
+}
+
+export interface MigrateStateCommand extends BaseCommand<'migrateState'> {
+  mode: 'dryRun' | 'commit'
+  planHash?: Sha256Identifier
+}
+
 export type QueryCommand =
   | StatusCommand
   | ListSkillsCommand
@@ -146,6 +179,10 @@ export type QueryCommand =
   | ListHistoryCommand
   | ListSessionsCommand
   | GetSessionCommand
+  | InspectSchemaCommand
+  | ListSnapshotsCommand
+  | GetSnapshotCommand
+  | GetPinCommand
 
 export type WriteCommand =
   | RepairLegacyCommand
@@ -160,5 +197,8 @@ export type WriteCommand =
   | AnalyzeCommand
   | ResumeSessionCommand
   | ReapSessionsCommand
+  | CreateSnapshotCommand
+  | SetPinCommand
+  | MigrateStateCommand
 
 export type HubCommand = QueryCommand | WriteCommand

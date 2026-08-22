@@ -6,12 +6,15 @@ import test from 'node:test'
 import { hubRoot } from './helpers.mjs'
 
 function npmPackDryRun() {
-  const npmExecPath = String(process.env.npm_execpath || '')
-  const command = npmExecPath ? process.execPath : process.platform === 'win32' ? 'npm.cmd' : 'npm'
-  const args = npmExecPath
-    ? [npmExecPath, 'pack', '--dry-run', '--json', '--ignore-scripts']
-    : ['pack', '--dry-run', '--json', '--ignore-scripts']
-  return spawnSync(command, args, {
+  const npmExecPath = String(process.env.npm_execpath || path.join(
+    path.dirname(process.execPath),
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js'
+  ))
+  assert.equal(fs.existsSync(npmExecPath), true, `npm CLI is unavailable: ${npmExecPath}`)
+  return spawnSync(process.execPath, [npmExecPath, 'pack', '--dry-run', '--json', '--ignore-scripts'], {
     cwd: hubRoot,
     env: { ...process.env },
     encoding: 'utf8',
@@ -78,6 +81,11 @@ test('Local release tarball is a clean built distribution without source or mach
   for (const prefix of ['src/', 'test/', 'docs/', 'artifacts/', 'scripts/']) {
     assert.deepEqual(files.filter((file) => file.startsWith(prefix)), [], `${prefix} must not ship`)
   }
+  for (const runtimePrefix of ['.skill-graft-transactions/', 'skill-review/library/', 'skill-review/locks/']) {
+    assert.deepEqual(files.filter((file) => file.startsWith(runtimePrefix)), [], `${runtimePrefix} runtime data must not ship`)
+  }
+  const npmignore = fs.readFileSync(path.join(hubRoot, '.npmignore'), 'utf8')
+  assert.match(npmignore, /^\/\.skill-graft-transactions\/$/m)
   assert.deepEqual(
     files.filter((file) => /^dist\/core\/(?:install|sessions)(?:\.|\/)/.test(file)),
     [],

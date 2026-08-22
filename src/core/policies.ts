@@ -211,7 +211,6 @@ export type TreePinCandidate = {
   schemaVersion: number
   worktreeId: string
   librarySnapshot: string
-  runtimeRevision?: string
   skills: readonly SkillPinCandidate[]
 }
 
@@ -219,7 +218,6 @@ export type TreePin = {
   schemaVersion: typeof PIN_SCHEMA_VERSION
   worktreeId: string
   librarySnapshot: string
-  runtimeRevision?: string
   skills: readonly {
     name: string
     snapshot?: string
@@ -235,7 +233,7 @@ export type PinValidationErrorCode =
   | 'duplicate-skill'
   | 'forbidden-skill'
   | 'invalid-snapshot'
-  | 'invalid-runtime-revision'
+  | 'runtime-revision-forbidden'
 
 export type PinValidation =
   | { valid: true; pin: TreePin }
@@ -261,7 +259,6 @@ export function validatePin(
   const errors: Array<{ code: PinValidationErrorCode; field: string; value?: string }> = []
   const worktreeId = candidate.worktreeId.trim()
   const librarySnapshot = candidate.librarySnapshot.trim()
-  const runtimeRevision = candidate.runtimeRevision?.trim()
   if (candidate.schemaVersion !== PIN_SCHEMA_VERSION) {
     errors.push({ code: 'unsupported-schema-version', field: 'schemaVersion', value: String(candidate.schemaVersion) })
   }
@@ -270,8 +267,12 @@ export function validatePin(
   else if (!validRevision(librarySnapshot)) {
     errors.push({ code: 'invalid-snapshot', field: 'librarySnapshot', value: librarySnapshot })
   }
-  if (runtimeRevision != null && !validRevision(runtimeRevision)) {
-    errors.push({ code: 'invalid-runtime-revision', field: 'runtimeRevision', value: runtimeRevision })
+  if (Object.hasOwn(candidate, 'runtimeRevision')) {
+    errors.push({
+      code: 'runtime-revision-forbidden',
+      field: 'runtimeRevision',
+      value: String((candidate as TreePinCandidate & { runtimeRevision?: unknown }).runtimeRevision ?? '')
+    })
   }
   if (candidate.skills.length === 0) errors.push({ code: 'skills-required', field: 'skills' })
 
@@ -298,7 +299,6 @@ export function validatePin(
       schemaVersion: PIN_SCHEMA_VERSION,
       worktreeId,
       librarySnapshot,
-      runtimeRevision,
       skills
     }
   }

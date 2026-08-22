@@ -1,4 +1,5 @@
 .artifacts-local/
+/.skill-graft-transactions/
 .agents/
 .codex/
 .github/

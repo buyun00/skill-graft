@@ -5,13 +5,12 @@ import path from 'node:path'
 import os from 'node:os'
 import test from 'node:test'
 import { createHub } from '../dist/adapters/create-hub.js'
-import { createLocalApplicationPorts } from '../dist/adapters/local-application-ports.js'
 import { createLocalQueryPort } from '../dist/adapters/local-query-port.js'
 import {
-  createHubApplication,
   createMemoryRequestLedger,
   createMemorySessions
 } from '../dist/application/index.js'
+import { createLocalHost } from '../dist/local/create-local-host.js'
 import { CONTRACT_VERSION } from '../dist/contracts/index.js'
 import { RESIDENT_SKILLS } from '../dist/core/constants.js'
 import { recognizeWorktree } from '../dist/core/policies.js'
@@ -33,7 +32,6 @@ import {
   reapSessions,
   sessionExitFile
 } from '../dist/local/session/legacy-sessions.js'
-import { createLocalSessionPort } from '../dist/local/session/local-session-port.js'
 import { extractInboxSuggestion } from '../dist/core/analyze-completion-plan.js'
 import { hubRoot, makeFs, testHubRoot } from './helpers.mjs'
 
@@ -77,11 +75,14 @@ function command(kind, payload = {}) {
 }
 
 function applicationFor(context) {
-  return createHubApplication({
-    ...createLocalApplicationPorts(context),
+  return createLocalHost({
+    packageRoot: context.hubRoot,
+    dataRoot: context.hubRoot,
+    context,
+    runtimeRevision: 'core-test',
     sessions: createMemorySessions(),
     ledger: createMemoryRequestLedger()
-  })
+  }).application
 }
 
 test('C1 parseWorktreePorcelain reads a branch plus detached/locked/prunable', () => {
@@ -465,19 +466,22 @@ test('Application applies a reaped analyze completion without Local mutating inb
   ctx.fs.writeText(session.logFile, 'session id: 0123456789abcdef0123456789abcdef\n')
   ctx.fs.writeText(session.lastFile, '```json\n{"action":"reject","target":"","reason":"discardable smoke"}\n```\n')
   ctx.fs.writeText(sessionExitFile(ctx, session), '0\n')
-  const sessions = createLocalSessionPort(ctx, {
-    runner: {
-      enabled: () => false,
-      available: () => false,
-      start: () => 0,
-      pidAlive: () => false
+  const host = createLocalHost({
+    packageRoot: dir,
+    dataRoot: dir,
+    context: ctx,
+    runtimeRevision: 'core-test',
+    ledger: createMemoryRequestLedger(),
+    localSessionOptions: {
+      runner: {
+        enabled: () => false,
+        available: () => false,
+        start: () => 0,
+        pidAlive: () => false
+      }
     }
   })
-  const app = createHubApplication({
-    ...createLocalApplicationPorts(ctx),
-    sessions,
-    ledger: createMemoryRequestLedger()
-  })
+  const app = host.application
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'skill-review', 'state.json'), 'utf8')).items[0].status, 'queued')
   const result = await app.execute(command('reapSessions', { sessionIds: [session.id] }))
   assert.equal(result.ok, true, JSON.stringify(result))

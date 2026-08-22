@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import { createHub } from '../adapters/create-hub.js'
 import { API_PORT } from '../local/lifecycle/install-domain.js'
 import { createLocalHost, type LocalHost } from '../local/create-local-host.js'
+import { coherentDataRootEnvironment, resolveLocalDataRoot } from '../local/data-root.js'
 import { createCodexSessionRunner } from '../local/session/codex-session-runner.js'
 import { createInstallHost, type InstallHost } from '../adapters/install-host.js'
 
@@ -382,7 +383,7 @@ export async function reapDaemonSessions(
 export async function runDaemon(opts: DaemonRunOptions) {
   const host = opts.host || createInstallHost()
   const packageRoot = resolve(opts.packageRoot || opts.hubRoot)
-  const dataRoot = resolve(opts.dataRoot || process.env.HUB_ROOT || packageRoot)
+  const dataRoot = resolveLocalDataRoot({ packageRoot, dataRoot: opts.dataRoot })
   const port = opts.port || Number(process.env.HUB_API_PORT || API_PORT)
   const intervalMs = opts.intervalMs || 5000
   const files = reviewFiles(dataRoot)
@@ -488,7 +489,11 @@ export async function runDaemon(opts: DaemonRunOptions) {
       out = fs.openSync(files.logFile, 'a')
       child = spawn(process.execPath, [serverPath], {
         cwd: packageRoot,
-        env: { ...process.env, HUB_ROOT: dataRoot, HUB_API_PORT: String(port) },
+        env: {
+          ...process.env,
+          ...coherentDataRootEnvironment(dataRoot, host.platform),
+          HUB_API_PORT: String(port)
+        },
         stdio: ['ignore', out, out],
         windowsHide: true
       })

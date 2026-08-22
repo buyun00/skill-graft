@@ -1,5 +1,6 @@
 import {
   CONTRACT_VERSION,
+  HUB_STATE_SCHEMA_VERSION,
   QUERY_COMMAND_KINDS,
   UNKNOWN_COMMAND_KIND,
   WRITE_COMMAND_KINDS,
@@ -10,11 +11,18 @@ import {
   type HubCommandResult,
   type HubError,
   type HubErrorCode,
+  type HubStateV2,
   type InboxItemView,
   type LegacyAttachSourcePolicy,
+  type LibrarySnapshotManifestV1,
+  type Sha256Identifier,
   type SessionKind,
   type SessionTarget,
-  type SessionView
+  type SessionView,
+  type WriteCommandKind,
+  isPortableOpaqueIdentifier,
+  validateHubStateV2,
+  validateLibrarySnapshotManifestV1
 } from '../contracts/index.js'
 import { planLegacyAttach, type LegacyAttachPlanDecision } from '../core/legacy-attach.js'
 import { planLegacyDetach, type LegacyDetachPlanDecision } from '../core/legacy-detach.js'
@@ -37,26 +45,53 @@ import {
   recognizeWorktree
 } from '../core/policies.js'
 import {
+  planV1ToV2Migration,
+  validateLegacyHubStateV1,
+  verifyMigrationPlanHash,
+  type LegacyHubStateV1
+} from '../core/migration.js'
+import {
+  canonicalJson,
+  compareUtf8Bytes,
+  type CanonicalJsonValue
+} from '../core/canonical.js'
+import { createLibrarySnapshotManifest, verifyLibrarySnapshotManifest } from '../core/snapshot.js'
+import { transitionWorktreePin } from '../core/worktree-pin.js'
+import {
   projectHubStatus,
   projectSkillInventory,
   projectWorktreeList
 } from '../core/query-projections.js'
 import type {
+  ApplicationRecoveryPort,
   ApplicationRuntimePort,
   HubQueryPort,
   InvocationTracePort,
   LegacyAttachPort,
   LegacyDetachPort,
+  P2ApplicationPorts,
   RequestLedgerEntry,
   RequestLedgerPort,
   SessionPort,
-  SessionStartRequest
+  SessionStartRequest,
+  WorktreeIdentity
 } from './ports.js'
+import type { HubStateRepositoryPort } from './use-case-ports.js'
+import {
+  APPLICATION_TRANSACTION_ERROR_CODES,
+  isApplicationTransactionError,
+  type ApplicationTransactionError,
+  type ApplicationTransactionIdentity,
+  type ApplicationTransactionPort,
+  type ApplicationWriteTransaction
+} from './transaction-port.js'
 import type { SharedUseCasePorts } from './use-case-ports.js'
 import { portFaultError } from './port-fault.js'
 
 const QUERY_KINDS = new Set<string>(QUERY_COMMAND_KINDS)
 const WRITE_KINDS = new Set<string>(WRITE_COMMAND_KINDS)
+const SHA256_IDENTIFIER = /^sha256:[0-9a-f]{64}$/
+const GAME_REPOSITORY_ID_DOMAIN = 'skill-graft/game-repository-identity/v1'
 
 class ApplicationFault extends Error {
   constructor(
@@ -74,12 +109,15 @@ export type HubApplication = {
 
 export type HubApplicationOptions = {
   runtime: ApplicationRuntimePort
+  recovery?: ApplicationRecoveryPort
   queries: HubQueryPort
   useCases: SharedUseCasePorts
   legacyAttach: LegacyAttachPort
   legacyDetach: LegacyDetachPort
   sessions: SessionPort
   ledger: RequestLedgerPort
+  p2: P2ApplicationPorts
+  transactions: ApplicationTransactionPort
   trace?: InvocationTracePort
   handler?: 'application.commandBus'
 }
@@ -109,6 +147,13 @@ function digestPayload(command: HubCommand): unknown {
         dispatch: command.dispatch ?? false,
         dryRun: command.dryRun ?? false
       }
+    case 'setPin':
+      return {
+        ...payload,
+        ...(command.selectedSkills === undefined
+          ? {}
+          : { selectedSkills: [...command.selectedSkills].sort(compareUtf8Bytes) })
+      }
     case 'attach':
     case 'detach':
     case 'edit':
@@ -132,11 +177,41 @@ function commandDigest(runtime: ApplicationRuntimePort, command: HubCommand): st
   return runtime.sha256(canonical({ contractVersion: command.meta.contractVersion, ...digestPayload(command) as object }))
 }
 
+const TRANSACTION_ERROR_CODES = new Set<string>(APPLICATION_TRANSACTION_ERROR_CODES)
+
+function transactionErrorOf(value: unknown): HubError | null {
+  if (!isApplicationTransactionError(value)) return null
+  const error = value as ApplicationTransactionError & { retryAfterMs?: unknown }
+  if (typeof error.code !== 'string' || !TRANSACTION_ERROR_CODES.has(error.code)) return null
+  const code = error.code as ApplicationTransactionError['code']
+  const retryAfter = typeof error.details?.retryAfterMs === 'number'
+    ? error.details.retryAfterMs
+    : typeof error.retryAfterMs === 'number'
+      ? error.retryAfterMs
+      : undefined
+  const details = Number.isSafeInteger(retryAfter) && (retryAfter as number) >= 0
+    ? { retryAfterMs: retryAfter as number }
+    : undefined
+  if (code === 'LOCK_BUSY') {
+    return { code, message: 'write lock is busy', retryable: true, details }
+  }
+  if (code === 'LOCK_NOT_OWNED') {
+    return { code, message: 'write lease is no longer owned', retryable: true }
+  }
+  if (code === 'STATE_CORRUPT') {
+    return { code, message: 'durable state is corrupt', retryable: false }
+  }
+  if (code === 'SNAPSHOT_INVALID') {
+    return { code, message: 'library snapshot is invalid', retryable: false }
+  }
+  return { code: 'PORT_FAILURE', message: 'write transaction failed', retryable: true }
+}
+
 function errorOf(error: unknown): HubError {
   if (error instanceof ApplicationFault) {
     return { code: error.code, message: error.message, retryable: error.retryable }
   }
-  return portFaultError(error) || {
+  return transactionErrorOf(error) || portFaultError(error) || {
     code: 'PORT_FAILURE',
     message: 'host operation failed',
     retryable: true
@@ -192,6 +267,7 @@ const DECISION_ACTIONS = new Set(['adopt', 'merge', 'reject'])
 const LEGACY_SOURCE_POLICIES = new Set(['requireMatch', 'preferLibrary', 'promoteFromWorktree'])
 const LEGACY_VISIBILITY_MODES = new Set(['disable', 'preserve'])
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
+const SKILL_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 
 function isRecord(value: unknown): value is RuntimeRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -204,7 +280,7 @@ function invalid(message: string): never {
 function assertAllowedFields(command: RuntimeRecord, payloadFields: readonly string[]) {
   const allowed = new Set(['kind', 'meta', ...payloadFields])
   const unexpected = Object.keys(command).find((key) => !allowed.has(key))
-  if (unexpected) invalid(`${String(command.kind)} contains unsupported field: ${unexpected}`)
+  if (unexpected) invalid('command contains unsupported fields')
 }
 
 function requireString(command: RuntimeRecord, field: string, allowEmpty = false): string {
@@ -242,6 +318,28 @@ function optionalBoolean(command: RuntimeRecord, field: string) {
   if (value !== undefined && typeof value !== 'boolean') invalid(`${field} must be a boolean`)
 }
 
+function requireSha256(command: RuntimeRecord, field: string): Sha256Identifier {
+  const value = command[field]
+  if (typeof value !== 'string' || !SHA256_IDENTIFIER.test(value)) {
+    invalid(`${field} must be a full lowercase SHA-256 identifier`)
+  }
+  return value as Sha256Identifier
+}
+
+function validateSelectedSkills(value: unknown): void {
+  if (value === undefined) return
+  if (!Array.isArray(value) || value.length > 512) invalid('selectedSkills must be an array of skill identifiers')
+  const seen = new Set<string>()
+  for (const skill of value) {
+    if (typeof skill !== 'string' || !SKILL_IDENTIFIER.test(skill)) {
+      invalid('selectedSkills must contain only skill identifiers')
+    }
+    const folded = skill.toLocaleLowerCase('en-US')
+    if (seen.has(folded)) invalid('selectedSkills must not contain portable duplicates')
+    seen.add(folded)
+  }
+}
+
 function isJsonValue(value: unknown, ancestors = new Set<object>()): boolean {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
   if (typeof value === 'number') return Number.isFinite(value)
@@ -259,7 +357,7 @@ function validateRunner(value: unknown) {
   if (value === undefined) return
   if (!isRecord(value)) invalid('runner must be an object')
   const unexpected = Object.keys(value).find((key) => !['profile', 'quality', 'start', 'wait', 'metadata'].includes(key))
-  if (unexpected) invalid(`runner contains unsupported field: ${unexpected}`)
+  if (unexpected) invalid('runner contains unsupported fields')
   optionalString(value, 'profile', false)
   optionalString(value, 'quality', false)
   optionalBoolean(value, 'start')
@@ -275,6 +373,9 @@ function validatePayload(command: HubCommand) {
     case 'status':
     case 'listSkills':
     case 'listWorktrees':
+    case 'inspectSchema':
+    case 'listSnapshots':
+    case 'createSnapshot':
       assertAllowedFields(value, [])
       return
     case 'readSkill':
@@ -297,6 +398,14 @@ function validatePayload(command: HubCommand) {
     case 'getSession':
       assertAllowedFields(value, ['sessionId'])
       requireIdentifier(value, 'sessionId')
+      return
+    case 'getSnapshot':
+      assertAllowedFields(value, ['snapshotId'])
+      requireSha256(value, 'snapshotId')
+      return
+    case 'getPin':
+      assertAllowedFields(value, ['worktree'])
+      requireString(value, 'worktree')
       return
     case 'repairLegacy':
       assertAllowedFields(value, ['worktree'])
@@ -375,6 +484,18 @@ function validatePayload(command: HubCommand) {
       if (value.sessionIds !== undefined && (!Array.isArray(value.sessionIds) || value.sessionIds.some((item) => !validIdentifier(item)))) {
         invalid('sessionIds must contain only safe identifiers')
       }
+      return
+    case 'setPin':
+      assertAllowedFields(value, ['worktree', 'snapshotId', 'selectedSkills'])
+      requireString(value, 'worktree')
+      requireSha256(value, 'snapshotId')
+      validateSelectedSkills(value.selectedSkills)
+      return
+    case 'migrateState':
+      assertAllowedFields(value, ['mode', 'planHash'])
+      if (value.mode !== 'dryRun' && value.mode !== 'commit') invalid('mode must be dryRun or commit')
+      if (value.mode === 'commit') requireSha256(value, 'planHash')
+      else if (value.planHash !== undefined) invalid('planHash is only valid for commit mode')
       return
   }
 }
@@ -768,6 +889,466 @@ async function executeDecisionUseCase(
   return planned.plan
 }
 
+function stateChangedEvent(
+  runtime: ApplicationRuntimePort,
+  command: HubCommand,
+  subject: string,
+  details: Record<string, string | number | boolean | null>
+): AuditEvent {
+  return {
+    eventVersion: CONTRACT_VERSION,
+    id: runtime.nextId('audit'),
+    type: 'state.changed',
+    at: runtime.nowIso(),
+    requestId: command.meta.requestId,
+    hostId: command.meta.hostId,
+    transport: command.meta.transport,
+    commandKind: command.kind,
+    outcome: 'succeeded',
+    subject,
+    details
+  }
+}
+
+function nextStateRevision(state: HubStateV2): number {
+  if (!Number.isSafeInteger(state.stateRevision) || state.stateRevision >= Number.MAX_SAFE_INTEGER) {
+    throw new ApplicationFault('STATE_CORRUPT', 'state revision cannot be advanced')
+  }
+  return state.stateRevision + 1
+}
+
+function opaqueSha256Identifier(
+  runtime: ApplicationRuntimePort,
+  domain: string,
+  value: string
+): Sha256Identifier {
+  const raw = runtime.sha256(`${domain}\0${value}`).toLowerCase()
+  const identifier = (raw.startsWith('sha256:') ? raw : `sha256:${raw}`) as Sha256Identifier
+  if (!SHA256_IDENTIFIER.test(identifier)) {
+    throw new ApplicationFault('PORT_FAILURE', 'runtime returned an invalid SHA-256 digest', true)
+  }
+  return identifier
+}
+
+function gameRepositoryId(runtime: ApplicationRuntimePort, locatorOrId: string): Sha256Identifier {
+  return SHA256_IDENTIFIER.test(locatorOrId)
+    ? locatorOrId as Sha256Identifier
+    : opaqueSha256Identifier(runtime, GAME_REPOSITORY_ID_DOMAIN, locatorOrId)
+}
+
+type P2StateObservation = {
+  status: 'empty' | 'legacy' | 'current' | 'unsupported'
+  detectedSchemaVersion: number | null
+  stateRevision: number | null
+  runtimeRevision: string
+  current?: HubStateV2
+  legacy?: LegacyHubStateV1
+}
+
+function strictLegacyStateFrom(value: RuntimeRecord | null): LegacyHubStateV1 {
+  if (!value) {
+    return { schemaVersion: 1, stateRevision: 0, items: [], lastIngest: null }
+  }
+  const validation = validateLegacyHubStateV1(value)
+  if (!validation.valid) throw new ApplicationFault('STATE_CORRUPT', 'legacy state failed validation')
+  return validation.value
+}
+
+function checkedSnapshotManifest(value: unknown): LibrarySnapshotManifestV1 {
+  const validation = validateLibrarySnapshotManifestV1(value)
+  if (!validation.valid || !verifyLibrarySnapshotManifest(validation.value)) {
+    throw new ApplicationFault('SNAPSHOT_INVALID', 'library snapshot failed shared integrity validation')
+  }
+  return validation.value
+}
+
+async function physicalSnapshots(p2: P2ApplicationPorts): Promise<readonly LibrarySnapshotManifestV1[]> {
+  const manifests = [...await p2.snapshots.list()].map(checkedSnapshotManifest)
+    .sort((left, right) => compareUtf8Bytes(left.snapshotId, right.snapshotId))
+  for (let index = 1; index < manifests.length; index += 1) {
+    if (manifests[index - 1].snapshotId === manifests[index].snapshotId) {
+      throw new ApplicationFault('SNAPSHOT_INVALID', 'snapshot repository contains duplicate manifests')
+    }
+  }
+  return manifests
+}
+
+function assertRegisteredSnapshots(
+  state: HubStateV2,
+  physical: readonly LibrarySnapshotManifestV1[]
+): void {
+  const available = new Set(physical.map((manifest) => manifest.snapshotId))
+  if (state.librarySnapshots.some((snapshotId) => !available.has(snapshotId))) {
+    throw new ApplicationFault('STATE_CORRUPT', 'HubStateV2 references a missing library snapshot')
+  }
+}
+
+async function checkedSnapshotRead(
+  p2: P2ApplicationPorts,
+  snapshotId: Sha256Identifier
+): Promise<LibrarySnapshotManifestV1 | null> {
+  const raw = await p2.snapshots.read(snapshotId)
+  if (raw == null) return null
+  const manifest = checkedSnapshotManifest(raw)
+  if (manifest.snapshotId !== snapshotId) {
+    throw new ApplicationFault('SNAPSHOT_INVALID', 'snapshot repository returned a mismatched manifest')
+  }
+  return manifest
+}
+
+async function inspectP2State(
+  p2: P2ApplicationPorts,
+  knownPhysical?: readonly LibrarySnapshotManifestV1[],
+  verifySnapshotReferences = true
+): Promise<P2StateObservation> {
+  const runtimeRevision = (await p2.state.runtimeRevision()).trim()
+  if (!isPortableOpaqueIdentifier(runtimeRevision)) {
+    throw new ApplicationFault('PORT_FAILURE', 'runtime revision is unavailable or invalid', true)
+  }
+  const document = await p2.state.readDocument()
+  if (document == null) {
+    return {
+      status: 'empty',
+      detectedSchemaVersion: null,
+      stateRevision: null,
+      runtimeRevision,
+      legacy: strictLegacyStateFrom(null)
+    }
+  }
+  if (!isRecord(document)) throw new ApplicationFault('STATE_CORRUPT', 'state document must be an object')
+  if (document.schemaVersion === HUB_STATE_SCHEMA_VERSION) {
+    const validation = validateHubStateV2(document)
+    if (!validation.valid) throw new ApplicationFault('STATE_CORRUPT', 'HubStateV2 validation failed')
+    if (verifySnapshotReferences) {
+      assertRegisteredSnapshots(validation.value, knownPhysical ?? await physicalSnapshots(p2))
+    }
+    return {
+      status: 'current',
+      detectedSchemaVersion: HUB_STATE_SCHEMA_VERSION,
+      stateRevision: validation.value.stateRevision,
+      runtimeRevision,
+      current: validation.value
+    }
+  }
+  const detected = typeof document.schemaVersion === 'number'
+    ? document.schemaVersion
+    : typeof document.version === 'number'
+      ? document.version
+      : null
+  if (detected === 1) {
+    const legacy = strictLegacyStateFrom(document)
+    const revision = legacy.stateRevision ?? null
+    return {
+      status: 'legacy',
+      detectedSchemaVersion: 1,
+      stateRevision: typeof revision === 'number' ? revision : null,
+      runtimeRevision,
+      legacy
+    }
+  }
+  return {
+    status: 'unsupported',
+    detectedSchemaVersion: detected,
+    stateRevision: null,
+    runtimeRevision
+  }
+}
+
+async function assertWriteSchemaCompatible(p2: P2ApplicationPorts): Promise<void> {
+  const inspection = await inspectP2State(p2, undefined, false)
+  if (inspection.status === 'unsupported') {
+    throw new ApplicationFault('STATE_VERSION_UNSUPPORTED', 'state schema version is unsupported')
+  }
+}
+
+async function requireCurrentState(p2: P2ApplicationPorts): Promise<HubStateV2> {
+  const inspection = await inspectP2State(p2)
+  if (inspection.status === 'legacy' || inspection.status === 'empty') {
+    throw new ApplicationFault('MIGRATION_REQUIRED', 'state migration is required')
+  }
+  if (inspection.status !== 'current') {
+    throw new ApplicationFault('STATE_VERSION_UNSUPPORTED', 'state schema version is unsupported')
+  }
+  if (!inspection.current) throw new ApplicationFault('STATE_CORRUPT', 'current state is unavailable')
+  return inspection.current
+}
+
+function createApplicationInboxStatePort(
+  runtime: ApplicationRuntimePort,
+  p2: P2ApplicationPorts,
+  legacy: HubStateRepositoryPort
+): HubStateRepositoryPort {
+  return {
+    async readState() {
+      const inspection = await inspectP2State(p2)
+      if (inspection.status === 'unsupported') {
+        throw new ApplicationFault('STATE_VERSION_UNSUPPORTED', 'state schema version is unsupported')
+      }
+      if (inspection.status !== 'current') return legacy.readState()
+      if (!inspection.current) throw new ApplicationFault('STATE_CORRUPT', 'current state is unavailable')
+      const lastIngest = inspection.current.lastIngest
+      const configuredGameRepo = lastIngest ? await legacy.configuredGameRepo() : null
+      return {
+        version: HUB_STATE_SCHEMA_VERSION,
+        items: inspection.current.items,
+        lastIngest: lastIngest
+          ? {
+              ref: lastIngest.ref,
+              old: lastIngest.old,
+              new: lastIngest.new,
+              gameRepo: configuredGameRepo?.trim() || lastIngest.gameRepoId
+            }
+          : null
+      }
+    },
+    async writeState(next) {
+      const inspection = await inspectP2State(p2)
+      if (inspection.status === 'unsupported') {
+        throw new ApplicationFault('STATE_VERSION_UNSUPPORTED', 'state schema version is unsupported')
+      }
+      if (inspection.status !== 'current') return legacy.writeState(next)
+      if (!inspection.current) throw new ApplicationFault('STATE_CORRUPT', 'current state is unavailable')
+      const currentLastIngest = inspection.current.lastIngest
+      const nextLastIngest = next.lastIngest
+      const preservesIngestIdentity = Boolean(currentLastIngest && nextLastIngest
+        && currentLastIngest.ref === nextLastIngest.ref
+        && currentLastIngest.old === nextLastIngest.old
+        && currentLastIngest.new === nextLastIngest.new)
+      await p2.state.writeV2({
+        ...inspection.current,
+        stateRevision: nextStateRevision(inspection.current),
+        items: next.items,
+        lastIngest: nextLastIngest
+          ? {
+              ref: nextLastIngest.ref,
+              old: nextLastIngest.old,
+              new: nextLastIngest.new,
+              gameRepoId: preservesIngestIdentity
+                ? currentLastIngest!.gameRepoId
+                : gameRepositoryId(runtime, nextLastIngest.gameRepo)
+            }
+          : null
+      })
+    },
+    appendHistory: (write) => legacy.appendHistory(write),
+    configuredGameRepo: () => legacy.configuredGameRepo(),
+    listAttachedWorktrees: () => legacy.listAttachedWorktrees()
+  }
+}
+
+async function visibleSnapshots(p2: P2ApplicationPorts): Promise<readonly LibrarySnapshotManifestV1[]> {
+  const physical = await physicalSnapshots(p2)
+  const inspection = await inspectP2State(p2, physical)
+  if (inspection.status === 'unsupported') {
+    throw new ApplicationFault('STATE_VERSION_UNSUPPORTED', 'state schema version is unsupported')
+  }
+  if (inspection.status !== 'current') return physical
+  if (!inspection.current) throw new ApplicationFault('STATE_CORRUPT', 'current state is unavailable')
+  const registered = new Set(inspection.current.librarySnapshots)
+  return physical.filter((manifest) => registered.has(manifest.snapshotId))
+}
+
+async function executeCreateSnapshot(
+  runtime: ApplicationRuntimePort,
+  p2: P2ApplicationPorts,
+  businessEvents: AuditEvent[],
+  command: Extract<HubCommand, { kind: 'createSnapshot' }>
+) {
+  const inspection = await inspectP2State(p2)
+  if (inspection.status === 'unsupported') {
+    throw new ApplicationFault('STATE_VERSION_UNSUPPORTED', 'state schema version is unsupported')
+  }
+  const observation = await p2.snapshots.observe()
+  const approved = createLibrarySnapshotManifest({
+    source: observation.source,
+    createdAt: runtime.nowIso(),
+    files: observation.files
+  })
+  if (!approved.ok) throw new ApplicationFault('SNAPSHOT_INVALID', 'library snapshot facts are invalid')
+  const captured = await p2.snapshots.store(observation.captureId, approved.manifest)
+  const storedManifest = checkedSnapshotManifest(captured.manifest)
+  if (storedManifest.snapshotId !== approved.manifest.snapshotId) {
+    throw new ApplicationFault('SNAPSHOT_INVALID', 'snapshot repository stored a mismatched manifest')
+  }
+  let registered = false
+  if (inspection.status === 'current') {
+    const state = inspection.current
+    if (!state) throw new ApplicationFault('STATE_CORRUPT', 'current state is unavailable')
+    if (!state.librarySnapshots.includes(storedManifest.snapshotId)) {
+      const librarySnapshots = [...state.librarySnapshots, storedManifest.snapshotId].sort(compareUtf8Bytes)
+      await p2.state.writeV2({
+        ...state,
+        stateRevision: nextStateRevision(state),
+        librarySnapshots
+      })
+      registered = true
+    }
+  }
+  businessEvents.push(stateChangedEvent(runtime, command, `snapshot:${storedManifest.snapshotId}`, {
+    change: registered ? 'snapshot-registered' : 'snapshot-captured',
+    snapshotId: storedManifest.snapshotId,
+    deduplicated: captured.deduplicated
+  }))
+  return {
+    action: 'createSnapshot' as const,
+    snapshot: storedManifest,
+    deduplicated: captured.deduplicated
+  }
+}
+
+async function requireLockedWorktreeIdentity(
+  p2: P2ApplicationPorts,
+  lockedIdentity: WorktreeIdentity | undefined,
+  worktree: string
+): Promise<WorktreeIdentity> {
+  const identity = await p2.identities.resolve(worktree)
+  if (!lockedIdentity
+    || identity.pathKey !== lockedIdentity.pathKey
+    || identity.worktreeId !== lockedIdentity.worktreeId) {
+    throw new ApplicationFault('LOCK_NOT_OWNED', 'worktree identity changed while acquiring the write lock', true)
+  }
+  return identity
+}
+
+async function executeSetPin(
+  runtime: ApplicationRuntimePort,
+  p2: P2ApplicationPorts,
+  lockedIdentity: WorktreeIdentity | undefined,
+  businessEvents: AuditEvent[],
+  command: Extract<HubCommand, { kind: 'setPin' }>
+) {
+  const identity = await requireLockedWorktreeIdentity(p2, lockedIdentity, command.worktree)
+  const state = await requireCurrentState(p2)
+  if (!state.librarySnapshots.includes(command.snapshotId)) {
+    throw new ApplicationFault('SNAPSHOT_NOT_FOUND', 'requested library snapshot is not registered')
+  }
+  const snapshot = await checkedSnapshotRead(p2, command.snapshotId)
+  if (!snapshot) throw new ApplicationFault('SNAPSHOT_NOT_FOUND', 'requested library snapshot was not found')
+  const current = state.worktrees[identity.pathKey]
+  if (!current || current.claimState !== 'claimed' || current.worktreeId !== identity.worktreeId) {
+    throw new ApplicationFault('INVALID_PIN', 'setPin requires an existing claimed worktree pin')
+  }
+  const transition = transitionWorktreePin(current, {
+    kind: 'setRequested',
+    requestedSnapshot: command.snapshotId,
+    selectedSkills: command.selectedSkills ?? current.selectedSkills
+  })
+  if (!transition.ok) throw new ApplicationFault('INVALID_PIN', 'requested pin transition is invalid')
+  if (!transition.idempotent) {
+    await p2.state.writeV2({
+      ...state,
+      stateRevision: nextStateRevision(state),
+      worktrees: { ...state.worktrees, [identity.pathKey]: transition.pin }
+    })
+  }
+  businessEvents.push(stateChangedEvent(runtime, command, `worktree:${identity.pathKey}`, {
+    change: 'pin-requested',
+    pathKey: identity.pathKey,
+    snapshotId: command.snapshotId,
+    changed: !transition.idempotent
+  }))
+  return {
+    action: 'setPin' as const,
+    pathKey: identity.pathKey,
+    worktreeId: identity.worktreeId,
+    pin: transition.pin,
+    changed: !transition.idempotent
+  }
+}
+
+function defaultMigrationSnapshot(
+  manifests: readonly LibrarySnapshotManifestV1[]
+): Sha256Identifier {
+  const ordered = [...manifests].sort((left, right) => {
+    return compareUtf8Bytes(left.createdAt, right.createdAt)
+      || compareUtf8Bytes(left.snapshotId, right.snapshotId)
+  })
+  const selected = ordered.at(-1)
+  if (!selected) throw new ApplicationFault('SNAPSHOT_NOT_FOUND', 'migration requires a library snapshot')
+  return selected.snapshotId
+}
+
+async function executeMigration(
+  runtime: ApplicationRuntimePort,
+  p2: P2ApplicationPorts,
+  businessEvents: AuditEvent[],
+  command: Extract<HubCommand, { kind: 'migrateState' }>
+) {
+  const inspection = await inspectP2State(p2)
+  if (inspection.status === 'current') {
+    const state = inspection.current
+    if (!state) throw new ApplicationFault('STATE_CORRUPT', 'current state is unavailable')
+    return {
+      action: 'migrateState' as const,
+      mode: command.mode,
+      status: 'already-current' as const,
+      plan: null,
+      state
+    }
+  }
+  if (inspection.status === 'unsupported') {
+    throw new ApplicationFault('STATE_VERSION_UNSUPPORTED', 'state schema version is unsupported')
+  }
+  const snapshots = await physicalSnapshots(p2)
+  const defaultSnapshot = defaultMigrationSnapshot(snapshots)
+  const worktrees = [...await p2.state.observeV1Worktrees()]
+    .map((fact) => ({ ...fact, selectedSkills: [...fact.selectedSkills].sort(compareUtf8Bytes) }))
+    .sort((left, right) => compareUtf8Bytes(left.pathKey, right.pathKey))
+  const legacyState = inspection.legacy
+  if (!legacyState) throw new ApplicationFault('STATE_CORRUPT', 'legacy state is unavailable')
+  const sourcePayload = canonicalJson({
+    runtimeRevision: inspection.runtimeRevision,
+    legacyState,
+    worktrees
+  } as unknown as CanonicalJsonValue)
+  const sourceHex = runtime.sha256(`skill-graft/state-migration-source/v1\0${sourcePayload}`).toLowerCase()
+  const sourceDigest = (sourceHex.startsWith('sha256:') ? sourceHex : `sha256:${sourceHex}`) as Sha256Identifier
+  if (!SHA256_IDENTIFIER.test(sourceDigest)) {
+    throw new ApplicationFault('PORT_FAILURE', 'runtime returned an invalid SHA-256 digest', true)
+  }
+  const planned = planV1ToV2Migration({
+    sourceDigest,
+    runtimeRevision: inspection.runtimeRevision,
+    legacyState,
+    lastIngestGameRepoId: legacyState.lastIngest
+      ? gameRepositoryId(runtime, legacyState.lastIngest.gameRepo)
+      : null,
+    worktrees,
+    defaultSnapshot,
+    librarySnapshots: snapshots.map((manifest) => manifest.snapshotId)
+  })
+  if (!planned.ok) throw new ApplicationFault('STATE_CORRUPT', 'legacy state cannot be migrated')
+  if (!verifyMigrationPlanHash(planned.plan)) {
+    throw new ApplicationFault('STATE_CORRUPT', 'migration plan failed verification')
+  }
+  if (command.mode === 'dryRun') {
+    return {
+      action: 'migrateState' as const,
+      mode: 'dryRun' as const,
+      status: 'planned' as const,
+      plan: planned.plan,
+      state: null
+    }
+  }
+  if (command.planHash !== planned.plan.planHash) {
+    throw new ApplicationFault('MIGRATION_PLAN_STALE', 'migration plan hash no longer matches current state')
+  }
+  await p2.state.writeV2(planned.plan.targetState)
+  businessEvents.push(stateChangedEvent(runtime, command, `migration:${planned.plan.planHash}`, {
+    change: 'state-migrated',
+    planHash: planned.plan.planHash,
+    sourceDigest: planned.plan.sourceDigest,
+    targetSchemaVersion: HUB_STATE_SCHEMA_VERSION
+  }))
+  return {
+    action: 'migrateState' as const,
+    mode: 'commit' as const,
+    status: 'committed' as const,
+    plan: planned.plan,
+    state: planned.plan.targetState
+  }
+}
+
 async function executeHandler(
   runtime: ApplicationRuntimePort,
   queries: HubQueryPort,
@@ -776,9 +1357,15 @@ async function executeHandler(
   legacyDetach: LegacyDetachPort,
   sessions: SessionPort,
   ledger: RequestLedgerPort,
+  p2: P2ApplicationPorts,
+  lockedWorktreeIdentity: WorktreeIdentity | undefined,
   businessEvents: AuditEvent[],
   command: HubCommand
 ): Promise<unknown> {
+  const inboxUseCases: SharedUseCasePorts = {
+    ...useCases,
+    state: createApplicationInboxStatePort(runtime, p2, useCases.state)
+  }
   switch (command.kind) {
     case 'status': {
       const sessionViews = (await sessions.list()).filter((item) => item.status === 'queued' || item.status === 'running')
@@ -831,6 +1418,39 @@ async function executeHandler(
       const session = await sessions.get(command.sessionId)
       if (!session) throw new ApplicationFault('NOT_FOUND', 'session not found')
       return { session }
+    }
+    case 'inspectSchema': {
+      const inspection = await inspectP2State(p2)
+      return {
+        action: 'inspectSchema' as const,
+        status: inspection.status,
+        detectedSchemaVersion: inspection.detectedSchemaVersion,
+        currentSchemaVersion: HUB_STATE_SCHEMA_VERSION,
+        stateRevision: inspection.stateRevision,
+        runtimeRevision: inspection.runtimeRevision,
+        writable: inspection.status === 'current',
+        migrationRequired: inspection.status === 'empty' || inspection.status === 'legacy'
+      }
+    }
+    case 'listSnapshots':
+      return { snapshots: await visibleSnapshots(p2) }
+    case 'getSnapshot': {
+      const snapshots = await visibleSnapshots(p2)
+      const visible = snapshots.find((manifest) => manifest.snapshotId === command.snapshotId)
+      if (!visible) throw new ApplicationFault('SNAPSHOT_NOT_FOUND', 'library snapshot was not found')
+      const snapshot = await checkedSnapshotRead(p2, visible.snapshotId)
+      if (!snapshot) throw new ApplicationFault('SNAPSHOT_NOT_FOUND', 'library snapshot was not found')
+      return { snapshot }
+    }
+    case 'getPin': {
+      const identity = await p2.identities.resolve(command.worktree)
+      const state = await requireCurrentState(p2)
+      return {
+        worktree: command.worktree,
+        pathKey: identity.pathKey,
+        worktreeId: identity.worktreeId,
+        pin: state.worktrees[identity.pathKey] ?? null
+      }
     }
     case 'repairLegacy': {
       if (!command.worktree?.trim()) throw new ApplicationFault('INVALID_ARGUMENT', 'worktree is required')
@@ -915,7 +1535,7 @@ async function executeHandler(
       }
     }
     case 'ingest': {
-      const ingested = await executeIngestUseCase(runtime, useCases, command)
+      const ingested = await executeIngestUseCase(runtime, inboxUseCases, command)
       let session: SessionView | undefined
       if (!command.dryRun && command.dispatch && ingested.created > 0) {
         session = await sessions.start({
@@ -937,7 +1557,7 @@ async function executeHandler(
       }
     }
     case 'decide': {
-      const decided = await executeDecisionUseCase(runtime, useCases, command)
+      const decided = await executeDecisionUseCase(runtime, inboxUseCases, command)
       return {
         action: decided.action,
         item: inboxView(decided.item),
@@ -978,7 +1598,7 @@ async function executeHandler(
       return { action: 'chat', session: commandSessionOutcome(session), applied: null }
     }
     case 'analyze': {
-      const state = await useCases.state.readState()
+      const state = await inboxUseCases.state.readState()
       const inboxIds = command.inboxId
         ? [command.inboxId]
         : state.items.filter((item) => item.status === 'queued' || item.status === 'proposed').map((item) => item.id)
@@ -986,23 +1606,29 @@ async function executeHandler(
         throw new ApplicationFault('NOT_FOUND', 'inbox item not found')
       }
       const session = await startSession(sessions, 'analyze', command, inboxIds)
-      businessEvents.push(...await applyAnalyzeCompletion(runtime, useCases, command, session))
+      businessEvents.push(...await applyAnalyzeCompletion(runtime, inboxUseCases, command, session))
       return { action: 'analyze', session: commandSessionOutcome(session), applied: null }
     }
     case 'resumeSession': {
       if (!command.message?.trim()) throw new ApplicationFault('INVALID_ARGUMENT', 'message is required')
       if (!await sessions.get(command.sessionId)) throw new ApplicationFault('NOT_FOUND', 'session not found')
       const session = await sessions.resume({ sessionId: command.sessionId, message: command.message, options: command.runner })
-      businessEvents.push(...await applyAnalyzeCompletion(runtime, useCases, command, session))
+      businessEvents.push(...await applyAnalyzeCompletion(runtime, inboxUseCases, command, session))
       return { action: 'resumeSession', session: commandSessionOutcome(session), applied: null }
     }
     case 'reapSessions': {
       const reaped = await sessions.reap(command.sessionIds)
       for (const session of reaped) {
-        businessEvents.push(...await applyAnalyzeCompletion(runtime, useCases, command, session))
+        businessEvents.push(...await applyAnalyzeCompletion(runtime, inboxUseCases, command, session))
       }
       return { action: 'reapSessions', sessions: reaped.map(commandSessionOutcome) }
     }
+    case 'createSnapshot':
+      return executeCreateSnapshot(runtime, p2, businessEvents, command)
+    case 'setPin':
+      return executeSetPin(runtime, p2, lockedWorktreeIdentity, businessEvents, command)
+    case 'migrateState':
+      return executeMigration(runtime, p2, businessEvents, command)
     default:
       throw new ApplicationFault('UNSUPPORTED_COMMAND', `unsupported command: ${(command as HubCommand).kind}`)
   }
@@ -1021,98 +1647,172 @@ function portFailureEnvelope(command: HubCommand, error: unknown, prefix = 'appl
   })
 }
 
+function worktreeLocatorForWrite(command: HubCommand): string | null {
+  // P2 introduces shared worktree persistence only for setPin. Legacy P1
+  // attach/detach paths keep their own path-bounded transaction and error
+  // semantics until copy-based sync joins this lock domain in P3.
+  return command.kind === 'setPin' ? command.worktree : null
+}
+
+async function writeTransactionContext(
+  p2: P2ApplicationPorts,
+  command: HubCommand
+): Promise<{
+  transactionIdentity: ApplicationTransactionIdentity
+  worktreeIdentity?: WorktreeIdentity
+}> {
+  const commandKind = command.kind as WriteCommandKind
+  const fields = {
+    hostId: command.meta.hostId,
+    commandKind,
+    requestId: command.meta.requestId
+  }
+  const worktree = worktreeLocatorForWrite(command)
+  if (worktree == null) {
+    return { transactionIdentity: { scope: 'hub-global', key: 'hub-global', ...fields } }
+  }
+  const worktreeIdentity = await p2.identities.resolve(worktree)
+  return {
+    transactionIdentity: { scope: 'worktree', key: worktreeIdentity.pathKey, ...fields },
+    worktreeIdentity
+  }
+}
+
 export function createHubApplication(options: HubApplicationOptions): HubApplication {
-  const { runtime, queries, useCases, legacyAttach, legacyDetach, sessions, ledger, trace } = options
+  const {
+    runtime,
+    recovery,
+    queries,
+    useCases,
+    legacyAttach,
+    legacyDetach,
+    sessions,
+    ledger,
+    p2,
+    transactions,
+    trace
+  } = options
   let writeTail: Promise<void> = Promise.resolve()
   let traceSequence = 0
 
   const runValidated = async (command: HubCommand): Promise<HubCommandResult> => {
     if (!WRITE_KINDS.has(command.kind)) {
       try {
-        return resultEnvelope(command, await executeHandler(runtime, queries, useCases, legacyAttach, legacyDetach, sessions, ledger, [], command))
+        return resultEnvelope(
+          command,
+          await executeHandler(
+            runtime,
+            queries,
+            useCases,
+            legacyAttach,
+            legacyDetach,
+            sessions,
+            ledger,
+            p2,
+            undefined,
+            [],
+            command
+          )
+        )
       } catch (error) {
         return failureEnvelope(command, errorOf(error))
       }
     }
 
     const digest = commandDigest(runtime, command)
-    let existing: RequestLedgerEntry | null
-    try {
-      existing = await ledger.read(command.meta.requestId)
-    } catch (error) {
-      return failureEnvelope(command, { code: 'PORT_FAILURE', message: errorOf(error).message, retryable: true })
-    }
-    if (existing) {
-      if (existing.digest !== digest || existing.commandKind !== command.kind) {
-        return failureEnvelope(command, {
-          code: 'REQUEST_ID_CONFLICT',
-          message: 'requestId is already bound to a different command',
-          retryable: false
-        })
+    const transactionContext = await writeTransactionContext(p2, command)
+    return transactions.withWriteTransaction(transactionContext.transactionIdentity, async (transaction) => {
+      // Unknown future schemas are observable through inspectSchema but never
+      // enter a write handler or publish a ledger/audit outcome. Recheck under
+      // the acquired lease so a concurrent schema replacement cannot race a
+      // previously observed compatible version.
+      if (command.kind === 'setPin') {
+        // The raw locator is resolved before locking only to choose the opaque
+        // lock key. Re-resolve and compare before even the schema preflight so
+        // an alias substitution cannot make lock A authorize a read/write for B.
+        await requireLockedWorktreeIdentity(p2, transactionContext.worktreeIdentity, command.worktree)
       }
-      if (existing.status !== 'completed' || !existing.result) {
-        return failureEnvelope(command, {
-          code: 'REQUEST_IN_PROGRESS',
-          message: 'request has started but no terminal result is available',
-          retryable: true
-        })
+      const existing = await ledger.read(command.meta.requestId)
+      if (existing) {
+        if (existing.digest !== digest || existing.commandKind !== command.kind) {
+          return transaction.commit(failureEnvelope(command, {
+            code: 'REQUEST_ID_CONFLICT',
+            message: 'requestId is already bound to a different command',
+            retryable: false
+          }))
+        }
+        if (existing.status !== 'completed' || !existing.result) {
+          return transaction.commit(failureEnvelope(command, {
+            code: 'REQUEST_IN_PROGRESS',
+            message: 'request has started but no terminal result is available',
+            retryable: true
+          }))
+        }
+        return transaction.commit(replayResult(existing))
       }
-      return replayResult(existing)
-    }
 
-    const started: RequestLedgerEntry = {
-      requestId: command.meta.requestId,
-      digest,
-      commandKind: command.kind,
-      status: 'started',
-      startedAt: runtime.nowIso()
-    }
-    try {
+      const started: RequestLedgerEntry = {
+        requestId: command.meta.requestId,
+        digest,
+        commandKind: command.kind,
+        status: 'started',
+        startedAt: runtime.nowIso()
+      }
       await ledger.begin(started)
-    } catch (error) {
-      return failureEnvelope(command, { code: 'PORT_FAILURE', message: errorOf(error).message, retryable: true })
-    }
+      const handlerSavepoint = transaction.savepoint()
 
-    let data: unknown
-    let handlerError: HubError | undefined
-    const businessEvents: AuditEvent[] = []
-    try {
-      data = await executeHandler(runtime, queries, useCases, legacyAttach, legacyDetach, sessions, ledger, businessEvents, command)
-    } catch (caught) {
-      handlerError = safeHandlerError(command, errorOf(caught))
-    }
+      let data: unknown
+      let handlerError: HubError | undefined
+      const businessEvents: AuditEvent[] = []
+      try {
+        await assertWriteSchemaCompatible(p2)
+        data = await executeHandler(
+          runtime,
+          queries,
+          useCases,
+          legacyAttach,
+          legacyDetach,
+          sessions,
+          ledger,
+          p2,
+          transactionContext.worktreeIdentity,
+          businessEvents,
+          command
+        )
+      } catch (caught) {
+        const transactionError = transactionErrorOf(caught)
+        const unsupportedVersion = caught instanceof ApplicationFault
+          && caught.code === 'STATE_VERSION_UNSUPPORTED'
+        if (unsupportedVersion || transactionError && transactionError.code !== 'SNAPSHOT_INVALID') {
+          return transaction.abort(caught)
+        }
+        transaction.rollbackTo(handlerSavepoint)
+        businessEvents.length = 0
+        handlerError = safeHandlerError(command, transactionError ?? errorOf(caught))
+      }
 
-    let event: AuditEvent
-    try {
-      event = terminalEvent(runtime, command, handlerError)
-    } catch (eventError) {
-      return portFailureEnvelope(command, eventError, 'request outcome audit could not be created')
-    }
-    const events = [...businessEvents, event]
-    const result = handlerError
-      ? failureEnvelope(command, handlerError, events)
-      : resultEnvelope(command, data, events)
-
-    try {
+      // Creating the terminal event and completing the ledger are part of the
+      // transaction's terminal persistence. Any failure here escapes the
+      // callback, so the adapter publishes none of the staged documents.
+      const event = terminalEvent(runtime, command, handlerError)
+      const events = [...businessEvents, event]
+      const result = handlerError
+        ? failureEnvelope(command, handlerError, events)
+        : resultEnvelope(command, data, events)
       await ledger.complete(
         { ...started, status: 'completed', completedAt: event.at, result },
         events.length === 1 ? event : events
       )
-    } catch (persistError) {
-      return failureEnvelope(command, {
-        code: 'PORT_FAILURE',
-        message: `request outcome could not be persisted: ${errorOf(persistError).message}`,
-        retryable: true
-      })
-    }
-    return result
+      return transaction.commit(result)
+    })
   }
 
   const executeValidated = async (command: HubCommand): Promise<HubCommandResult> => {
     try {
+      await recovery?.recover()
       return await runValidated(command)
     } catch (error) {
-      return portFailureEnvelope(command, error)
+      return failureEnvelope(command, errorOf(error))
     }
   }
 

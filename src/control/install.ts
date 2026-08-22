@@ -1,9 +1,16 @@
 import fs from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { createNodePath } from '../adapters/node-path.js'
 import { createInstallHost, type InstallHost } from '../adapters/install-host.js'
 import { resolveLocalInvocationTraceGate } from '../adapters/local-invocation-trace.js'
+import {
+  coherentDataRootEnvironment,
+  LEGACY_DATA_ROOT_ENV,
+  localDataRootsEqual,
+  PRIMARY_DATA_ROOT_ENV,
+  resolveLocalDataRoot
+} from '../local/data-root.js'
 import {
   API_PORT,
   evaluateDoctor,
@@ -20,6 +27,7 @@ import {
   TASK_NAME,
   type DaemonTraceEnvironment,
   type DaemonStatus,
+  type InstallPaths,
   type DoctorFacts,
   type DoctorIssue,
   type DoctorReport,
@@ -42,6 +50,19 @@ import {
 const pathApi = createNodePath()
 const REQUIRED_RESIDENT_SKILLS = ['ozdqp-development', 'ozdqp-ui-development', 'ozdqp-git-workflow'] as const
 
+type StartDaemonDependencies = {
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  ping?: typeof pingApi
+}
+
+type FrozenInstallEnvironment = Readonly<NodeJS.ProcessEnv>
+
+type FrozenDaemonTracePreflight = Readonly<{
+  baseEnvironment: FrozenInstallEnvironment
+  daemonTrace?: DaemonTraceEnvironment
+}>
+
 function requiredDataAssets(dataRoot: string): string[] {
   return [
     join(dataRoot, 'AGENTS.override.md'),
@@ -54,39 +75,62 @@ function requiredDataAssets(dataRoot: string): string[] {
   ]
 }
 
+function freezeInstallEnvironment(host: InstallHost): FrozenInstallEnvironment {
+  return Object.freeze({ ...host.environment() })
+}
+
+function resolveDataRootFromEnvironment(
+  packageRoot: string,
+  platform: NodeJS.Platform | string,
+  environment: FrozenInstallEnvironment,
+  dataRoot?: string
+): string {
+  return resolveLocalDataRoot({
+    packageRoot,
+    dataRoot,
+    environment: {
+      SKILL_GRAFT_HOME: environment[PRIMARY_DATA_ROOT_ENV],
+      HUB_ROOT: environment[LEGACY_DATA_ROOT_ENV]
+    },
+    platform
+  })
+}
+
 export function resolveDataRoot(packageRoot: string, host: InstallHost = createInstallHost(), dataRoot?: string): string {
-  return resolve(dataRoot || host.env('HUB_ROOT') || packageRoot)
+  return resolveDataRootFromEnvironment(packageRoot, host.platform, freezeInstallEnvironment(host), dataRoot)
 }
 
 export function installPathsFor(
   packageRoot: string,
   host: InstallHost = createInstallHost(),
-  dataRoot?: string
+  dataRoot?: string,
+  environment: FrozenInstallEnvironment = freezeInstallEnvironment(host)
 ) {
   const installDir = resolveInstallDir({
     platform: host.platform,
     home: host.home || homedir(),
     localAppData: host.localAppData,
-    override: host.env('SG_INSTALL_DIR')
+    override: environment.SG_INSTALL_DIR
   })
   const extra = host.skipPath ? null : host.extraShimDir()
   return resolveInstallPaths(pathApi, {
     hubRoot: packageRoot,
     packageRoot,
-    dataRoot: resolveDataRoot(packageRoot, host, dataRoot),
+    dataRoot: resolveDataRootFromEnvironment(packageRoot, host.platform, environment, dataRoot),
     nodePath: process.execPath,
     installDir,
     extraShimDir: extra,
-    port: Number(host.env('HUB_API_PORT') || API_PORT)
+    port: Number(environment.HUB_API_PORT || API_PORT)
   })
 }
 
 export function collectDoctorFacts(
   packageRoot: string,
   host: InstallHost = createInstallHost(),
-  dataRoot?: string
+  dataRoot?: string,
+  environment: FrozenInstallEnvironment = freezeInstallEnvironment(host)
 ): DoctorFacts {
-  const paths = installPathsFor(packageRoot, host, dataRoot)
+  const paths = installPathsFor(packageRoot, host, dataRoot, environment)
   const layout = layoutSpec(paths.dataRoot, pathApi)
   const missingLayout = [
     ...layout.dirs.filter((dir) => !fs.existsSync(dir)),
@@ -137,10 +181,11 @@ export function collectDoctorFacts(
 export async function doctorHub(
   packageRoot: string,
   host: InstallHost = createInstallHost(),
-  dataRoot?: string
+  dataRoot?: string,
+  environment: FrozenInstallEnvironment = freezeInstallEnvironment(host)
 ): Promise<DoctorReport> {
-  const paths = installPathsFor(packageRoot, host, dataRoot)
-  const facts = collectDoctorFacts(packageRoot, host, paths.dataRoot)
+  const paths = installPathsFor(packageRoot, host, dataRoot, environment)
+  const facts = collectDoctorFacts(packageRoot, host, paths.dataRoot, environment)
   const apiPid = readPid(reviewFiles(paths.dataRoot).apiPidFile)
   const apiOwned = apiPid > 0 && host.pidAlive(apiPid) && apiProcessMatches(host, apiPid, paths.packageRoot)
   facts.apiHealthy = facts.daemonAlive && apiOwned && await pingApi(paths.port, 1500, {
@@ -153,9 +198,10 @@ export async function doctorHub(
 export async function daemonStatus(
   packageRoot: string,
   host: InstallHost = createInstallHost(),
-  dataRoot?: string
+  dataRoot?: string,
+  environment: FrozenInstallEnvironment = freezeInstallEnvironment(host)
 ): Promise<DaemonStatus> {
-  const paths = installPathsFor(packageRoot, host, dataRoot)
+  const paths = installPathsFor(packageRoot, host, dataRoot, environment)
   const files = reviewFiles(paths.dataRoot)
   const pid = readPid(files.pidFile)
   const apiPid = readPid(files.apiPidFile)
@@ -197,9 +243,11 @@ export function heartbeatMatchesInstance(
 export async function setupHub(
   packageRoot: string,
   flags: SetupFlags,
-  host: InstallHost = createInstallHost()
+  host: InstallHost = createInstallHost(),
+  dataRoot?: string
 ): Promise<SetupResult> {
-  const paths = installPathsFor(packageRoot, host)
+  const environment = freezeInstallEnvironment(host)
+  const paths = installPathsFor(packageRoot, host, dataRoot, environment)
   const steps: SetupStep[] = []
   const issues: DoctorIssue[] = []
   const add = (step: SetupStep) => {
@@ -207,8 +255,21 @@ export async function setupHub(
     if (!step.ok && !step.skipped) issues.push({ level: 'error', message: `${step.id}: ${step.detail}` })
   }
 
+  let tracePreflight: FrozenDaemonTracePreflight = Object.freeze({ baseEnvironment: environment })
+  let tracePreflightFailed = false
+  try {
+    tracePreflight = preflightDaemonTraceEnvironment(environment, host.platform, paths.dataRoot)
+  } catch (error) {
+    tracePreflightFailed = true
+    add({
+      id: 'trace',
+      ok: false,
+      detail: `invocation trace gate is invalid: ${error instanceof Error ? error.message : String(error)}`
+    })
+  }
+
   if (!flags.dryRun) {
-    let failedStep = ''
+    let failedStep = tracePreflightFailed ? 'trace' : ''
     const run = async (id: string, operation: () => SetupStep | Promise<SetupStep>) => {
       if (failedStep) {
         add({ id, ok: true, skipped: true, detail: `skipped after ${failedStep} failed` })
@@ -224,18 +285,18 @@ export async function setupHub(
       if (!step.ok && !step.skipped) failedStep = id
     }
 
-    const taskExistedBefore = host.skipTask || host.taskExists(paths.taskName)
+    const taskExistedBefore = tracePreflightFailed || host.skipTask || host.taskExists(paths.taskName)
     await run('deps', () => ensureDependencies(packageRoot, flags.rebuild, host))
     await run('layout', () => ensureLayout(paths.dataRoot))
-    await run('shims', () => writeShims(paths, host))
+    await run('shims', () => writeShims(paths, tracePreflight))
     await run('path', () => applyPath(paths, flags.noPath, host))
     await run('env', () => {
-      const step = applyUserEnv(paths, flags.noPath, host)
+      const step = applyUserEnv(paths, flags.noPath, host, environment)
       if (!step.skipped && !flags.noPath && !host.skipPath) host.broadcastEnv()
       return step
     })
     await run('task', () => applyTask(paths, flags.noTask, host))
-    await run('daemon', () => applyDaemon(paths, flags.noDaemon, host))
+    await run('daemon', () => applyDaemon(paths, flags.noDaemon, host, tracePreflight))
 
     if ((failedStep === 'task' || failedStep === 'daemon') && !taskExistedBefore && !flags.noTask && !host.skipTask) {
       try {
@@ -273,7 +334,7 @@ export async function setupHub(
     })
   }
 
-  const doctor = await doctorHub(packageRoot, host, paths.dataRoot)
+  const doctor = await doctorHub(packageRoot, host, paths.dataRoot, environment)
   const setupErrors = issues.filter((issue) => issue.level === 'error')
   return {
     ok: setupErrors.length === 0 && doctor.ok && (flags.dryRun || doctor.dist.ok),
@@ -296,7 +357,8 @@ export async function uninstallHub(
   packageRoot: string,
   host: InstallHost = createInstallHost()
 ): Promise<UninstallResult> {
-  const paths = installPathsFor(packageRoot, host)
+  const environment = freezeInstallEnvironment(host)
+  const paths = installPathsFor(packageRoot, host, undefined, environment)
   const issues: DoctorIssue[] = []
   let stopped = false
   try {
@@ -336,8 +398,12 @@ export async function uninstallHub(
       const current = host.userPath()
       const next = removeFromUserPath(current, paths.binDir, host.pathSep, host.caseInsensitive)
       if (next.changed) host.setUserPath(next.path)
-      const existing = host.env('HUB_ROOT')
-      if (!existing || samePath(existing, paths.dataRoot)) host.setUserEnv('HUB_ROOT', null)
+      for (const name of [PRIMARY_DATA_ROOT_ENV, LEGACY_DATA_ROOT_ENV] as const) {
+        const existing = environment[name]
+        if (existing && localDataRootsEqual(existing, paths.dataRoot, host.platform)) {
+          host.setUserEnv(name, null)
+        }
+      }
       host.broadcastEnv()
     }
   } catch (error) {
@@ -386,19 +452,13 @@ export async function startDaemonDetached(
   packageRoot: string,
   host: InstallHost = createInstallHost(),
   dataRoot?: string,
-  dependencies: {
-    now?: () => number
-    sleep?: (ms: number) => Promise<void>
-    ping?: typeof pingApi
-  } = {}
+  dependencies: StartDaemonDependencies = {}
 ): Promise<{ ok: boolean; pid: number; apiHealthy: boolean; detail: string }> {
-  const now = dependencies.now || Date.now
-  const pause = dependencies.sleep || ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)))
-  const ping = dependencies.ping || pingApi
-  const paths = installPathsFor(packageRoot, host, dataRoot)
-  let daemonTrace: DaemonTraceEnvironment | undefined
+  const environment = freezeInstallEnvironment(host)
+  const paths = installPathsFor(packageRoot, host, dataRoot, environment)
+  let tracePreflight: FrozenDaemonTracePreflight
   try {
-    daemonTrace = resolveDaemonTraceEnvironment(host)
+    tracePreflight = preflightDaemonTraceEnvironment(environment, host.platform, paths.dataRoot)
   } catch (error) {
     return {
       ok: false,
@@ -407,6 +467,19 @@ export async function startDaemonDetached(
       detail: `invocation trace gate is invalid: ${error instanceof Error ? error.message : String(error)}`
     }
   }
+  return startDaemonDetachedAfterPreflight(paths, host, tracePreflight, dependencies)
+}
+
+async function startDaemonDetachedAfterPreflight(
+  paths: ReturnType<typeof installPathsFor>,
+  host: InstallHost,
+  tracePreflight: FrozenDaemonTracePreflight,
+  dependencies: StartDaemonDependencies = {}
+): Promise<{ ok: boolean; pid: number; apiHealthy: boolean; detail: string }> {
+  const now = dependencies.now || Date.now
+  const pause = dependencies.sleep || ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)))
+  const ping = dependencies.ping || pingApi
+  const daemonTrace = tracePreflight.daemonTrace
   const files = reviewFiles(paths.dataRoot)
   const existing = readPid(files.pidFile)
   const existingApi = readPid(files.apiPidFile)
@@ -447,11 +520,17 @@ export async function startDaemonDetached(
     }
   }
   writeDaemonLaunchers(paths, renderShims(paths, daemonTrace))
-  const commandLine =
-    host.platform === 'win32'
-      ? `cmd.exe /c "${paths.runDaemonCmd}"`
-      : `${process.execPath} "${paths.cliPath}" daemon run`
-  const launched = host.wmiCreate(commandLine, paths.packageRoot)
+  const launched = host.platform === 'win32'
+    ? host.wmiCreate(`cmd.exe /c "${paths.runDaemonCmd}"`, paths.packageRoot)
+    : (() => {
+        const launch = createPosixDaemonLaunchSpec(
+          paths,
+          tracePreflight.baseEnvironment,
+          daemonTrace,
+          host.platform
+        )
+        return host.launchDetached(launch.command, launch.args, launch.opts)
+      })()
   const deadline = now() + 12000
   let livePid = readPid(files.pidFile)
   let liveApiPid = readPid(files.apiPidFile)
@@ -495,6 +574,52 @@ export async function startDaemonDetached(
     detail: ok
       ? `pid ${livePid} ${paths.apiUrl}`
       : `launched pid ${launched || 0}; verified daemon ${daemonOwned ? livePid : 0} but API is not up yet${cleanupDetail}`
+  }
+}
+
+export type PosixDaemonLaunchSpec = {
+  command: string
+  args: readonly [string, 'daemon', 'run']
+  opts: {
+    cwd: string
+    env: NodeJS.ProcessEnv
+  }
+}
+
+/** Pure launch description used by the POSIX lifecycle and cross-platform execution tests. */
+export function createPosixDaemonLaunchSpec(
+  paths: Pick<InstallPaths, 'nodePath' | 'cliPath' | 'packageRoot' | 'dataRoot' | 'port'>,
+  baseEnvironment: NodeJS.ProcessEnv,
+  daemonTrace?: DaemonTraceEnvironment,
+  platform: NodeJS.Platform | string = 'linux'
+): PosixDaemonLaunchSpec {
+  if (platform === 'win32') {
+    throw new Error('POSIX daemon launch spec cannot target win32')
+  }
+  if (daemonTrace && !localDataRootsEqual(daemonTrace.pinned.SKILL_GRAFT_HOME, paths.dataRoot, platform)) {
+    throw new Error(`POSIX daemon trace root must identify selected data root ${paths.dataRoot}`)
+  }
+  const reviewedBaseEnvironment = daemonTrace
+    ? Object.fromEntries(Object.entries(baseEnvironment).filter(([name]) => !/^(?:GIT_|DSH_)/i.test(name)))
+    : { ...baseEnvironment }
+  return {
+    command: paths.nodePath,
+    args: [paths.cliPath, 'daemon', 'run'],
+    opts: {
+      cwd: paths.packageRoot,
+      env: {
+        ...reviewedBaseEnvironment,
+        ...(daemonTrace ? daemonTrace.pinned : {}),
+        ...coherentDataRootEnvironment(paths.dataRoot, platform),
+        HUB_API_PORT: String(paths.port),
+        ...(daemonTrace ? {
+          SKILL_GRAFT_INVOCATION_TRACE: '1',
+          SKILL_GRAFT_REAL_E2E: '1',
+          SKILL_GRAFT_RUN_ID: daemonTrace.runId,
+          SKILL_GRAFT_E2E_ROOT: daemonTrace.runRoot
+        } : {})
+      }
+    }
   }
 }
 
@@ -554,22 +679,16 @@ function ensureLayout(dataRoot: string): SetupStep {
   }
 }
 
-function resolveDaemonTraceEnvironment(host: InstallHost): DaemonTraceEnvironment | undefined {
-  const env: NodeJS.ProcessEnv = {}
-  for (const name of [
-    'SKILL_GRAFT_INVOCATION_TRACE',
-    'SKILL_GRAFT_REAL_E2E',
-    'SKILL_GRAFT_RUN_ID',
-    'SKILL_GRAFT_E2E_ROOT'
-  ]) {
-    const value = host.env(name)
-    if (value !== undefined) env[name] = value
-  }
-  const gate = resolveLocalInvocationTraceGate(env)
+function resolveDaemonTraceEnvironment(
+  environment: FrozenInstallEnvironment,
+  platform: NodeJS.Platform | string,
+  dataRoot: string
+): DaemonTraceEnvironment | undefined {
+  const gate = resolveLocalInvocationTraceGate(environment)
   if (!gate) return undefined
 
   const requiredPinnedValue = (name: string) => {
-    const value = host.env(name)
+    const value = environment[name]
     if (typeof value !== 'string' || value.length === 0) {
       throw new Error(`real E2E detached launcher requires ${name}`)
     }
@@ -604,15 +723,21 @@ function resolveDaemonTraceEnvironment(host: InstallHost): DaemonTraceEnvironmen
     ['DSH_HOME', join(expectedHome, 'dsh-home')],
     ['SKILL_GRAFT_HOME', join(gate.runRoot, 'hub-data')]
   ] as const) {
-    if (!samePath(pinned[name], expected)) {
+    if (!samePath(pinned[name], expected, platform)) {
       throw new Error(`real E2E detached launcher ${name} must identify ${expected}`)
     }
+  }
+  if (!localDataRootsEqual(pinned.SKILL_GRAFT_HOME, dataRoot, platform)) {
+    throw new Error(`real E2E detached launcher SKILL_GRAFT_HOME must identify selected data root ${dataRoot}`)
   }
   if (pinned.HUB_SPAWN_CODEX !== '0') {
     throw new Error('real E2E detached launcher requires HUB_SPAWN_CODEX=0')
   }
-  const expectedGlobalConfig = host.platform === 'win32' ? 'NUL' : '/dev/null'
-  if (pinned.GIT_CONFIG_GLOBAL.toLowerCase() !== expectedGlobalConfig.toLowerCase()
+  const expectedGlobalConfig = platform === 'win32' ? 'NUL' : '/dev/null'
+  const globalConfigMatches = platform === 'win32'
+    ? pinned.GIT_CONFIG_GLOBAL.toLowerCase() === expectedGlobalConfig.toLowerCase()
+    : pinned.GIT_CONFIG_GLOBAL === expectedGlobalConfig
+  if (!globalConfigMatches
     || pinned.GIT_CONFIG_NOSYSTEM !== '1'
     || pinned.GIT_OPTIONAL_LOCKS !== '0') {
     throw new Error('real E2E detached launcher requires isolated Git config and GIT_OPTIONAL_LOCKS=0')
@@ -620,17 +745,29 @@ function resolveDaemonTraceEnvironment(host: InstallHost): DaemonTraceEnvironmen
   return { runId: gate.runId, runRoot: gate.runRoot, pinned }
 }
 
-function writeShims(paths: ReturnType<typeof installPathsFor>, host: InstallHost): SetupStep {
-  let rendered: ReturnType<typeof renderShims>
-  try {
-    rendered = renderShims(paths, resolveDaemonTraceEnvironment(host))
-  } catch (error) {
-    return {
-      id: 'shims',
-      ok: false,
-      detail: `invocation trace gate is invalid: ${error instanceof Error ? error.message : String(error)}`
-    }
+function preflightDaemonTraceEnvironment(
+  environment: FrozenInstallEnvironment,
+  platform: NodeJS.Platform | string,
+  dataRoot: string
+): FrozenDaemonTracePreflight {
+  const revalidatedDataRoot = resolveDataRootFromEnvironment(dataRoot, platform, environment, dataRoot)
+  if (!localDataRootsEqual(revalidatedDataRoot, dataRoot, platform)) {
+    throw new Error(`preflight data root must identify selected data root ${dataRoot}`)
   }
+  const daemonTrace = resolveDaemonTraceEnvironment(environment, platform, dataRoot)
+  if (!daemonTrace) return Object.freeze({ baseEnvironment: environment })
+  const pinned = Object.freeze({ ...daemonTrace.pinned }) as DaemonTraceEnvironment['pinned']
+  return Object.freeze({
+    baseEnvironment: environment,
+    daemonTrace: Object.freeze({ ...daemonTrace, pinned })
+  })
+}
+
+function writeShims(
+  paths: ReturnType<typeof installPathsFor>,
+  tracePreflight: FrozenDaemonTracePreflight
+): SetupStep {
+  const rendered = renderShims(paths, tracePreflight.daemonTrace)
   fs.mkdirSync(paths.binDir, { recursive: true })
   fs.mkdirSync(paths.installDir, { recursive: true })
   fs.writeFileSync(paths.shimCmd, rendered.sgCmd, 'utf8')
@@ -685,19 +822,22 @@ function applyPath(
 function applyUserEnv(
   paths: ReturnType<typeof installPathsFor>,
   noPath: boolean,
-  host: InstallHost
+  host: InstallHost,
+  environment: FrozenInstallEnvironment
 ): SetupStep {
   if (noPath || host.skipPath || host.platform !== 'win32') {
     return { id: 'env', ok: true, skipped: true, detail: stepsEnvDetail(host) }
   }
-  const existingRoot = host.env('HUB_ROOT')
-  const existingPort = host.env('HUB_API_PORT')
-  if (!existingRoot) host.setUserEnv('HUB_ROOT', paths.dataRoot)
+  const existingPrimary = environment[PRIMARY_DATA_ROOT_ENV]
+  const existingLegacy = environment[LEGACY_DATA_ROOT_ENV]
+  const existingPort = environment.HUB_API_PORT
+  if (existingPrimary !== paths.dataRoot) host.setUserEnv(PRIMARY_DATA_ROOT_ENV, paths.dataRoot)
+  if (existingLegacy !== paths.dataRoot) host.setUserEnv(LEGACY_DATA_ROOT_ENV, paths.dataRoot)
   if (!existingPort) host.setUserEnv('HUB_API_PORT', String(paths.port))
   return {
     id: 'env',
     ok: true,
-    detail: existingRoot ? `preserved HUB_ROOT=${paths.dataRoot}` : `HUB_ROOT=${paths.dataRoot}`
+    detail: `${PRIMARY_DATA_ROOT_ENV}=${paths.dataRoot}; ${LEGACY_DATA_ROOT_ENV}=${paths.dataRoot}`
   }
 }
 
@@ -726,10 +866,11 @@ function applyTask(
 async function applyDaemon(
   paths: ReturnType<typeof installPathsFor>,
   noDaemon: boolean,
-  host: InstallHost
+  host: InstallHost,
+  tracePreflight: FrozenDaemonTracePreflight
 ): Promise<SetupStep> {
   if (noDaemon) return { id: 'daemon', ok: true, skipped: true, detail: 'skipped' }
-  const started = await startDaemonDetached(paths.packageRoot, host, paths.dataRoot)
+  const started = await startDaemonDetachedAfterPreflight(paths, host, tracePreflight)
   return { id: 'daemon', ok: started.ok, detail: started.detail }
 }
 
@@ -738,8 +879,10 @@ function removeIfExists(target: string | null) {
   if (fs.existsSync(target)) fs.unlinkSync(target)
 }
 
-function samePath(left: string, right: string) {
-  return left.replace(/[\\/]+$/, '').toLowerCase() === right.replace(/[\\/]+$/, '').toLowerCase()
+function samePath(left: string, right: string, platform: NodeJS.Platform | string) {
+  const a = left.replace(/[\\/]+$/, '')
+  const b = right.replace(/[\\/]+$/, '')
+  return platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
 }
 
 function codexJs() {

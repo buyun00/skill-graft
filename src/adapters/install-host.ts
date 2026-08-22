@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -19,6 +19,7 @@ export interface InstallHost {
   skipPath: boolean
   skipTask: boolean
   env(name: string): string | undefined
+  environment(): NodeJS.ProcessEnv
   which(command: string): string
   commandVersion(bin: string): string
   userPath(): string
@@ -34,6 +35,11 @@ export interface InstallHost {
   killPid(pid: number): boolean
   waitForPidsExit(pids: readonly number[], timeoutMs: number): boolean
   wmiCreate(commandLine: string, cwd: string): number
+  launchDetached(
+    command: string,
+    args: readonly string[],
+    opts: { cwd: string; env: NodeJS.ProcessEnv }
+  ): number
   run(command: string, args: string[], opts?: { cwd?: string; timeout?: number; env?: NodeJS.ProcessEnv }): CommandResult
   runNpm(args: string[], cwd: string, timeout?: number): CommandResult
 }
@@ -50,6 +56,9 @@ export function createInstallHost(overrides: Partial<InstallHost> = {}): Install
     skipTask: process.env.SG_SKIP_TASK === '1',
     env(name) {
       return process.env[name]
+    },
+    environment() {
+      return { ...process.env }
     },
     which(command) {
       const tool = platform === 'win32' ? 'where' : 'which'
@@ -232,14 +241,7 @@ export function createInstallHost(overrides: Partial<InstallHost> = {}): Install
     },
     wmiCreate(commandLine, cwd) {
       if (platform !== 'win32') {
-        const ran = spawnSync(commandLine, {
-          cwd,
-          encoding: 'utf8',
-          shell: true,
-          stdio: 'ignore',
-          windowsHide: true
-        })
-        return Number(ran.pid || 0)
+        throw new Error('wmiCreate is Windows-only; use launchDetached for POSIX hosts')
       }
       const ps = [
         '$startup = New-CimInstance -ClassName Win32_ProcessStartup -Namespace root\\cimv2 -ClientOnly -Property @{ ShowWindow = [uint16]0 }',
@@ -256,6 +258,23 @@ export function createInstallHost(overrides: Partial<InstallHost> = {}): Install
         env: { ...process.env, SG_WMI_CMD: commandLine, SG_WMI_CWD: cwd }
       })
       return Number(String(launched.stdout || '').trim()) || 0
+    },
+    launchDetached(command, args, opts) {
+      const launched = spawn(command, [...args], {
+        cwd: opts.cwd,
+        // Callers provide a complete, policy-reviewed environment. Merging here
+        // would silently reintroduce aliases or trace variables they removed.
+        env: opts.env,
+        detached: true,
+        shell: false,
+        stdio: 'ignore',
+        windowsHide: true
+      })
+      launched.once('error', () => {
+        // Health acceptance remains authoritative; avoid an unhandled child error.
+      })
+      launched.unref()
+      return Number(launched.pid || 0)
     },
     run(command, args, opts = {}) {
       const ran = spawnSync(command, args, {

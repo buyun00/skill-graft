@@ -8,6 +8,7 @@ export const cliPath = path.join(hubRoot, 'dist', 'control', 'cli.js')
 const temporaryHub = createTemporaryTestHub(hubRoot)
 export const testHubRoot = temporaryHub.root
 process.env.HUB_ROOT = testHubRoot
+process.env.SKILL_GRAFT_HOME = testHubRoot
 process.env.HUB_SPAWN_CODEX = '0'
 process.once('exit', () => temporaryHub.cleanup())
 
@@ -48,13 +49,16 @@ export function makeFs(files) {
 }
 
 export function spawnHub(args, options = {}) {
+  const requested = options.env || {}
+  const requestedRoot = requested.SKILL_GRAFT_HOME || requested.HUB_ROOT || testHubRoot
   return spawnSync(process.execPath, [options.cliPath || cliPath, ...args], {
     encoding: 'utf8',
     cwd: hubRoot,
     env: {
       ...process.env,
-      HUB_ROOT: testHubRoot,
-      ...(options.env || {}),
+      SKILL_GRAFT_HOME: requestedRoot,
+      HUB_ROOT: requestedRoot,
+      ...requested,
       HUB_SPAWN_CODEX: '0'
     },
     input: options.input

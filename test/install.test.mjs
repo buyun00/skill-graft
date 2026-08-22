@@ -50,7 +50,7 @@ test('mergeUserPath prepends the bin dir once', () => {
   assert.equal(pathHasDir(removed.path, 'C:\\sg\\bin', ';', true), false)
 })
 
-test('renderShims bake node, HUB_ROOT, and daemon run into the wrappers', () => {
+test('renderShims bake node, coherent data-root aliases, and daemon run into the wrappers', () => {
   const paths = resolveInstallPaths(pathApi, {
     hubRoot: 'E:\\ozdqp-skill-hub',
     nodePath: 'C:\\Program Files\\nodejs\\node.exe',
@@ -62,12 +62,15 @@ test('renderShims bake node, HUB_ROOT, and daemon run into the wrappers', () => 
   assert.equal(paths.taskName, TASK_NAME)
   assert.equal(paths.shimCmd.endsWith('sg.cmd'), true)
   const shims = renderShims(paths)
+  assert.match(shims.sgCmd, /set "SKILL_GRAFT_HOME=E:\\ozdqp-skill-hub"/)
   assert.match(shims.sgCmd, /set "HUB_ROOT=E:\\ozdqp-skill-hub"/)
   assert.match(shims.sgCmd, /node\.exe/)
   assert.match(shims.sgCmd, /cli\.js/)
   assert.match(shims.runDaemonCmd, /daemon run/)
   assert.match(shims.vbs, /run-daemon\.cmd/)
-  assert.match(shims.unix, /export HUB_ROOT=/)
+  assert.match(shims.runDaemonCmd, /SKILL_GRAFT_HOME/)
+  assert.match(shims.runDaemonCmd, /HUB_ROOT/)
+  assert.match(shims.unix, /export SKILL_GRAFT_HOME HUB_ROOT HUB_API_PORT/)
   assert.equal(toGitBashPath('E:\\ozdqp-skill-hub\\dist\\control\\cli.js'), '/e/ozdqp-skill-hub/dist/control/cli.js')
 })
 

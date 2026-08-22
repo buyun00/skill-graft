@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { HubCommand, InboxDecisionAction, SessionRequestOptions } from '../contracts/index.js'
+import type { HubCommand, InboxDecisionAction, SessionRequestOptions, Sha256Identifier } from '../contracts/index.js'
 import { projectLegacyResult } from '../local/compat/legacy-projector.js'
 import { createLocalHost, type LocalHost } from '../local/create-local-host.js'
+import { resolveLocalDataRoot } from '../local/data-root.js'
 import { formatDoctorReport, formatSetupReport, formatUninstallReport, PRODUCT_ALIAS, PRODUCT_COMMAND } from '../local/lifecycle/install-domain.js'
 import { runDaemon, stopDaemon } from './daemon.js'
 import { daemonStatus, doctorHub, setupHub, startDaemonDetached, uninstallHub } from './install.js'
@@ -36,6 +37,15 @@ function usage(): string {
     '  status                         Hub inventory, inbox counts, linked game repo',
     '  list-worktrees                 Discover client worktrees under scan-roots',
     '  list-skills                    Resident / adopted / inbox nodes',
+    '  inspect-schema                 Inspect shared Hub state schema/runtime compatibility',
+    '  snapshot create|list           Capture or list committed immutable library snapshots',
+    '  snapshot show --id <sha256:id> Show one committed snapshot manifest',
+    '  pin show --worktree <path>     Show the claimed worktree pin without materializing it',
+    '  pin set --worktree <path> --snapshot <sha256:id> [--skill <name> ... | --clear-skills]',
+    '                                 Update only requestedSnapshot/selectedSkills; never copy files',
+    '  migrate-state --dry-run        Produce and audit a deterministic V1 -> V2 migration plan',
+    '  migrate-state --commit --plan-hash <sha256:id>',
+    '                                 Commit only the exact current migration plan',
     '',
     'Disk (via CLI; first-time attach is a session, not a silent rewrite):',
     '  repair-links --worktree <path> Repair links on an already-attached tree',
@@ -82,6 +92,19 @@ function takeSwitch(argv: string[], name: string): boolean {
   if (index < 0) return false
   argv.splice(index, 1)
   return true
+}
+
+function takeRepeatedFlags(argv: string[], name: string): string[] {
+  const values: string[] = []
+  for (;;) {
+    const value = takeFlag(argv, name)
+    if (value === undefined) return values
+    values.push(value)
+  }
+}
+
+function requireNoArguments(argv: string[], commandName: string): void {
+  if (argv.length > 0) fail(`${commandName} received unsupported or duplicate arguments`)
 }
 
 function readStdin(): string {
@@ -161,9 +184,9 @@ if (!command || command === '-h' || command === '--help') {
 
 const argv = rawArgv.slice(1)
 const packageRoot = findHubRoot()
-const dataRoot = resolve(process.env.HUB_ROOT || packageRoot)
 
 async function main() {
+  const dataRoot = resolveLocalDataRoot({ packageRoot })
   if (command === 'setup' || command === 'install') {
     const flags = {
       dryRun: takeSwitch(argv, '--dry-run'),
@@ -254,6 +277,77 @@ async function main() {
   }
   if (command === 'list-skills') {
     print(await execute({ kind: 'listSkills', meta: commandMeta() }))
+    return
+  }
+  if (command === 'inspect-schema') {
+    requireNoArguments(argv, 'inspect-schema')
+    print(await execute({ kind: 'inspectSchema', meta: commandMeta() }))
+    return
+  }
+  if (command === 'snapshot') {
+    const subcommand = argv.shift()
+    if (subcommand === 'create') {
+      requireNoArguments(argv, 'snapshot create')
+      print(await execute({ kind: 'createSnapshot', meta: commandMeta() }))
+      return
+    }
+    if (subcommand === 'list') {
+      requireNoArguments(argv, 'snapshot list')
+      print(await execute({ kind: 'listSnapshots', meta: commandMeta() }))
+      return
+    }
+    if (subcommand === 'show') {
+      const snapshotId = takeFlag(argv, '--id') as Sha256Identifier | undefined
+      if (!snapshotId) fail('snapshot show requires --id')
+      requireNoArguments(argv, 'snapshot show')
+      print(await execute({ kind: 'getSnapshot', meta: commandMeta(), snapshotId }))
+      return
+    }
+    fail('snapshot requires create, list, or show')
+  }
+  if (command === 'pin') {
+    const subcommand = argv.shift()
+    const worktree = takeFlag(argv, '--worktree')
+    if (!worktree) fail(`pin ${subcommand || ''} requires --worktree`.replace('  ', ' '))
+    if (subcommand === 'show') {
+      requireNoArguments(argv, 'pin show')
+      print(await execute({ kind: 'getPin', meta: commandMeta(), worktree }))
+      return
+    }
+    if (subcommand === 'set') {
+      const snapshotId = takeFlag(argv, '--snapshot') as Sha256Identifier | undefined
+      const selectedSkills = takeRepeatedFlags(argv, '--skill')
+      const clearSkills = takeSwitch(argv, '--clear-skills')
+      if (!snapshotId) fail('pin set requires --snapshot')
+      if (clearSkills && selectedSkills.length > 0) {
+        fail('pin set accepts either --skill or --clear-skills, not both')
+      }
+      requireNoArguments(argv, 'pin set')
+      print(await execute({
+        kind: 'setPin',
+        meta: commandMeta(),
+        worktree,
+        snapshotId,
+        ...(clearSkills ? { selectedSkills: [] } : selectedSkills.length > 0 ? { selectedSkills } : {})
+      }))
+      return
+    }
+    fail('pin requires show or set')
+  }
+  if (command === 'migrate-state') {
+    const dryRun = takeSwitch(argv, '--dry-run')
+    const commit = takeSwitch(argv, '--commit')
+    const planHash = takeFlag(argv, '--plan-hash') as Sha256Identifier | undefined
+    if (dryRun === commit) fail('migrate-state requires exactly one of --dry-run or --commit')
+    if (dryRun && planHash) fail('migrate-state --dry-run does not accept --plan-hash')
+    if (commit && !planHash) fail('migrate-state --commit requires --plan-hash')
+    requireNoArguments(argv, 'migrate-state')
+    print(await execute({
+      kind: 'migrateState',
+      meta: commandMeta(),
+      mode: dryRun ? 'dryRun' : 'commit',
+      ...(planHash ? { planHash } : {})
+    }))
     return
   }
   if (command === 'repair-links') {

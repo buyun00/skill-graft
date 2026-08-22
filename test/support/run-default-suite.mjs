@@ -326,10 +326,17 @@ if (!fs.existsSync(tsc)) {
   process.exit(1)
 }
 
-const build = runNode([tsc, '-p', 'tsconfig.json'], env)
+const wrapperArgs = process.argv.slice(2)
+const verifyBuildWithoutEmit = wrapperArgs[0] === '--verify-build-no-emit'
+const requested = verifyBuildWithoutEmit ? wrapperArgs.slice(1) : wrapperArgs
+const build = runNode([
+  tsc,
+  '-p',
+  'tsconfig.json',
+  ...(verifyBuildWithoutEmit ? ['--noEmit'] : [])
+], env)
 writeResult(build)
 
-const requested = process.argv.slice(2)
 const files = requested.length > 0
   ? requested
   : fs.readdirSync(path.join(repoRoot, 'test'))
