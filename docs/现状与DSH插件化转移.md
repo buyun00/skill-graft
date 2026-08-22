@@ -25,10 +25,10 @@
 | 组件库 | `E:\graft-glass-ui`（库预览仍 **3310**）；panel 依赖 `file:../../graft-glass-ui` |
 | 挂接 | 第一次走 **Codex 后台对话**（默认 `gpt-5.6-luna` + max）；会话只能提交绑定的 typed apply 命令；已挂树断链走 `repair-links`。 |
 | 探针 | 自动真实验收使用 marker 所有的 run-id 隔离副本；`E:\ozdqp-cli-attach-probe` 只作固定只读基线，禁止改活树。 |
-| 测试 | P1 候选：`npm test` 293 项、292 通过、0 失败、1 intentional skip；安全套件 28/28；源码外安装真实 P1 1/1，并完成浏览器 reject 写路径。 |
-| 未做 | per-tree snapshot/pin 持久化、跨进程锁、`MaterializePort` copy 物化、完整 Local/DSH SessionRunner、DSH bundle/Host/Client/UI、双宿主并存与发布候选。 |
+| 测试 | P1 已封口结果见 [P1 证据](../artifacts/verification/P1/README.md)；P2 源码外安装真实验收 1/1（`32.76s`），锁修复另通过 contender 200/200、独立 seal 2×100、dual sweeper 50/50、focused 51/51；最终默认 403 项回归连续两轮均为 401 pass、0 fail、2 platform skip。 |
+| 未做 | `MaterializePort` copy 物化与旧链接迁移、完整 Local/DSH SessionRunner、DSH bundle/Host/Client/UI、双宿主并存与发布候选。 |
 
-P1 共享 Contracts/Core/Application 已于 2026-08-22 完成真实安装、进程 trace 与浏览器写路径验收，见 [P1 证据](../artifacts/verification/P1/README.md)；当前实施指针为 P2。开发清单 **1–9 已完成**（含玻璃控制台），不要倒回去重做，除非冒烟证明坏了。
+P1 共享 Contracts/Core/Application 与 P2 snapshot/pin/迁移/跨进程锁均已于 2026-08-22 完成并封口，见 [P1 证据](../artifacts/verification/P1/README.md)和 [P2 证据](../artifacts/verification/P2/README.md)。当前实施指针为 P3，但 P3 尚未开始；开发清单 **1–9 已完成**（含玻璃控制台），不要倒回去重做，除非冒烟证明坏了。
 
 活数据典型形态：若干 worktree 已挂（链接完整），inbox 可能空，总览走「一切正常」；有事件路径由 `test/overview-mapping.test.mjs` 用夹具 JSON 覆盖。
 
@@ -168,7 +168,7 @@ Attach/detach 显示「已入队」，不把 POST 成功当成 `attached=true`�
 
 ---
 
-## 5. 当前下一步：P2–P10 的两个完整宿主发行
+## 5. 当前下一步：P3–P10 的两个完整宿主发行
 
 详细实现顺序和验收门禁以 `双宿主独立核心改造实施计划.md` 的 P0–P10 为准。本节只冻结架构边界。
 
@@ -200,7 +200,7 @@ DSH 可用 `ctx.skills.register()` 注册当前 workspace 的钉定 Skill，可�
 
 ### 5.4 实施与验收入口
 
-P0 基线隔离和 P1 共享 Application 已完成并封口，当前从 P2 开始依次完成 snapshot/pin/锁、物化、本地发行、Codex Runner、DSH bundle、DSH UI、DSH Runner、双宿主并存与最终打包。每一步都要真实构建安装环境并启动宿主验证，完成后更新进度、提交并推送；单测不能替代真实安装和真实会话证据。
+P0 基线隔离、P1 共享 Application 和 P2 snapshot/pin/迁移/跨进程锁已完成并封口。下一阶段是 P3 copy 物化与旧链接迁移，但尚未开始；之后才依次进入本地发行、Codex Runner、DSH bundle、DSH UI、DSH Runner、双宿主并存与最终打包。每一步都要真实构建安装环境并启动宿主验证，完成后更新进度、提交并推送；单测不能替代真实安装和真实会话证据。
 
 ---
 
