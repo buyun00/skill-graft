@@ -4,13 +4,20 @@ import { createLeaseLockManager } from '../adapters/lease-lock.js'
 import { createLocalApplicationPorts } from '../adapters/local-application-ports.js'
 import { createLocalDurableSchemaResolver } from '../adapters/local-durable-schema.js'
 import { createLocalInvocationTraceAdapter } from '../adapters/local-invocation-trace.js'
+import { createLocalMaterializationRecordPort } from '../adapters/local-materialization-records.js'
+import { createLocalMaterializer } from '../adapters/local-materializer.js'
 import {
   createLocalP2ApplicationPorts,
   localLibraryCaptureRoots
 } from '../adapters/local-p2-ports.js'
+import { createLocalRuntimeAssetRepository } from '../adapters/local-runtime-assets.js'
 import { createPersistentRequestLedger } from '../adapters/persistent-request-ledger.js'
 import { createSnapshotRepository } from '../adapters/snapshot-repository.js'
-import { createHubApplication, type HubApplication } from '../application/index.js'
+import {
+  createHubApplication,
+  type HubApplication,
+  type P3ApplicationPorts
+} from '../application/index.js'
 import { CONTRACT_VERSION, isPortableOpaqueIdentifier, type CommandMeta } from '../contracts/index.js'
 import type { LocalHostContext } from '../adapters/host-context.js'
 import { createLocalSessionPort, type LocalSessionPort, type LocalSessionPortOptions } from './session/local-session-port.js'
@@ -46,6 +53,7 @@ export type CreateLocalHostOptions = {
   traceEnvironment?: NodeJS.ProcessEnv
   localSessionOptions?: LocalSessionPortOptions
   p2?: P2ApplicationPorts
+  p3?: P3ApplicationPorts
   transactions?: ApplicationTransactionPort
   runtimeRevision?: string
   leaseMs?: number
@@ -86,6 +94,7 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
   let context = options.context || createHub(options.dataRoot || options.packageRoot)
   const hostId = options.hostId || 'local'
   let p2 = options.p2
+  let p3 = options.p3
   let transactions = options.transactions
   let ensureReady = async () => {}
 
@@ -101,7 +110,7 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
       renewalIntervalMs: options.renewalIntervalMs ?? 10_000
     })
     context = { ...context, persist: durable.persist }
-    const queries = createLocalApplicationPorts(context).queries
+    const queries = createLocalApplicationPorts(context, { packageRoot: options.packageRoot }).queries
     const snapshots = createSnapshotRepository({
       root: context.path.join(context.hubRoot, 'skill-review', 'library'),
       sourceRoot: context.hubRoot,
@@ -109,12 +118,31 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
       captureRoots: () => localLibraryCaptureRoots(context),
       persist: durable.persist
     })
+    const runtimeRevision = runtimeRevisionOf(context, options.packageRoot, options.runtimeRevision)
     p2 = createLocalP2ApplicationPorts(context, {
-      runtimeRevision: runtimeRevisionOf(context, options.packageRoot, options.runtimeRevision),
+      runtimeRevision,
       queries,
       snapshots,
       persist: durable.persist
     })
+    if (!p3) {
+      const runtimeAssets = createLocalRuntimeAssetRepository({
+        packageRoot: options.packageRoot,
+        runtimeRevision
+      })
+      p3 = {
+        runtimeAssets,
+        materialize: createLocalMaterializer({
+          packageRoot: options.packageRoot,
+          dataRoot: context.hubRoot,
+          identities: p2.identities,
+          snapshots,
+          runtimeAssets,
+          legacySourceRoot: context.hubRoot
+        }),
+        records: createLocalMaterializationRecordPort(context, durable.persist)
+      }
+    }
     transactions = durable.transactions
     let inFlightRecovery: Promise<void> | undefined
     ensureReady = () => {
@@ -139,13 +167,14 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
   const localSessions = options.sessions ? undefined : createLocalSessionPort(context, options.localSessionOptions)
   const sessions = options.sessions || localSessions as LocalSessionPort
   const ledger = options.ledger || createPersistentRequestLedger(context)
-  const applicationPorts = createLocalApplicationPorts(context)
+  const applicationPorts = createLocalApplicationPorts(context, { packageRoot: options.packageRoot })
   const application = createHubApplication({
     ...applicationPorts,
     recovery: { recover: ensureReady },
     sessions,
     ledger,
     p2,
+    p3,
     transactions,
     trace
   })

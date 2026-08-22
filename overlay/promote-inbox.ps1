@@ -27,7 +27,6 @@ if ([string]::IsNullOrWhiteSpace($Id)) {
     throw 'Id must not be empty'
 }
 
-$hubRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $arguments = @(
     'decide',
     '--id', $Id,
@@ -42,20 +41,9 @@ if (-not [string]::IsNullOrWhiteSpace($MergeTarget)) {
 $arguments += '--contract-v1'
 
 $sg = Resolve-SkillGraftCommand
-$hadHubRoot = Test-Path -LiteralPath 'Env:HUB_ROOT'
-$previousHubRoot = $env:HUB_ROOT
-try {
-    $env:HUB_ROOT = $hubRoot
-    & $sg @arguments
-    $sgExitCode = $LASTEXITCODE
-    $sgSucceeded = $?
-} finally {
-    if ($hadHubRoot) {
-        $env:HUB_ROOT = $previousHubRoot
-    } else {
-        Remove-Item -LiteralPath 'Env:HUB_ROOT' -ErrorAction SilentlyContinue
-    }
-}
+& $sg @arguments
+$sgExitCode = $LASTEXITCODE
+$sgSucceeded = $?
 
 if ($null -eq $sgExitCode) {
     $sgExitCode = if ($sgSucceeded) { 0 } else { 1 }

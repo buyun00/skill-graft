@@ -1,20 +1,25 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomBytes } from 'node:crypto'
+import { isPortableOpaqueIdentifier } from '../contracts/index.js'
 import type {
   ApplicationTransactionDecision,
   ApplicationTransactionIdentity,
+  ApplicationTransactionParticipant,
+  ApplicationTransactionParticipantContext,
   ApplicationTransactionPort,
   ApplicationTransactionSavepoint,
   ApplicationWriteTransaction
 } from '../application/transaction-port.js'
 import {
   ApplicationTransactionErrorBase,
+  isApplicationTransactionError,
   type ApplicationTransactionError
 } from '../application/transaction-port.js'
 import type { LocalHubStateFile, PersistPort } from './host-context.js'
 import { DurableLimitError } from './durable-files.js'
 import {
   DurableCorruptionError,
+  DurableRecoveryRequiredError,
   DurableStateStore,
   type DurableJsonSchema,
   type DurableRecoveryResult,
@@ -69,6 +74,23 @@ type RuntimeSavepoint = ApplicationTransactionSavepoint & {
 type SavepointState = {
   ordinal: number
   staged: Map<string, StagedDocument>
+  participantCount: number
+}
+
+type ParticipantState =
+  | 'enlisted'
+  | 'publish-started'
+  | 'published'
+  | 'rollback-started'
+  | 'rolled-back'
+  | 'finalize-started'
+  | 'finalized'
+
+type ParticipantEntry = {
+  participant: ApplicationTransactionParticipant
+  participantId: string
+  ordinal: number
+  state: ParticipantState
 }
 
 type ActiveTransaction = {
@@ -80,6 +102,10 @@ type ActiveTransaction = {
   staged: Map<string, StagedDocument>
   savepoints: Map<ApplicationTransactionSavepoint, SavepointState>
   nextSavepoint: number
+  participants: ParticipantEntry[]
+  cancelledParticipants: ParticipantEntry[]
+  participantIds: Set<string>
+  nextParticipant: number
 }
 
 type RuntimeDecision<T> = ApplicationTransactionDecision<T> & {
@@ -146,6 +172,27 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+function participantIdKey(participant: ApplicationTransactionParticipant): string {
+  if (!participant || typeof participant !== 'object'
+    || typeof participant.publish !== 'function'
+    || typeof participant.rollback !== 'function'
+    || typeof participant.finalize !== 'function') {
+    throw new DurableTransactionFailureError('transaction participant is invalid')
+  }
+  const id = participant.participantId
+  if (!isPortableOpaqueIdentifier(id) || id.length > 128) {
+    throw new DurableTransactionFailureError(
+      'transaction participantId must be a portable opaque identifier'
+    )
+  }
+  return id.toLowerCase()
+}
+
+function participantPublicationIsUncertain(error: unknown): boolean {
+  return error instanceof DurableRecoveryRequiredError
+    || isApplicationTransactionError(error) && error.code === 'LOCK_NOT_OWNED'
+}
+
 function assertTransactionIdentity(identity: ApplicationTransactionIdentity): void {
   if (!identity || typeof identity !== 'object') throw new Error('transaction identity is required')
   if (identity.scope === 'hub-global') {
@@ -197,6 +244,7 @@ export function createDurableTransactionHost(options: DurableTransactionHostOpti
 } {
   const store = new DurableStateStore(options)
   const storage = new AsyncLocalStorage<ActiveTransaction>()
+  const usedParticipants = new WeakSet<object>()
   const maximumStagedDocumentBytes = options.limits?.maxDocumentBytes ?? 16 * 1024 * 1024
 
   function current(): ActiveTransaction | undefined {
@@ -320,7 +368,7 @@ export function createDurableTransactionHost(options: DurableTransactionHostOpti
     try {
       for (const lease of leases) await lease.renew()
     } catch (error) {
-      if ((error as { code?: unknown })?.code === 'LOCK_NOT_OWNED') throw error
+      if (isApplicationTransactionError(error) && error.code === 'LOCK_NOT_OWNED') throw error
       throw new DurableLockNotOwnedError(asError(error).message)
     }
   }
@@ -356,14 +404,20 @@ export function createDurableTransactionHost(options: DurableTransactionHostOpti
         issuedDecision: null,
         staged: new Map(),
         savepoints: new Map(),
-        nextSavepoint: 0
+        nextSavepoint: 0,
+        participants: [],
+        cancelledParticipants: [],
+        participantIds: new Set(),
+        nextParticipant: 0
       }
       let renewalFailure: unknown
+      let renewalFailed = false
       let renewal = Promise.resolve()
       const intervalMs = options.renewalIntervalMs ?? 0
       const timer = intervalMs > 0 ? setInterval(() => {
         renewal = renewal.then(() => renewAll(leases)).catch((error) => {
-          renewalFailure ||= error
+          if (!renewalFailed) renewalFailure = error
+          renewalFailed = true
         })
       }, intervalMs) : undefined
       timer?.unref()
@@ -374,6 +428,10 @@ export function createDurableTransactionHost(options: DurableTransactionHostOpti
       }
 
       const control: ApplicationWriteTransaction = {
+        revalidateLease() {
+          assertOpen()
+          return renewAll(leases)
+        },
         savepoint() {
           assertOpen()
           const ordinal = ++transaction.nextSavepoint
@@ -386,7 +444,8 @@ export function createDurableTransactionHost(options: DurableTransactionHostOpti
           }) as RuntimeSavepoint
           transaction.savepoints.set(savepoint, {
             ordinal,
-            staged: new Map(transaction.staged)
+            staged: new Map(transaction.staged),
+            participantCount: transaction.participants.length
           })
           return savepoint
         },
@@ -403,9 +462,34 @@ export function createDurableTransactionHost(options: DurableTransactionHostOpti
             throw new DurableTransactionFailureError('savepoint is not owned by this transaction or was already used')
           }
           transaction.staged = new Map(state.staged)
+          transaction.cancelledParticipants.push(
+            ...transaction.participants.splice(state.participantCount)
+          )
           for (const [candidate, candidateState] of transaction.savepoints) {
             if (candidateState.ordinal >= state.ordinal) transaction.savepoints.delete(candidate)
           }
+        },
+        enlist(participant) {
+          assertOpen()
+          const idKey = participantIdKey(participant)
+          if (transaction.participantIds.has(idKey)) {
+            throw new DurableTransactionFailureError(
+              'transaction participantId is already enlisted'
+            )
+          }
+          if (usedParticipants.has(participant)) {
+            throw new DurableTransactionFailureError(
+              'transaction participant object is one-shot and was already enlisted'
+            )
+          }
+          transaction.participantIds.add(idKey)
+          usedParticipants.add(participant)
+          transaction.participants.push({
+            participant,
+            participantId: participant.participantId,
+            ordinal: ++transaction.nextParticipant,
+            state: 'enlisted'
+          })
         },
         commit<U>(value: U): ApplicationTransactionDecision<U> {
           assertOpen()
@@ -437,13 +521,64 @@ export function createDurableTransactionHost(options: DurableTransactionHostOpti
         }
       }
 
+      const participantContext: ApplicationTransactionParticipantContext = Object.freeze({
+        revalidateLease: () => renewAll(leases)
+      })
+
+      async function rollbackParticipants(entries: readonly ParticipantEntry[]): Promise<Error | null> {
+        let firstFailure: Error | null = null
+        for (const entry of [...entries].sort((left, right) => right.ordinal - left.ordinal)) {
+          if (entry.state === 'rollback-started'
+            || entry.state === 'rolled-back'
+            || entry.state === 'finalize-started'
+            || entry.state === 'finalized') continue
+          try {
+            // Cleanup is permitted only while the same transaction leases are
+            // demonstrably still owned. The participant may revalidate again
+            // immediately before its own final filesystem operation.
+            await renewAll(leases)
+            entry.state = 'rollback-started'
+            await entry.participant.rollback(participantContext)
+            entry.state = 'rolled-back'
+          } catch (error) {
+            firstFailure ??= asError(error)
+            // Lease loss or an uncertain publication is a recovery boundary,
+            // not permission to guess and overwrite potentially committed data.
+            if (participantPublicationIsUncertain(error)) break
+          }
+        }
+        return firstFailure
+      }
+
+      async function finalizeParticipants(entries: readonly ParticipantEntry[]): Promise<void> {
+        for (const entry of [...entries].sort((left, right) => right.ordinal - left.ordinal)) {
+          if (entry.state !== 'published') continue
+          entry.state = 'finalize-started'
+          try {
+            await renewAll(leases)
+            await entry.participant.finalize(participantContext)
+            entry.state = 'finalized'
+          } catch {
+            // The JSON WAL is already the durable commit decision. Participant
+            // journal cleanup is intentionally best-effort and recoverable.
+          }
+        }
+      }
+
       let failure: unknown
+      let failed = false
       let committed = false
       let result: T | undefined
       try {
         store.recoverPending()
-        const decision = await storage.run(transaction, () => callback(control)) as RuntimeDecision<T>
-        transaction.active = false
+        let decision: RuntimeDecision<T> | undefined
+        try {
+          decision = await storage.run(transaction, () => callback(control)) as RuntimeDecision<T>
+        } finally {
+          // Participant publication/rollback is transaction-host work, not a
+          // continuation of the Application callback's writable ALS context.
+          transaction.active = false
+        }
         const marker = decision?.[DECISION_MARKER]
         if (!decision
           || decision !== transaction.issuedDecision
@@ -456,9 +591,28 @@ export function createDurableTransactionHost(options: DurableTransactionHostOpti
         if (decision.kind === 'abort') throw asError(decision.error)
         if (timer) clearInterval(timer)
         await renewal
-        if (renewalFailure) throw asError(renewalFailure)
-        // This is the final owner/lease check for hub-global and (when used)
-        // worktree locks immediately before the WAL may be published.
+        if (renewalFailed) throw asError(renewalFailure)
+
+        const cancelledFailure = await rollbackParticipants(transaction.cancelledParticipants)
+        if (cancelledFailure) throw cancelledFailure
+        if ((transaction.participants.length > 0 || transaction.cancelledParticipants.length > 0)
+          && transaction.staged.size === 0) {
+          throw new DurableTransactionFailureError(
+            'a transaction with an external participant must stage at least one durable document'
+          )
+        }
+
+        // Final owner/lease check before external publication. Every
+        // participant then publishes in enlistment order.
+        await renewAll(leases)
+        for (const entry of transaction.participants) {
+          entry.state = 'publish-started'
+          await entry.participant.publish(participantContext)
+          entry.state = 'published'
+        }
+
+        // External bytes must be present before the JSON WAL can make their
+        // corresponding state/ledger truth durable.
         await renewAll(leases)
         if (transaction.staged.size > 0) {
           await store.commit(
@@ -471,19 +625,41 @@ export function createDurableTransactionHost(options: DurableTransactionHostOpti
         }
         result = decision.value
         committed = true
+        await finalizeParticipants(transaction.participants)
       } catch (error) {
         failure = error
+        failed = true
+        if (timer) clearInterval(timer)
+        await renewal
+        if (renewalFailed) failure = renewalFailure
+        if (!committed
+          && !participantPublicationIsUncertain(failure)
+          && (transaction.participants.length > 0 || transaction.cancelledParticipants.length > 0)) {
+          const rollbackFailure = await rollbackParticipants([
+            ...transaction.participants,
+            ...transaction.cancelledParticipants
+          ])
+          if (rollbackFailure && participantPublicationIsUncertain(rollbackFailure)) {
+            failure = rollbackFailure
+          }
+        }
       } finally {
         if (timer) clearInterval(timer)
         transaction.active = false
         transaction.staged.clear()
         transaction.savepoints.clear()
+        transaction.participants.length = 0
+        transaction.cancelledParticipants.length = 0
+        transaction.participantIds.clear()
         const releaseFailure = await releaseAll(leases)
         // Once a WAL has committed, failure to remove an already-owned lease
         // must not turn durable success into a false command failure.
-        if (!committed && !failure && releaseFailure) failure = releaseFailure
+        if (!committed && !failed && releaseFailure) {
+          failure = releaseFailure
+          failed = true
+        }
       }
-      if (failure) throw asError(failure)
+      if (failed) throw asError(failure)
       return result as T
     }
   }

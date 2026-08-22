@@ -53,6 +53,7 @@ const invocationTraceEnvironmentKeys = [
   'PATH',
   'DSH_HOME',
   'HOME',
+  'XDG_CONFIG_HOME',
   'USERPROFILE',
   'APPDATA',
   'LOCALAPPDATA',

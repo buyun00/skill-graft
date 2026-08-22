@@ -5,9 +5,15 @@ import {
   QUERY_COMMAND_KINDS,
   WRITE_COMMAND_KINDS,
   validateHubStateV2,
-  validateLibrarySnapshotManifestV1
+  validateLegacyMigrationRecordV1,
+  validateLibrarySnapshotManifestV1,
+  validateMaterializationCommitRecordV1
 } from '../contracts/index.js'
 import { validateLegacyHubStateV1 } from '../core/migration.js'
+import {
+  verifyLegacyMigrationRecordIdentity,
+  verifyMaterializationMarker
+} from '../core/materialization.js'
 import { verifyLibrarySnapshotManifest } from '../core/snapshot.js'
 import type { DurableJsonSchema, DurableSchemaResolver } from './durable-state.js'
 
@@ -17,7 +23,11 @@ const ERROR_CODES = new Set<string>(HUB_ERROR_CODES)
 const SESSION_KINDS = new Set(['attach', 'detach', 'edit', 'chat', 'analyze'])
 const SESSION_STATUSES = new Set(['queued', 'running', 'waiting', 'completed', 'failed', 'cancelled'])
 const SHA256_HEX = /^[a-f0-9]{64}$/
+const SHA256_IDENTIFIER = /^sha256:[a-f0-9]{64}$/
+const WORKTREE_TARGET_ID = /^worktree:[a-f0-9]{24}$/
 const SNAPSHOT_DOCUMENT = /^skill-review\/library\/snapshots\/[a-f0-9]{64}\.json$/
+const MATERIALIZATION_CURRENT_DOCUMENT = /^skill-review\/materializations\/current\/([a-f0-9]{64})\.json$/
+const LEGACY_MIGRATION_DOCUMENT = /^skill-review\/materializations\/migrations\/([a-f0-9]{64})\.json$/
 const HISTORY_DOCUMENT = /^skill-review\/history\/[A-Za-z0-9][A-Za-z0-9._-]{0,159}\.json$/
 
 type Validation = { valid: true } | { valid: false; message: string }
@@ -175,7 +185,21 @@ function validateSession(value: unknown): boolean {
   if (!record(value) || !exactKeys(value, [
     'id', 'kind', 'path', 'worktree', 'intent', 'pid', 'promptFile', 'logFile',
     'lastFile', 'startedAt', 'status', 'exitCode', 'error', 'codexSessionId'
-  ], ['model', 'effort', 'summary', 'lastMessage', 'endedAt', 'canResume', 'inboxIds'])) return false
+  ], [
+    'model', 'effort', 'summary', 'lastMessage', 'endedAt', 'canResume',
+    'inboxIds', 'attachCompletion'
+  ])) return false
+  const completion = value.attachCompletion
+  const completionValid = completion === undefined || record(completion)
+    && exactKeys(completion, ['targetId', 'pathKey', 'materializationId', 'completedAt'])
+    && typeof completion.targetId === 'string' && WORKTREE_TARGET_ID.test(completion.targetId)
+    && typeof completion.pathKey === 'string' && SHA256_IDENTIFIER.test(completion.pathKey)
+    && typeof completion.materializationId === 'string' && SHA256_IDENTIFIER.test(completion.materializationId)
+    && isoDate(completion.completedAt)
+    && value.kind === 'attach'
+    && value.status === 'completed'
+    && value.exitCode === 0
+    && value.canResume === false
   return boundedString(value.id, 256)
     && typeof value.kind === 'string' && SESSION_KINDS.has(value.kind)
     && ['path', 'worktree', 'intent', 'promptFile', 'logFile', 'lastFile', 'error', 'codexSessionId']
@@ -189,6 +213,7 @@ function validateSession(value: unknown): boolean {
     && (value.canResume === undefined || typeof value.canResume === 'boolean')
     && (value.inboxIds === undefined || Array.isArray(value.inboxIds) && value.inboxIds.length <= 10_000
       && value.inboxIds.every((id) => boundedString(id, 256)))
+    && completionValid
 }
 
 function validateSessions(value: unknown): Validation {
@@ -246,6 +271,21 @@ function validateSnapshot(value: unknown): Validation {
     : invalid('snapshot manifest failed frozen validation')
 }
 
+function validateMaterializationCurrent(value: unknown): Validation {
+  const validation = validateMaterializationCommitRecordV1(value)
+  return validation.valid
+    && (validation.value.marker == null || verifyMaterializationMarker(validation.value.marker))
+    ? ok()
+    : invalid('materialization commit record failed frozen validation')
+}
+
+function validateLegacyMigration(value: unknown): Validation {
+  const validation = validateLegacyMigrationRecordV1(value)
+  return validation.valid && verifyLegacyMigrationRecordIdentity(validation.value)
+    ? ok()
+    : invalid('legacy migration record failed frozen validation')
+}
+
 const SCHEMAS = {
   state: {
     name: 'Hub state',
@@ -256,7 +296,9 @@ const SCHEMAS = {
   audit: { name: 'audit events', validate: validateAudit },
   sessions: { name: 'sessions', validate: validateSessions },
   history: { name: 'history record', validate: validateHistory },
-  snapshot: { name: 'library snapshot manifest', validate: validateSnapshot }
+  snapshot: { name: 'library snapshot manifest', validate: validateSnapshot },
+  materializationCurrent: { name: 'materialization commit record', validate: validateMaterializationCurrent },
+  legacyMigration: { name: 'legacy migration record', validate: validateLegacyMigration }
 } satisfies Record<string, DurableJsonSchema>
 
 export function createLocalDurableSchemaResolver(): DurableSchemaResolver {
@@ -269,6 +311,34 @@ export function createLocalDurableSchemaResolver(): DurableSchemaResolver {
       default:
         if (HISTORY_DOCUMENT.test(relativePath)) return SCHEMAS.history
         if (SNAPSHOT_DOCUMENT.test(relativePath)) return SCHEMAS.snapshot
+        if (MATERIALIZATION_CURRENT_DOCUMENT.test(relativePath)) {
+          const expectedPathKey = `sha256:${relativePath.match(MATERIALIZATION_CURRENT_DOCUMENT)?.[1] ?? ''}`
+          return {
+            ...SCHEMAS.materializationCurrent,
+            validate(value) {
+              const base = validateMaterializationCurrent(value)
+              if (!base.valid) return base
+              const validation = validateMaterializationCommitRecordV1(value)
+              return validation.valid && validation.value.pathKey === expectedPathKey
+                ? ok()
+                : invalid('materialization commit record path key does not match its durable target')
+            }
+          }
+        }
+        if (LEGACY_MIGRATION_DOCUMENT.test(relativePath)) {
+          const expectedMigrationId = `sha256:${relativePath.match(LEGACY_MIGRATION_DOCUMENT)?.[1] ?? ''}`
+          return {
+            ...SCHEMAS.legacyMigration,
+            validate(value) {
+              const base = validateLegacyMigration(value)
+              if (!base.valid) return base
+              const validation = validateLegacyMigrationRecordV1(value)
+              return validation.valid && validation.value.migrationId === expectedMigrationId
+                ? ok()
+                : invalid('legacy migration record ID does not match its durable target')
+            }
+          }
+        }
         return undefined
     }
   }

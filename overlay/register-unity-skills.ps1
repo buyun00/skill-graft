@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Workspace
+    [string]$Workspace,
+    [Alias('HostRoot')]
+    [string]$PackageRoot
 )
 
 Set-StrictMode -Version Latest
@@ -8,15 +10,11 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HubLib.ps1')
 
 if ([string]::IsNullOrWhiteSpace($Workspace)) {
-    $fromHub = (& git -C (Get-HubRoot) config --get ozdqp.gameRepo 2>$null)
-    if (-not [string]::IsNullOrWhiteSpace($fromHub)) {
-        $Workspace = $fromHub.Trim()
-    } else {
-        $Workspace = (Get-Location).Path
-    }
+    $Workspace = (Get-Location).Path
 }
 
 $workspace = Get-GameRepoRoot $Workspace
+[void](Get-SkillGraftPackageRoot -Worktree $workspace -PackageRoot $PackageRoot)
 $generatedSkill = Get-NormalizedPath (Join-Path $workspace 'baloot_client\.agents\skills\unity-skills')
 $rootSkill = Get-NormalizedPath (Join-Path $workspace '.agents\skills\unity-skills')
 

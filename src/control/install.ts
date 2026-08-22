@@ -701,6 +701,7 @@ function resolveDaemonTraceEnvironment(
     PATH: requiredPinnedValue('PATH'),
     DSH_HOME: requiredPinnedValue('DSH_HOME'),
     HOME: requiredPinnedValue('HOME'),
+    XDG_CONFIG_HOME: requiredPinnedValue('XDG_CONFIG_HOME'),
     USERPROFILE: requiredPinnedValue('USERPROFILE'),
     APPDATA: requiredPinnedValue('APPDATA'),
     LOCALAPPDATA: requiredPinnedValue('LOCALAPPDATA'),
@@ -715,6 +716,7 @@ function resolveDaemonTraceEnvironment(
   const expectedHome = join(gate.runRoot, 'home')
   for (const [name, expected] of [
     ['HOME', expectedHome],
+    ['XDG_CONFIG_HOME', join(expectedHome, 'xdg-config')],
     ['USERPROFILE', expectedHome],
     ['APPDATA', join(expectedHome, 'appdata')],
     ['LOCALAPPDATA', join(expectedHome, 'localappdata')],

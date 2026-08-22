@@ -12,28 +12,53 @@ if [ "$enabled" != "true" ]; then
     exit 0
 fi
 
-hub="$(git config --get ozdqp.skillWatchWorkspace 2>/dev/null)"
-if [ -z "$hub" ]; then
+game="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$game" ]; then
     cat >/dev/null
     exit 0
 fi
 
-game="$(git rev-parse --show-toplevel 2>/dev/null)"
-cli="${hub%/}/dist/control/cli.js"
-if [ ! -f "$cli" ] || [ -z "$game" ]; then
+hub="$(git -C "$game" config --get ozdqp.localOverlaySource 2>/dev/null)"
+if [ -z "$hub" ]; then
     cat >/dev/null
     exit 0
 fi
+hub="$(printf '%s' "$hub" | tr '\\\\' '/')"
+case "$hub" in
+    /*|[A-Za-z]:/*) ;;
+    *) cat >/dev/null; exit 0 ;;
+esac
+
+cli="${hub%/}/dist/control/cli.js"
+if [ ! -f "$cli" ]; then
+    cat >/dev/null
+    exit 0
+fi
+
+primary_root="$(printf '%s' "${SKILL_GRAFT_HOME:-}" | tr '\\\\' '/')"
+legacy_root="$(printf '%s' "${HUB_ROOT:-}" | tr '\\\\' '/')"
+if [ -n "$primary_root" ] && [ -n "$legacy_root" ] && [ "${primary_root%/}" != "${legacy_root%/}" ]; then
+    cat >/dev/null
+    exit 0
+fi
+data_root="${primary_root:-$legacy_root}"
+if [ -z "$data_root" ]; then
+    data_root="$(git -C "$game" config --get ozdqp.skillWatchWorkspace 2>/dev/null)"
+fi
+data_root="$(printf '%s' "$data_root" | tr '\\\\' '/')"
+case "$data_root" in
+    /*|[A-Za-z]:/*) ;;
+    *) cat >/dev/null; exit 0 ;;
+esac
 
 payload="$(cat)"
 if [ -z "$payload" ]; then
     exit 0
 fi
 
-printf '%s\n' "$payload" | HUB_ROOT="$hub" node "$cli" ingest --game-repo "$game" --dispatch
+printf '%s\n' "$payload" | SKILL_GRAFT_HOME="$data_root" HUB_ROOT="$data_root" node "$cli" ingest --game-repo "$game" --dispatch
 status=$?
 if [ $status -ne 0 ]; then
     echo "[OZDQP Skill Hub] ingest failed (exit $status); git operation continues." >&2
 fi
 exit 0
-

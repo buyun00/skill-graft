@@ -3,6 +3,7 @@ import {
   HUB_STATE_SCHEMA_VERSION,
   QUERY_COMMAND_KINDS,
   UNKNOWN_COMMAND_KIND,
+  WORKTREE_PIN_SCHEMA_VERSION,
   WRITE_COMMAND_KINDS,
   type AuditEvent,
   type CommandDataByKind,
@@ -14,15 +15,24 @@ import {
   type HubStateV2,
   type InboxItemView,
   type LegacyAttachSourcePolicy,
+  type LegacyMigrationPlanV1,
+  type LegacyMigrationRecordV1,
+  type LegacyRollbackPlanV1,
   type LibrarySnapshotManifestV1,
+  type MaterializationCommitRecordV1,
+  type MaterializationMarkerV1,
+  type MaterializePlanV1,
   type Sha256Identifier,
   type SessionKind,
   type SessionTarget,
   type SessionView,
+  type RuntimeAssetManifestV1,
+  type WorktreePinV1,
   type WriteCommandKind,
   isPortableOpaqueIdentifier,
   validateHubStateV2,
-  validateLibrarySnapshotManifestV1
+  validateLibrarySnapshotManifestV1,
+  validateMaterializationCommitRecordV1
 } from '../contracts/index.js'
 import { planLegacyAttach, type LegacyAttachPlanDecision } from '../core/legacy-attach.js'
 import { planLegacyDetach, type LegacyDetachPlanDecision } from '../core/legacy-detach.js'
@@ -56,7 +66,22 @@ import {
   type CanonicalJsonValue
 } from '../core/canonical.js'
 import { createLibrarySnapshotManifest, verifyLibrarySnapshotManifest } from '../core/snapshot.js'
-import { transitionWorktreePin } from '../core/worktree-pin.js'
+import {
+  rollbackMaterializedWorktreePin,
+  transitionWorktreePin
+} from '../core/worktree-pin.js'
+import {
+  planLegacyMigration,
+  planLegacyRollback,
+  planMaterialization,
+  validateSelectedMaterializationSkills,
+  verifyLegacyMigrationPlanHash,
+  verifyLegacyMigrationRecordIdentity,
+  verifyLegacyRollbackPlanHash,
+  verifyMaterializationMarker,
+  verifyMaterializePlanHash,
+  verifyRuntimeAssetManifest
+} from '../core/materialization.js'
 import {
   projectHubStatus,
   projectSkillInventory,
@@ -77,6 +102,7 @@ import type {
   WorktreeIdentity
 } from './ports.js'
 import type { HubStateRepositoryPort } from './use-case-ports.js'
+import type { P3ApplicationPorts } from './materialize-port.js'
 import {
   APPLICATION_TRANSACTION_ERROR_CODES,
   isApplicationTransactionError,
@@ -117,6 +143,7 @@ export type HubApplicationOptions = {
   sessions: SessionPort
   ledger: RequestLedgerPort
   p2: P2ApplicationPorts
+  p3?: P3ApplicationPorts
   transactions: ApplicationTransactionPort
   trace?: InvocationTracePort
   handler?: 'application.commandBus'
@@ -203,6 +230,18 @@ function transactionErrorOf(value: unknown): HubError | null {
   }
   if (code === 'SNAPSHOT_INVALID') {
     return { code, message: 'library snapshot is invalid', retryable: false }
+  }
+  if (code === 'RUNTIME_ASSET_INVALID') {
+    return { code, message: 'runtime assets are invalid', retryable: false }
+  }
+  if (code === 'MATERIALIZATION_MARKER_INVALID') {
+    return { code, message: 'materialization marker is invalid', retryable: false }
+  }
+  if (code === 'LEGACY_PLAN_STALE') {
+    return { code, message: 'legacy materialization plan is stale', retryable: false }
+  }
+  if (code === 'UNSUPPORTED_LAYOUT') {
+    return { code, message: 'worktree layout is unsupported', retryable: false }
   }
   return { code: 'PORT_FAILURE', message: 'write transaction failed', retryable: true }
 }
@@ -407,6 +446,10 @@ function validatePayload(command: HubCommand) {
       assertAllowedFields(value, ['worktree'])
       requireString(value, 'worktree')
       return
+    case 'planSync':
+      assertAllowedFields(value, ['worktree'])
+      requireString(value, 'worktree')
+      return
     case 'repairLegacy':
       assertAllowedFields(value, ['worktree'])
       requireString(value, 'worktree')
@@ -490,6 +533,35 @@ function validatePayload(command: HubCommand) {
       requireString(value, 'worktree')
       requireSha256(value, 'snapshotId')
       validateSelectedSkills(value.selectedSkills)
+      return
+    case 'claimWorktree':
+      assertAllowedFields(value, ['worktree', 'snapshotId', 'selectedSkills', 'sessionId'])
+      requireString(value, 'worktree')
+      requireSha256(value, 'snapshotId')
+      if (!Array.isArray(value.selectedSkills)) invalid('selectedSkills must be an explicit array')
+      validateSelectedSkills(value.selectedSkills)
+      requireIdentifier(value, 'sessionId')
+      return
+    case 'sync':
+      assertAllowedFields(value, ['worktree', 'planHash', 'sessionId'])
+      requireString(value, 'worktree')
+      requireSha256(value, 'planHash')
+      optionalIdentifier(value, 'sessionId')
+      return
+    case 'migrateLegacy':
+      assertAllowedFields(value, ['worktree', 'mode', 'planHash'])
+      requireString(value, 'worktree')
+      if (value.mode !== 'dryRun' && value.mode !== 'commit') invalid('mode must be dryRun or commit')
+      if (value.mode === 'commit') requireSha256(value, 'planHash')
+      else if (value.planHash !== undefined) invalid('planHash is only valid for commit mode')
+      return
+    case 'rollbackLegacyMigration':
+      assertAllowedFields(value, ['worktree', 'migrationId', 'mode', 'planHash'])
+      requireString(value, 'worktree')
+      requireSha256(value, 'migrationId')
+      if (value.mode !== 'dryRun' && value.mode !== 'commit') invalid('mode must be dryRun or commit')
+      if (value.mode === 'commit') requireSha256(value, 'planHash')
+      else if (value.planHash !== undefined) invalid('planHash is only valid for commit mode')
       return
     case 'migrateState':
       assertAllowedFields(value, ['mode', 'planHash'])
@@ -709,9 +781,8 @@ async function authorizeFirstAttach(
     || session.kind !== 'attach'
     || session.target?.kind !== 'worktree'
     || session.target.id !== targetId
-    || session.status === 'completed'
-    || session.status === 'failed'
-    || session.status === 'cancelled') {
+    || session.status !== 'waiting'
+    || session.exitCode !== 0) {
     return false
   }
   return true
@@ -1256,6 +1327,981 @@ async function executeSetPin(
   }
 }
 
+function requireP3(p3: P3ApplicationPorts | undefined): P3ApplicationPorts {
+  if (!p3) throw new ApplicationFault('PORT_FAILURE', 'materialization host is unavailable', true)
+  return p3
+}
+
+function checkedRuntimeAssetManifest(value: unknown): RuntimeAssetManifestV1 {
+  if (!verifyRuntimeAssetManifest(value)) {
+    throw new ApplicationFault('RUNTIME_ASSET_INVALID', 'runtime asset manifest failed shared integrity validation')
+  }
+  return value
+}
+
+function checkedMaterializationRecord(
+  value: unknown,
+  pathKey: Sha256Identifier
+): MaterializationCommitRecordV1 | null {
+  if (value == null) return null
+  const validation = validateMaterializationCommitRecordV1(value)
+  if (!validation.valid
+    || validation.value.pathKey !== pathKey
+    || validation.value.marker != null && !verifyMaterializationMarker(validation.value.marker)) {
+    throw new ApplicationFault('STATE_CORRUPT', 'materialization commit record failed integrity validation')
+  }
+  return validation.value
+}
+
+type MaterializationSourceContext = {
+  state: HubStateV2
+  pin: WorktreePinV1
+  snapshot: LibrarySnapshotManifestV1
+  runtimeAsset: RuntimeAssetManifestV1
+  durable: MaterializationCommitRecordV1 | null
+}
+
+type PlannedMaterialization = MaterializationSourceContext & {
+  plan: MaterializePlanV1
+}
+
+async function requireMaterializationSourceContext(
+  p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts,
+  identity: WorktreeIdentity
+): Promise<MaterializationSourceContext> {
+  const state = await requireCurrentState(p2)
+  const pin = state.worktrees[identity.pathKey]
+  if (!pin
+    || pin.pathKey !== identity.pathKey
+    || pin.worktreeId !== identity.worktreeId
+    || pin.claimState !== 'claimed'
+    || pin.requestedSnapshot == null) {
+    throw new ApplicationFault('WORKTREE_NOT_CLAIMED', 'worktree must have a matching claimed pin')
+  }
+  if (!state.librarySnapshots.includes(pin.requestedSnapshot)) {
+    throw new ApplicationFault('SNAPSHOT_NOT_FOUND', 'requested library snapshot is not registered')
+  }
+  const snapshot = await checkedSnapshotRead(p2, pin.requestedSnapshot)
+  if (!snapshot) throw new ApplicationFault('SNAPSHOT_NOT_FOUND', 'requested library snapshot was not found')
+  const runtimeAsset = checkedRuntimeAssetManifest(await p3.runtimeAssets.observe())
+  const selected = validateSelectedMaterializationSkills(snapshot, pin.selectedSkills)
+  if (!selected.ok) {
+    throw new ApplicationFault(
+      'INVALID_PIN',
+      'selected skills are not a canonical subset of the requested snapshot'
+    )
+  }
+  const durable = checkedMaterializationRecord(
+    await p3.records.readCurrent(identity.pathKey),
+    identity.pathKey
+  )
+  return { state, pin, snapshot, runtimeAsset, durable }
+}
+
+async function computeMaterializationPlan(
+  p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts,
+  worktree: string,
+  identity: WorktreeIdentity
+): Promise<PlannedMaterialization> {
+  const source = await requireMaterializationSourceContext(p2, p3, identity)
+  const { state, pin, snapshot, runtimeAsset, durable } = source
+  const inspection = await p3.materialize.inspect({
+    worktree,
+    identity,
+    snapshot,
+    runtimeAsset,
+    selectedSkills: pin.selectedSkills
+  })
+  const planned = planMaterialization({
+    pathKey: identity.pathKey,
+    worktreeId: identity.worktreeId,
+    stateRevision: state.stateRevision,
+    pin,
+    snapshot,
+    runtimeAsset,
+    durableMarker: durable,
+    observedMarker: inspection.observedMarker,
+    currentVisibilityState: inspection.currentVisibilityState,
+    desiredVisibilityState: inspection.desiredVisibilityState,
+    observations: inspection.observations,
+    gitFacts: inspection.gitFacts,
+    gitConfiguration: inspection.gitConfiguration
+  })
+  if (!planned.ok) {
+    const codes = new Set(planned.errors.map((error) => error.code))
+    if (codes.has('MATERIALIZATION_SOURCE_INVALID')) {
+      throw new ApplicationFault('SNAPSHOT_INVALID', 'materialization source inventory is incomplete')
+    }
+    if (codes.has('MATERIALIZATION_PIN_INVALID')) {
+      throw new ApplicationFault('INVALID_PIN', 'materialization pin no longer matches the requested source')
+    }
+    throw new ApplicationFault(
+      'PORT_FAILURE',
+      'materialization facts failed validation',
+      true
+    )
+  }
+  if (!verifyMaterializePlanHash(planned.plan)
+    || planned.plan.pathKey !== identity.pathKey
+    || planned.plan.worktreeId !== identity.worktreeId
+    || planned.plan.requested.snapshotId !== pin.requestedSnapshot) {
+    throw new ApplicationFault('STATE_CORRUPT', 'materialization plan failed integrity validation')
+  }
+  return { ...source, plan: planned.plan }
+}
+
+function worktreeMaterializationEvent(
+  runtime: ApplicationRuntimePort,
+  command: HubCommand,
+  type: 'worktree.claimed' | 'worktree.materialized',
+  pathKey: Sha256Identifier,
+  details: Record<string, string | number | boolean | null>
+): AuditEvent {
+  return {
+    eventVersion: CONTRACT_VERSION,
+    id: runtime.nextId('audit'),
+    type,
+    at: runtime.nowIso(),
+    requestId: command.meta.requestId,
+    hostId: command.meta.hostId,
+    transport: command.meta.transport,
+    commandKind: command.kind,
+    outcome: 'succeeded',
+    subject: `worktree:${pathKey}`,
+    details
+  }
+}
+
+async function executePlanSync(
+  p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts | undefined,
+  command: Extract<HubCommand, { kind: 'planSync' }>
+) {
+  const materialization = requireP3(p3)
+  const identity = await p2.identities.resolve(command.worktree)
+  const { plan } = await computeMaterializationPlan(p2, materialization, command.worktree, identity)
+  return {
+    action: 'planSync' as const,
+    status: plan.executable ? 'planned' as const : 'conflict' as const,
+    plan
+  }
+}
+
+async function authorizeClaimSession(
+  sessions: SessionPort,
+  identity: WorktreeIdentity,
+  sessionId: string
+): Promise<void> {
+  const session = await sessions.get(sessionId)
+  if (!session
+    || session.kind !== 'attach'
+    || session.target?.kind !== 'worktree'
+    || session.target.id !== identity.worktreeId
+    || session.status !== 'waiting'
+    || session.exitCode !== 0) {
+    throw new ApplicationFault(
+      'FIRST_ATTACH_SESSION_REQUIRED',
+      'claim requires a successful waiting attach session for this worktree'
+    )
+  }
+}
+
+async function executeClaimWorktree(
+  runtime: ApplicationRuntimePort,
+  sessions: SessionPort,
+  p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts | undefined,
+  lockedIdentity: WorktreeIdentity | undefined,
+  businessEvents: AuditEvent[],
+  command: Extract<HubCommand, { kind: 'claimWorktree' }>
+) {
+  requireP3(p3)
+  const identity = await requireLockedWorktreeIdentity(p2, lockedIdentity, command.worktree)
+  const state = await requireCurrentState(p2)
+  if (!state.librarySnapshots.includes(command.snapshotId)) {
+    throw new ApplicationFault('SNAPSHOT_NOT_FOUND', 'requested library snapshot is not registered')
+  }
+  const snapshot = await checkedSnapshotRead(p2, command.snapshotId)
+  if (!snapshot) throw new ApplicationFault('SNAPSHOT_NOT_FOUND', 'requested library snapshot was not found')
+  const selected = validateSelectedMaterializationSkills(snapshot, command.selectedSkills)
+  if (!selected.ok) {
+    throw new ApplicationFault('INVALID_PIN', 'selected skills are not a canonical subset of the snapshot')
+  }
+  await authorizeClaimSession(sessions, identity, command.sessionId)
+
+  const current = state.worktrees[identity.pathKey] ?? {
+    schemaVersion: WORKTREE_PIN_SCHEMA_VERSION,
+    pathKey: identity.pathKey,
+    worktreeId: identity.worktreeId,
+    requestedSnapshot: null,
+    materializedSnapshot: null,
+    selectedSkills: [],
+    claimState: 'unclaimed' as const
+  }
+  if (current.pathKey !== identity.pathKey || current.worktreeId !== identity.worktreeId) {
+    throw new ApplicationFault('STATE_CORRUPT', 'worktree pin identity does not match the resolved worktree')
+  }
+  const transition = transitionWorktreePin(current, {
+    kind: 'claim',
+    requestedSnapshot: command.snapshotId,
+    selectedSkills: command.selectedSkills
+  })
+  if (!transition.ok) throw new ApplicationFault('INVALID_PIN', 'worktree claim transition is invalid')
+  if (current.claimState === 'claimed' && !transition.idempotent) {
+    throw new ApplicationFault('WORKTREE_ALREADY_CLAIMED', 'worktree is already claimed; use setPin to change its request')
+  }
+  if (!transition.idempotent) {
+    await p2.state.writeV2({
+      ...state,
+      stateRevision: nextStateRevision(state),
+      worktrees: { ...state.worktrees, [identity.pathKey]: transition.pin }
+    })
+  }
+  businessEvents.push(worktreeMaterializationEvent(
+    runtime,
+    command,
+    'worktree.claimed',
+    identity.pathKey,
+    {
+      pathKey: identity.pathKey,
+      snapshotId: command.snapshotId,
+      selectedSkillCount: transition.pin.selectedSkills.length,
+      changed: !transition.idempotent
+    }
+  ))
+  return {
+    action: 'claimWorktree' as const,
+    pathKey: identity.pathKey,
+    worktreeId: identity.worktreeId,
+    pin: transition.pin,
+    changed: !transition.idempotent
+  }
+}
+
+function materializationConflictFault(plan: MaterializePlanV1): ApplicationFault {
+  const kinds = new Set(plan.operations.flatMap((operation) => operation.conflict ? [operation.conflict.kind] : []))
+  if (kinds.has('legacy-link')) {
+    return new ApplicationFault('LEGACY_MIGRATION_REQUIRED', 'legacy links require an explicit migration')
+  }
+  if (kinds.has('external-link')) {
+    return new ApplicationFault('CONFLICT_EXTERNAL_LINK', 'a materialization target points outside the worktree')
+  }
+  if (kinds.has('marker-invalid')) {
+    return new ApplicationFault('MATERIALIZATION_MARKER_INVALID', 'materialization marker and durable truth disagree')
+  }
+  if (plan.git.configuration.conflictKind === 'legacyCommonInfoExclude') {
+    return new ApplicationFault(
+      'LEGACY_MIGRATION_REQUIRED',
+      'legacy common Git exclusions require an explicit migration'
+    )
+  }
+  if (plan.git.configuration.conflictKind === 'unsupportedWorktreeConfig') {
+    return new ApplicationFault('UNSUPPORTED_LAYOUT', 'worktree-specific Git configuration is unavailable')
+  }
+  if (plan.git.configuration.conflictKind === 'configurationDrift') {
+    return new ApplicationFault('CONFLICT_PATH', 'Git materialization configuration changed after planning')
+  }
+  if (plan.git.configuration.conflictKind === 'excludeBaseUnsafe') {
+    return new ApplicationFault('CONFLICT_PATH', 'the effective Git excludes source cannot be projected safely')
+  }
+  if (kinds.has('dirty')) {
+    return new ApplicationFault('CONFLICT_DIRTY', 'a managed materialization target was changed locally')
+  }
+  if (kinds.has('unowned-content')) {
+    return new ApplicationFault('CONFLICT_CONTENT', 'an unmanaged target differs from the requested content')
+  }
+  return new ApplicationFault('CONFLICT_PATH', 'a materialization target is not safe to replace')
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function markerMatchesPlan(marker: MaterializationMarkerV1, plan: MaterializePlanV1): boolean {
+  return verifyMaterializationMarker(marker)
+    && marker.planHash === plan.planHash
+    && marker.pathKey === plan.pathKey
+    && marker.worktreeId === plan.worktreeId
+    && marker.snapshotId === plan.requested.snapshotId
+    && sameStrings(marker.selectedSkills, plan.requested.selectedSkills)
+    && marker.runtimeRevision === plan.requested.runtimeRevision
+    && marker.runtimeAssetId === plan.requested.runtimeAssetId
+    && marker.visibilityStateId === plan.requested.visibilityStateId
+    && marker.materializationId === plan.requested.materializationId
+    && marker.origin.kind === 'sync'
+}
+
+type PlannedAttachCompletion = {
+  sessionId: string
+  proof: {
+    targetId: string
+    pathKey: Sha256Identifier
+    materializationId: Sha256Identifier
+    completedAt: string
+  }
+}
+
+function sameAttachCompletionIdentity(
+  value: unknown,
+  expected: PlannedAttachCompletion['proof']
+): value is PlannedAttachCompletion['proof'] {
+  if (!value || typeof value !== 'object') return false
+  const proof = value as Record<string, unknown>
+  return Object.keys(proof).every((key) => [
+    'targetId', 'pathKey', 'materializationId', 'completedAt'
+  ].includes(key))
+    && proof.targetId === expected.targetId
+    && proof.pathKey === expected.pathKey
+    && proof.materializationId === expected.materializationId
+    && typeof proof.completedAt === 'string'
+    && Number.isFinite(Date.parse(proof.completedAt))
+}
+
+async function planAttachCompletion(
+  runtime: ApplicationRuntimePort,
+  sessions: SessionPort,
+  sessionId: string | undefined,
+  identity: WorktreeIdentity,
+  materializationId: Sha256Identifier
+): Promise<PlannedAttachCompletion | null> {
+  if (!sessionId) return null
+  const expected = {
+    targetId: identity.worktreeId,
+    pathKey: identity.pathKey,
+    materializationId,
+    completedAt: runtime.nowIso()
+  }
+  const session = await sessions.get(sessionId)
+  if (!session
+    || session.kind !== 'attach'
+    || session.target?.kind !== 'worktree'
+    || session.target.id !== identity.worktreeId) {
+    throw new ApplicationFault(
+      'FIRST_ATTACH_SESSION_REQUIRED',
+      'sync completion requires an attach session for this worktree'
+    )
+  }
+  if (session.status === 'completed') {
+    if (session.exitCode !== 0) {
+      throw new ApplicationFault(
+        'FIRST_ATTACH_SESSION_REQUIRED',
+        'sync completion requires a successful attach session'
+      )
+    }
+    if (!sameAttachCompletionIdentity(session.attachCompletion, expected)) {
+      throw new ApplicationFault(
+        'CONFLICT_CONTENT',
+        'attach completion proof does not match this materialization'
+      )
+    }
+    return {
+      sessionId,
+      proof: { ...expected, completedAt: session.attachCompletion.completedAt }
+    }
+  }
+  if (session.status !== 'waiting' || session.exitCode !== 0) {
+    throw new ApplicationFault(
+      'FIRST_ATTACH_SESSION_REQUIRED',
+      'sync completion requires a successful waiting attach session'
+    )
+  }
+  return { sessionId, proof: expected }
+}
+
+async function completePlannedAttach(
+  sessions: SessionPort,
+  completion: PlannedAttachCompletion | null
+): Promise<boolean> {
+  if (!completion) return false
+  const outcome = await sessions.completeAttach(completion)
+  if (outcome.status === 'not-authorized') {
+    throw new ApplicationFault(
+      'FIRST_ATTACH_SESSION_REQUIRED',
+      'attach session is no longer authorized to complete this sync'
+    )
+  }
+  if (outcome.status === 'proof-conflict') {
+    throw new ApplicationFault(
+      'CONFLICT_CONTENT',
+      'attach completion proof conflicts with the durable session'
+    )
+  }
+  if (outcome.session.status !== 'completed'
+    || !sameAttachCompletionIdentity(outcome.session.attachCompletion, completion.proof)) {
+    throw new ApplicationFault('PORT_FAILURE', 'session completion port returned an invalid proof', true)
+  }
+  return true
+}
+
+async function executeSync(
+  runtime: ApplicationRuntimePort,
+  sessions: SessionPort,
+  p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts | undefined,
+  transaction: ApplicationWriteTransaction | undefined,
+  lockedIdentity: WorktreeIdentity | undefined,
+  businessEvents: AuditEvent[],
+  command: Extract<HubCommand, { kind: 'sync' }>
+) {
+  const materialization = requireP3(p3)
+  if (!transaction) throw new ApplicationFault('PORT_FAILURE', 'write transaction is unavailable', true)
+  const identity = await requireLockedWorktreeIdentity(p2, lockedIdentity, command.worktree)
+  const planned = await computeMaterializationPlan(p2, materialization, command.worktree, identity)
+  const { plan } = planned
+  if (plan.planHash !== command.planHash) {
+    throw new ApplicationFault('MATERIALIZE_PLAN_STALE', 'materialization plan no longer matches current state')
+  }
+  if (!plan.executable) throw materializationConflictFault(plan)
+  const attachCompletion = await planAttachCompletion(
+    runtime,
+    sessions,
+    command.sessionId,
+    identity,
+    plan.requested.materializationId
+  )
+
+  const externalNoChange = plan.current != null
+    && plan.current.materializationId === plan.requested.materializationId
+    && plan.current.visibilityStateId === plan.requested.visibilityStateId
+    && planned.pin.materializedSnapshot === plan.requested.snapshotId
+    && plan.operations.every((operation) => operation.action === 'keep')
+    && plan.git.operations.every((operation) => operation.action === 'keep')
+    && plan.git.configuration.action === 'keep'
+  if (externalNoChange) {
+    const sessionCompleted = await completePlannedAttach(sessions, attachCompletion)
+    return {
+      action: 'sync' as const,
+      pathKey: identity.pathKey,
+      worktreeId: identity.worktreeId,
+      changed: false,
+      planHash: plan.planHash,
+      marker: plan.current as MaterializationMarkerV1,
+      pin: planned.pin,
+      summary: plan.summary,
+      sessionCompleted
+    }
+  }
+
+  const prepared = await materialization.materialize.prepare({
+    worktree: command.worktree,
+    identity,
+    guard: Object.freeze({ revalidateLease: () => transaction.revalidateLease() }),
+    plan,
+    snapshot: planned.snapshot,
+    runtimeAsset: planned.runtimeAsset
+  })
+  transaction.enlist(prepared.participant)
+  checkedPreparedReport(prepared.report)
+  if (!markerMatchesPlan(prepared.marker, plan)) {
+    throw new ApplicationFault('MATERIALIZATION_MARKER_INVALID', 'prepared materialization marker does not match the approved plan')
+  }
+  const transition = transitionWorktreePin(planned.pin, {
+    kind: 'recordMaterialized',
+    snapshotId: plan.requested.snapshotId
+  })
+  if (!transition.ok) throw new ApplicationFault('INVALID_PIN', 'materialized pin transition is invalid')
+  if (!transition.idempotent) {
+    await p2.state.writeV2({
+      ...planned.state,
+      stateRevision: nextStateRevision(planned.state),
+      worktrees: { ...planned.state.worktrees, [identity.pathKey]: transition.pin }
+    })
+  }
+  await materialization.records.writeCurrent({
+    schemaVersion: 1,
+    pathKey: identity.pathKey,
+    marker: prepared.marker
+  })
+  const sessionCompleted = await completePlannedAttach(sessions, attachCompletion)
+  businessEvents.push(worktreeMaterializationEvent(
+    runtime,
+    command,
+    'worktree.materialized',
+    identity.pathKey,
+    {
+      pathKey: identity.pathKey,
+      snapshotId: plan.requested.snapshotId,
+      materializationId: plan.requested.materializationId,
+      planHash: plan.planHash,
+      operationCount: plan.operations.length,
+      preparedBytes: prepared.report.preparedBytes
+    }
+  ))
+  return {
+    action: 'sync' as const,
+    pathKey: identity.pathKey,
+    worktreeId: identity.worktreeId,
+    changed: true,
+    planHash: plan.planHash,
+    marker: prepared.marker,
+    pin: transition.pin,
+    summary: plan.summary,
+    sessionCompleted
+  }
+}
+
+function checkedLegacyMigrationRecord(
+  value: unknown,
+  migrationId: Sha256Identifier,
+  identity: WorktreeIdentity
+): LegacyMigrationRecordV1 | null {
+  if (value == null) return null
+  if (!verifyLegacyMigrationRecordIdentity(value)
+    || value.migrationId !== migrationId
+    || value.pathKey !== identity.pathKey
+    || value.worktreeId !== identity.worktreeId) {
+    throw new ApplicationFault('STATE_CORRUPT', 'legacy migration record failed integrity validation')
+  }
+  return value
+}
+
+function legacyPlanningFailure(
+  errors: readonly { code: string }[],
+  operation: 'migration' | 'rollback'
+): ApplicationFault {
+  const codes = new Set(errors.map((error) => error.code))
+  if (codes.has('LEGACY_PIN_INVALID')) {
+    return new ApplicationFault('WORKTREE_NOT_CLAIMED', 'legacy operation requires a matching claimed pin')
+  }
+  if (codes.has('LEGACY_MARKER_INVALID')) {
+    return new ApplicationFault('MATERIALIZATION_MARKER_INVALID', 'legacy marker and durable truth disagree')
+  }
+  if (codes.has('LEGACY_RECORD_INVALID')) {
+    return new ApplicationFault('STATE_CORRUPT', 'legacy migration record is invalid')
+  }
+  if (codes.has('LEGACY_SOURCE_INVALID')) {
+    return new ApplicationFault('SNAPSHOT_INVALID', 'legacy materialization source is invalid')
+  }
+  return new ApplicationFault('PORT_FAILURE', 'legacy materialization facts failed validation', true)
+}
+
+function legacyPlanConflictFault(
+  plan: LegacyMigrationPlanV1 | LegacyRollbackPlanV1,
+  operation: 'migration' | 'rollback'
+): ApplicationFault {
+  if (plan.git.configuration.conflictKind === 'unsupportedWorktreeConfig') {
+    return new ApplicationFault('UNSUPPORTED_LAYOUT', 'worktree-specific Git configuration is unavailable')
+  }
+  if (plan.git.configuration.conflictKind === 'siblingVisibilityRisk') {
+    return new ApplicationFault(
+      operation === 'rollback' ? 'LEGACY_ROLLBACK_CONFLICT' : 'CONFLICT_PATH',
+      'legacy Git visibility cannot be changed without affecting another worktree'
+    )
+  }
+  if (plan.git.configuration.conflictKind === 'excludeBaseUnsafe') {
+    return new ApplicationFault(
+      operation === 'rollback' ? 'LEGACY_ROLLBACK_CONFLICT' : 'CONFLICT_PATH',
+      'the effective Git excludes source cannot be projected safely'
+    )
+  }
+  if (operation === 'rollback') {
+    return new ApplicationFault('LEGACY_ROLLBACK_CONFLICT', 'legacy rollback conflicts with current worktree state')
+  }
+  const kinds = new Set(plan.operations.flatMap((entry) => entry.conflict ? [entry.conflict.kind] : []))
+  if (kinds.has('external-link')) {
+    return new ApplicationFault('CONFLICT_EXTERNAL_LINK', 'a legacy target points outside the approved source')
+  }
+  if (kinds.has('dirty')) {
+    return new ApplicationFault('CONFLICT_DIRTY', 'legacy content changed after it was observed')
+  }
+  if (kinds.has('unowned-content')) {
+    return new ApplicationFault('CONFLICT_CONTENT', 'unmanaged content differs from the requested materialization')
+  }
+  return new ApplicationFault('CONFLICT_PATH', 'legacy materialization contains an unsafe target')
+}
+
+function legacyMaterializationEvent(
+  runtime: ApplicationRuntimePort,
+  command: HubCommand,
+  type: 'worktree.legacy-migrated' | 'worktree.legacy-rolled-back',
+  identity: WorktreeIdentity,
+  details: Record<string, string | number | boolean | null>
+): AuditEvent {
+  return {
+    eventVersion: CONTRACT_VERSION,
+    id: runtime.nextId('audit'),
+    type,
+    at: runtime.nowIso(),
+    requestId: command.meta.requestId,
+    hostId: command.meta.hostId,
+    transport: command.meta.transport,
+    commandKind: command.kind,
+    outcome: 'succeeded',
+    subject: `worktree:${identity.pathKey}`,
+    details
+  }
+}
+
+async function computeLegacyMigrationPlan(
+  p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts,
+  worktree: string,
+  identity: WorktreeIdentity
+) {
+  const source = await requireMaterializationSourceContext(p2, p3, identity)
+  const markerMigrationId = source.durable?.marker?.origin.kind === 'legacyMigration'
+    ? source.durable.marker.origin.migrationId
+    : null
+  let migration = markerMigrationId == null
+    ? null
+    : checkedLegacyMigrationRecord(
+        await p3.records.readLegacyMigration(markerMigrationId),
+        markerMigrationId,
+        identity
+      )
+  const inspection = await p3.materialize.inspectLegacy({
+    worktree,
+    identity,
+    snapshot: source.snapshot,
+    runtimeAsset: source.runtimeAsset,
+    selectedSkills: source.pin.selectedSkills,
+    migration
+  })
+  const planningInput = () => ({
+    pathKey: identity.pathKey,
+    worktreeId: identity.worktreeId,
+    stateRevision: source.state.stateRevision,
+    pin: source.pin,
+    snapshot: source.snapshot,
+    runtimeAsset: source.runtimeAsset,
+    durableMarker: source.durable,
+    observedMarker: inspection.observedMarker,
+    migrationRecord: migration,
+    backupPrivateStateId: inspection.backupPrivateStateId,
+    artifacts: inspection.artifacts,
+    gitFacts: inspection.gitFacts,
+    gitConfiguration: inspection.gitConfiguration,
+    currentVisibilityState: inspection.currentVisibilityState,
+    desiredVisibilityState: inspection.desiredVisibilityState
+  })
+  let planned = planLegacyMigration(planningInput())
+  if (planned.ok && planned.status === 'planned' && planned.plan && migration == null) {
+    migration = checkedLegacyMigrationRecord(
+      await p3.records.readLegacyMigration(planned.plan.migrationId),
+      planned.plan.migrationId,
+      identity
+    )
+    if (migration) planned = planLegacyMigration(planningInput())
+  }
+  if (!planned.ok) throw legacyPlanningFailure(planned.errors, 'migration')
+  if (planned.plan && !verifyLegacyMigrationPlanHash(planned.plan)) {
+    throw new ApplicationFault('STATE_CORRUPT', 'legacy migration plan failed integrity validation')
+  }
+  return { ...source, migration, inspection, planned }
+}
+
+async function computeLegacyRollbackPlan(
+  p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts,
+  worktree: string,
+  identity: WorktreeIdentity,
+  migrationId: Sha256Identifier
+) {
+  const source = await requireMaterializationSourceContext(p2, p3, identity)
+  const migration = checkedLegacyMigrationRecord(
+    await p3.records.readLegacyMigration(migrationId),
+    migrationId,
+    identity
+  )
+  if (!migration) {
+    throw new ApplicationFault('LEGACY_MIGRATION_NOT_FOUND', 'legacy migration record was not found')
+  }
+  const inspection = await p3.materialize.inspectLegacyRollback({
+    worktree,
+    identity,
+    snapshot: source.snapshot,
+    runtimeAsset: source.runtimeAsset,
+    selectedSkills: source.pin.selectedSkills,
+    migration
+  })
+  const planned = planLegacyRollback({
+    pathKey: identity.pathKey,
+    worktreeId: identity.worktreeId,
+    stateRevision: source.state.stateRevision,
+    pin: source.pin,
+    snapshot: source.snapshot,
+    runtimeAsset: source.runtimeAsset,
+    durableMarker: source.durable,
+    observedMarker: inspection.observedMarker,
+    migrationRecord: migration,
+    backupPrivateStateId: inspection.backupPrivateStateId,
+    artifacts: inspection.artifacts,
+    gitFacts: inspection.gitFacts,
+    gitConfiguration: inspection.gitConfiguration,
+    currentVisibilityState: inspection.currentVisibilityState,
+    desiredVisibilityState: inspection.desiredVisibilityState,
+    restoreGitFacts: inspection.restoreGitFacts,
+    restoreGitConfiguration: inspection.restoreGitConfiguration,
+    restoreSources: inspection.restoreSources
+  })
+  if (!planned.ok) throw legacyPlanningFailure(planned.errors, 'rollback')
+  if (planned.plan && !verifyLegacyRollbackPlanHash(planned.plan)) {
+    throw new ApplicationFault('STATE_CORRUPT', 'legacy rollback plan failed integrity validation')
+  }
+  return { ...source, migration, inspection, planned }
+}
+
+function checkedPreparedReport(report: { preparedOperations: number; preparedBytes: number }): void {
+  if (!Number.isSafeInteger(report.preparedOperations)
+    || report.preparedOperations < 0
+    || !Number.isSafeInteger(report.preparedBytes)
+    || report.preparedBytes < 0) {
+    throw new ApplicationFault('PORT_FAILURE', 'materialization adapter returned an invalid preparation report', true)
+  }
+}
+
+function markerMatchesLegacyMigrationPlan(
+  marker: MaterializationMarkerV1,
+  plan: LegacyMigrationPlanV1
+): boolean {
+  return verifyMaterializationMarker(marker)
+    && marker.planHash === plan.planHash
+    && marker.pathKey === plan.pathKey
+    && marker.worktreeId === plan.worktreeId
+    && marker.snapshotId === plan.requested.snapshotId
+    && sameStrings(marker.selectedSkills, plan.requested.selectedSkills)
+    && marker.runtimeRevision === plan.requested.runtimeRevision
+    && marker.runtimeAssetId === plan.requested.runtimeAssetId
+    && marker.visibilityStateId === plan.requested.visibilityStateId
+    && marker.materializationId === plan.requested.materializationId
+    && marker.origin.kind === 'legacyMigration'
+    && marker.origin.migrationId === plan.migrationId
+}
+
+function migrationRecordMatchesPlan(
+  record: LegacyMigrationRecordV1,
+  plan: LegacyMigrationPlanV1,
+  marker: MaterializationMarkerV1
+): boolean {
+  return verifyLegacyMigrationRecordIdentity(record)
+    && record.status === 'committed'
+    && record.rollbackPlanHash === undefined
+    && record.migrationId === plan.migrationId
+    && record.planHash === plan.planHash
+    && record.pathKey === plan.pathKey
+    && record.worktreeId === plan.worktreeId
+    && record.snapshotId === plan.requested.snapshotId
+    && record.materializationId === plan.requested.materializationId
+    && record.visibilityStateId === plan.requested.visibilityStateId
+    && record.backupManifestId === plan.backupManifestId
+    && record.backupPrivateStateId === plan.backupPrivateStateId
+    && marker.visibilityStateId === record.visibilityStateId
+    && marker.origin.kind === 'legacyMigration'
+    && marker.origin.migrationId === record.migrationId
+}
+
+async function executeMigrateLegacy(
+  runtime: ApplicationRuntimePort,
+  p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts | undefined,
+  transaction: ApplicationWriteTransaction | undefined,
+  lockedIdentity: WorktreeIdentity | undefined,
+  businessEvents: AuditEvent[],
+  command: Extract<HubCommand, { kind: 'migrateLegacy' }>
+) {
+  const materialization = requireP3(p3)
+  if (!transaction) throw new ApplicationFault('PORT_FAILURE', 'write transaction is unavailable', true)
+  const identity = await requireLockedWorktreeIdentity(p2, lockedIdentity, command.worktree)
+  const computed = await computeLegacyMigrationPlan(p2, materialization, command.worktree, identity)
+  if (computed.planned.status === 'already-migrated') {
+    return {
+      action: 'migrateLegacy' as const,
+      mode: command.mode,
+      status: 'already-migrated' as const,
+      plan: null,
+      migration: computed.planned.record,
+      pin: computed.pin
+    }
+  }
+  if (computed.planned.status === 'not-required') {
+    return {
+      action: 'migrateLegacy' as const,
+      mode: command.mode,
+      status: 'not-required' as const,
+      plan: null,
+      migration: null,
+      pin: computed.pin
+    }
+  }
+  const plan = computed.planned.plan
+  if (command.mode === 'dryRun') {
+    return {
+      action: 'migrateLegacy' as const,
+      mode: 'dryRun' as const,
+      status: plan.executable ? 'planned' as const : 'conflict' as const,
+      plan,
+      migration: computed.migration,
+      pin: computed.pin
+    }
+  }
+  if (command.planHash !== plan.planHash) {
+    throw new ApplicationFault('LEGACY_PLAN_STALE', 'legacy migration plan no longer matches current state')
+  }
+  if (!plan.executable) throw legacyPlanConflictFault(plan, 'migration')
+  const prepared = await materialization.materialize.prepareLegacyMigration({
+    worktree: command.worktree,
+    identity,
+    guard: Object.freeze({ revalidateLease: () => transaction.revalidateLease() }),
+    plan,
+    snapshot: computed.snapshot,
+    runtimeAsset: computed.runtimeAsset
+  })
+  transaction.enlist(prepared.participant)
+  checkedPreparedReport(prepared.report)
+  if (!markerMatchesLegacyMigrationPlan(prepared.marker, plan)
+    || !migrationRecordMatchesPlan(prepared.record, plan, prepared.marker)) {
+    throw new ApplicationFault(
+      'MATERIALIZATION_MARKER_INVALID',
+      'prepared legacy migration proof does not match the approved plan'
+    )
+  }
+  const transition = transitionWorktreePin(computed.pin, {
+    kind: 'recordMaterialized',
+    snapshotId: plan.requested.snapshotId
+  })
+  if (!transition.ok) throw new ApplicationFault('INVALID_PIN', 'legacy migration pin transition is invalid')
+  if (!transition.idempotent) {
+    await p2.state.writeV2({
+      ...computed.state,
+      stateRevision: nextStateRevision(computed.state),
+      worktrees: { ...computed.state.worktrees, [identity.pathKey]: transition.pin }
+    })
+  }
+  await materialization.records.writeCurrent({
+    schemaVersion: 1,
+    pathKey: identity.pathKey,
+    marker: prepared.marker
+  })
+  await materialization.records.writeLegacyMigration(prepared.record)
+  businessEvents.push(legacyMaterializationEvent(
+    runtime,
+    command,
+    'worktree.legacy-migrated',
+    identity,
+    {
+      pathKey: identity.pathKey,
+      migrationId: prepared.record.migrationId,
+      materializationId: prepared.marker.materializationId,
+      planHash: plan.planHash,
+      replacementCount: plan.summary.replaceWithCopy,
+      preparedBytes: prepared.report.preparedBytes
+    }
+  ))
+  return {
+    action: 'migrateLegacy' as const,
+    mode: 'commit' as const,
+    status: 'committed' as const,
+    plan,
+    migration: prepared.record,
+    pin: transition.pin
+  }
+}
+
+async function executeRollbackLegacyMigration(
+  runtime: ApplicationRuntimePort,
+  p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts | undefined,
+  transaction: ApplicationWriteTransaction | undefined,
+  lockedIdentity: WorktreeIdentity | undefined,
+  businessEvents: AuditEvent[],
+  command: Extract<HubCommand, { kind: 'rollbackLegacyMigration' }>
+) {
+  const materialization = requireP3(p3)
+  if (!transaction) throw new ApplicationFault('PORT_FAILURE', 'write transaction is unavailable', true)
+  const identity = await requireLockedWorktreeIdentity(p2, lockedIdentity, command.worktree)
+  const computed = await computeLegacyRollbackPlan(
+    p2,
+    materialization,
+    command.worktree,
+    identity,
+    command.migrationId
+  )
+  if (computed.planned.status === 'already-rolled-back') {
+    return {
+      action: 'rollbackLegacyMigration' as const,
+      mode: command.mode,
+      status: 'already-rolled-back' as const,
+      plan: null,
+      migration: computed.planned.record,
+      pin: computed.pin
+    }
+  }
+  const plan = computed.planned.plan
+  if (command.mode === 'dryRun') {
+    return {
+      action: 'rollbackLegacyMigration' as const,
+      mode: 'dryRun' as const,
+      status: plan.executable ? 'planned' as const : 'conflict' as const,
+      plan,
+      migration: computed.migration,
+      pin: computed.pin
+    }
+  }
+  if (command.planHash !== plan.planHash) {
+    throw new ApplicationFault('LEGACY_PLAN_STALE', 'legacy rollback plan no longer matches current state')
+  }
+  if (!plan.executable) throw legacyPlanConflictFault(plan, 'rollback')
+  const prepared = await materialization.materialize.prepareLegacyRollback({
+    worktree: command.worktree,
+    identity,
+    guard: Object.freeze({ revalidateLease: () => transaction.revalidateLease() }),
+    plan,
+    migration: computed.migration,
+    snapshot: computed.snapshot,
+    runtimeAsset: computed.runtimeAsset
+  })
+  transaction.enlist(prepared.participant)
+  checkedPreparedReport(prepared.report)
+  if (!verifyLegacyMigrationRecordIdentity(prepared.record)
+    || prepared.record.migrationId !== plan.migrationId
+    || prepared.record.status !== 'rolledBack'
+    || prepared.record.rollbackPlanHash !== plan.planHash
+    || prepared.record.backupManifestId !== plan.backupManifestId
+    || prepared.record.backupPrivateStateId !== plan.backupPrivateStateId
+    || prepared.record.pathKey !== identity.pathKey
+    || prepared.record.worktreeId !== identity.worktreeId) {
+    throw new ApplicationFault('STATE_CORRUPT', 'prepared legacy rollback record does not match the approved plan')
+  }
+  const transition = rollbackMaterializedWorktreePin(computed.pin)
+  if (!transition.ok) throw new ApplicationFault('INVALID_PIN', 'legacy rollback pin transition is invalid')
+  if (!transition.idempotent) {
+    await p2.state.writeV2({
+      ...computed.state,
+      stateRevision: nextStateRevision(computed.state),
+      worktrees: { ...computed.state.worktrees, [identity.pathKey]: transition.pin }
+    })
+  }
+  await materialization.records.writeCurrent({
+    schemaVersion: 1,
+    pathKey: identity.pathKey,
+    marker: null
+  })
+  await materialization.records.writeLegacyMigration(prepared.record)
+  businessEvents.push(legacyMaterializationEvent(
+    runtime,
+    command,
+    'worktree.legacy-rolled-back',
+    identity,
+    {
+      pathKey: identity.pathKey,
+      migrationId: prepared.record.migrationId,
+      planHash: plan.planHash,
+      restoredCount: plan.summary.restoreLink,
+      preparedBytes: prepared.report.preparedBytes
+    }
+  ))
+  return {
+    action: 'rollbackLegacyMigration' as const,
+    mode: 'commit' as const,
+    status: 'rolled-back' as const,
+    plan,
+    migration: prepared.record,
+    pin: transition.pin
+  }
+}
+
 function defaultMigrationSnapshot(
   manifests: readonly LibrarySnapshotManifestV1[]
 ): Sha256Identifier {
@@ -1358,6 +2404,8 @@ async function executeHandler(
   sessions: SessionPort,
   ledger: RequestLedgerPort,
   p2: P2ApplicationPorts,
+  p3: P3ApplicationPorts | undefined,
+  writeTransaction: ApplicationWriteTransaction | undefined,
   lockedWorktreeIdentity: WorktreeIdentity | undefined,
   businessEvents: AuditEvent[],
   command: HubCommand
@@ -1452,6 +2500,8 @@ async function executeHandler(
         pin: state.worktrees[identity.pathKey] ?? null
       }
     }
+    case 'planSync':
+      return executePlanSync(p2, p3, command)
     case 'repairLegacy': {
       if (!command.worktree?.trim()) throw new ApplicationFault('INVALID_ARGUMENT', 'worktree is required')
       return executeLegacyRepair(legacyAttach, command.worktree)
@@ -1629,6 +2679,39 @@ async function executeHandler(
       return executeSetPin(runtime, p2, lockedWorktreeIdentity, businessEvents, command)
     case 'migrateState':
       return executeMigration(runtime, p2, businessEvents, command)
+    case 'claimWorktree':
+      return executeClaimWorktree(runtime, sessions, p2, p3, lockedWorktreeIdentity, businessEvents, command)
+    case 'sync':
+      return executeSync(
+        runtime,
+        sessions,
+        p2,
+        p3,
+        writeTransaction,
+        lockedWorktreeIdentity,
+        businessEvents,
+        command
+      )
+    case 'migrateLegacy':
+      return executeMigrateLegacy(
+        runtime,
+        p2,
+        p3,
+        writeTransaction,
+        lockedWorktreeIdentity,
+        businessEvents,
+        command
+      )
+    case 'rollbackLegacyMigration':
+      return executeRollbackLegacyMigration(
+        runtime,
+        p2,
+        p3,
+        writeTransaction,
+        lockedWorktreeIdentity,
+        businessEvents,
+        command
+      )
     default:
       throw new ApplicationFault('UNSUPPORTED_COMMAND', `unsupported command: ${(command as HubCommand).kind}`)
   }
@@ -1648,10 +2731,19 @@ function portFailureEnvelope(command: HubCommand, error: unknown, prefix = 'appl
 }
 
 function worktreeLocatorForWrite(command: HubCommand): string | null {
-  // P2 introduces shared worktree persistence only for setPin. Legacy P1
-  // attach/detach paths keep their own path-bounded transaction and error
-  // semantics until copy-based sync joins this lock domain in P3.
-  return command.kind === 'setPin' ? command.worktree : null
+  // Copy-based worktree writes share the hub-global -> pathKey lock domain.
+  // P1 legacy attach/detach retain their original adapter transaction until
+  // the explicit P3 migration command takes ownership of their artifacts.
+  switch (command.kind) {
+    case 'setPin':
+    case 'claimWorktree':
+    case 'sync':
+    case 'migrateLegacy':
+    case 'rollbackLegacyMigration':
+      return command.worktree
+    default:
+      return null
+  }
 }
 
 async function writeTransactionContext(
@@ -1689,6 +2781,7 @@ export function createHubApplication(options: HubApplicationOptions): HubApplica
     sessions,
     ledger,
     p2,
+    p3,
     transactions,
     trace
   } = options
@@ -1709,6 +2802,8 @@ export function createHubApplication(options: HubApplicationOptions): HubApplica
             sessions,
             ledger,
             p2,
+            p3,
+            undefined,
             undefined,
             [],
             command
@@ -1726,11 +2821,49 @@ export function createHubApplication(options: HubApplicationOptions): HubApplica
       // enter a write handler or publish a ledger/audit outcome. Recheck under
       // the acquired lease so a concurrent schema replacement cannot race a
       // previously observed compatible version.
-      if (command.kind === 'setPin') {
+      const worktree = worktreeLocatorForWrite(command)
+      if (worktree != null) {
         // The raw locator is resolved before locking only to choose the opaque
-        // lock key. Re-resolve and compare before even the schema preflight so
-        // an alias substitution cannot make lock A authorize a read/write for B.
-        await requireLockedWorktreeIdentity(p2, transactionContext.worktreeIdentity, command.worktree)
+        // lock key. Re-resolve and compare before recovery or any durable read
+        // so an alias substitution cannot make lock A authorize worktree B.
+        const identity = await requireLockedWorktreeIdentity(
+          p2,
+          transactionContext.worktreeIdentity,
+          worktree
+        )
+        if (p3) {
+          const stateInspection = await inspectP2State(p2, undefined, false)
+          if (stateInspection.status === 'unsupported') {
+            throw new ApplicationFault(
+              'STATE_VERSION_UNSUPPORTED',
+              'state schema version is unsupported'
+            )
+          }
+          const currentState = stateInspection.status === 'current'
+            ? stateInspection.current
+            : undefined
+          if (stateInspection.status === 'current' && !currentState) {
+            throw new ApplicationFault('STATE_CORRUPT', 'current state is unavailable')
+          }
+          const pin = currentState?.worktrees[identity.pathKey] ?? null
+          const durable = checkedMaterializationRecord(
+            await p3.records.readCurrent(identity.pathKey),
+            identity.pathKey
+          )
+          // Recovery runs under both leases and before replay lookup. A request
+          // whose external participant committed before a crash is therefore
+          // finalized before its durable result can be replayed.
+          await p3.materialize.recover({
+            worktree,
+            identity,
+            durable,
+            pin,
+            stateRevision: currentState?.stateRevision ?? null,
+            guard: Object.freeze({
+              revalidateLease: () => transaction.revalidateLease()
+            })
+          })
+        }
       }
       const existing = await ledger.read(command.meta.requestId)
       if (existing) {
@@ -1775,15 +2908,22 @@ export function createHubApplication(options: HubApplicationOptions): HubApplica
           sessions,
           ledger,
           p2,
+          p3,
+          transaction,
           transactionContext.worktreeIdentity,
           businessEvents,
           command
         )
       } catch (caught) {
         const transactionError = transactionErrorOf(caught)
-        const unsupportedVersion = caught instanceof ApplicationFault
-          && caught.code === 'STATE_VERSION_UNSUPPORTED'
-        if (unsupportedVersion || transactionError && transactionError.code !== 'SNAPSHOT_INVALID') {
+        const abortApplicationFault = caught instanceof ApplicationFault
+          && (caught.code === 'STATE_VERSION_UNSUPPORTED' || caught.code === 'LOCK_NOT_OWNED')
+        const durableBusinessFailure = transactionError
+          && (transactionError.code === 'SNAPSHOT_INVALID'
+            || transactionError.code === 'RUNTIME_ASSET_INVALID'
+            || transactionError.code === 'MATERIALIZATION_MARKER_INVALID'
+            || transactionError.code === 'UNSUPPORTED_LAYOUT')
+        if (abortApplicationFault || transactionError && !durableBusinessFailure) {
           return transaction.abort(caught)
         }
         transaction.rollbackTo(handlerSavepoint)
@@ -1809,7 +2949,10 @@ export function createHubApplication(options: HubApplicationOptions): HubApplica
 
   const executeValidated = async (command: HubCommand): Promise<HubCommandResult> => {
     try {
-      await recovery?.recover()
+      // planSync is an explicit zero-write observation. Unlike other commands
+      // it must not trigger even host recovery; worktree recovery happens only
+      // after a write command owns both leases.
+      if (command.kind !== 'planSync') await recovery?.recover()
       return await runValidated(command)
     } catch (error) {
       return failureEnvelope(command, errorOf(error))

@@ -168,6 +168,29 @@ test('two-phase capture stages only the manifest in the shared WAL and deduplica
   assert.equal(first.deduplicated, false)
   assert.equal(repository.list().length, 1)
   assert.equal(repository.list()[0].source.id, 'source-a')
+  const overrideFile = first.manifest.files.find((file) => file.path === 'AGENTS.override.md')
+  assert.ok(overrideFile)
+  assert.equal(
+    Buffer.from(repository.readVerifiedFile({
+      snapshotId: first.manifest.snapshotId,
+      path: overrideFile.path,
+      expectedSize: overrideFile.size,
+      expectedSha256: overrideFile.sha256
+    })).toString('utf8'),
+    'agent rules\n'
+  )
+  assert.equal(repository.readVerifiedFile({
+    snapshotId: first.manifest.snapshotId,
+    path: 'skills/not-in-the-manifest/SKILL.md',
+    expectedSize: 0,
+    expectedSha256: overrideFile.sha256
+  }), null)
+  assert.throws(() => repository.readVerifiedFile({
+    snapshotId: first.manifest.snapshotId,
+    path: overrideFile.path,
+    expectedSize: overrideFile.size + 1,
+    expectedSha256: overrideFile.sha256
+  }), /does not match its manifest/)
 
   const primaryManifest = path.join(
     repositoryRoot,
@@ -256,6 +279,12 @@ test('manifest backup and blob closure are both required for reads', async (t) =
   const originalBlob = fs.readFileSync(blob)
   fs.writeFileSync(blob, 'corrupt', 'utf8')
   assert.throws(() => repository.read(stored.manifest.snapshotId), /blob closure is invalid/)
+  assert.throws(() => repository.readVerifiedFile({
+    snapshotId: stored.manifest.snapshotId,
+    path: stored.manifest.files[0].path,
+    expectedSize: stored.manifest.files[0].size,
+    expectedSha256: stored.manifest.files[0].sha256
+  }), /blob closure is invalid/)
   fs.writeFileSync(blob, originalBlob)
 
   const linkedBlob = path.join(dataRoot, 'blob-hardlink-probe')

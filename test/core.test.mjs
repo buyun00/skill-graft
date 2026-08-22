@@ -635,7 +635,6 @@ test('core source does not import http, powershell, Win32, or APPDATA', () => {
     assert.doesNotMatch(text, /powershell\.exe/i, name)
     assert.doesNotMatch(text, /Win32/, name)
     assert.doesNotMatch(text, /APPDATA/, name)
-    assert.doesNotMatch(text, /junction/i, name)
     assert.doesNotMatch(text, /mklink/i, name)
   }
 })

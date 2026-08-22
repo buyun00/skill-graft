@@ -40,12 +40,15 @@ function createFixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p1-legacy-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const hub = path.join(root, 'hub')
+  const packageRoot = path.join(root, 'package')
   const worktree = path.join(root, 'game-tree')
   fs.mkdirSync(hub, { recursive: true })
+  fs.mkdirSync(packageRoot, { recursive: true })
   fs.mkdirSync(worktree, { recursive: true })
   write(path.join(hub, 'AGENTS.override.md'), options.hubOverride || '# hub override\n')
   for (const name of residents) write(path.join(hub, 'skills', name, 'SKILL.md'), `# ${name}\n`)
   fs.mkdirSync(path.join(hub, 'overlay'), { recursive: true })
+  fs.mkdirSync(path.join(packageRoot, 'overlay', 'hooks'), { recursive: true })
   write(path.join(worktree, 'AGENTS.md'), '# isolated game tree\n')
   fs.mkdirSync(path.join(worktree, 'baloot_client'), { recursive: true })
   write(path.join(worktree, 'business.txt'), 'business data must survive\n')
@@ -92,11 +95,13 @@ function createFixture(t, options = {}) {
   return {
     root,
     hub,
+    packageRoot,
     worktree,
     context,
     inspectWorktree,
     port: createLocalLegacyAttachPort(context, inspectWorktree, {
-      checkpoint: options.checkpoint
+      checkpoint: options.checkpoint,
+      packageRoot
     })
   }
 }
@@ -288,6 +293,9 @@ test('full legacy transaction commits every artifact action while preserving uni
   assert.equal(fs.existsSync(path.join(fixture.worktree, '.codex', 'agents')), false)
   assert.equal(fs.existsSync(path.join(fixture.worktree, '.skill-graft-transactions')), false)
   assert.equal(fs.existsSync(path.join(fixture.hub, '.skill-graft-transactions')), false)
+  assert.deepEqual(configValues(fixture.worktree, 'ozdqp.localOverlaySource'), [fixture.packageRoot])
+  assert.deepEqual(configValues(fixture.worktree, 'core.hooksPath'), [path.join(fixture.packageRoot, 'overlay', 'hooks')])
+  assert.deepEqual(configValues(fixture.worktree, 'ozdqp.skillWatchWorkspace'), [fixture.hub])
 })
 
 for (const failure of [
@@ -532,7 +540,7 @@ test('detach adapter rechecks managed links and empty restore targets before its
   })
 })
 
-test('legacy prompt and PowerShell shims expose only typed CLI mutation entrypoints', () => {
+test('attach prompt defers claim/materialization until exit-zero waiting while legacy shims stay typed', () => {
   const promptRoot = path.join(repoRoot, 'overlay', 'prompts')
   const prompt = fs.readFileSync(path.join(promptRoot, 'attach.txt'), 'utf8')
   const detachPrompt = fs.readFileSync(path.join(promptRoot, 'detach.txt'), 'utf8')
@@ -541,8 +549,12 @@ test('legacy prompt and PowerShell shims expose only typed CLI mutation entrypoi
 
   assert.match(prompt, /\{\{SESSION_ID\}\}/)
   assert.equal((prompt.match(/^sg\s+/gm) || []).length, 1)
-  assert.match(prompt, /sg apply-legacy-attach .*--session-id "\{\{SESSION_ID\}\}".*--contract-v1/)
-  assert.doesNotMatch(prompt, /attach-library\.ps1|manage-skill-visibility\.ps1|Set-Content|Copy-Item|Remove-Item/)
+  assert.match(prompt, /sg snapshot create .*attach-snapshot-\{\{SESSION_ID\}\}.*--contract-v1/)
+  assert.match(prompt, /exit 0.*waiting/s)
+  assert.match(prompt, /claim.*plan-sync.*sync/s)
+  assert.match(prompt, /--session-id "\{\{SESSION_ID\}\}"/)
+  assert.match(prompt, /materializedSnapshot.*marker/s)
+  assert.doesNotMatch(prompt, /sg apply-legacy-attach|attach-library\.ps1|manage-skill-visibility\.ps1|Set-Content|Copy-Item|Remove-Item/)
 
   assert.match(detachPrompt, /\{\{SESSION_ID\}\}/)
   assert.equal((detachPrompt.match(/^sg\s+/gm) || []).length, 1)

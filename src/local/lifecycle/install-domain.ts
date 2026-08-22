@@ -43,6 +43,7 @@ export type DaemonTraceEnvironment = {
     PATH: string
     DSH_HOME: string
     HOME: string
+    XDG_CONFIG_HOME: string
     USERPROFILE: string
     APPDATA: string
     LOCALAPPDATA: string

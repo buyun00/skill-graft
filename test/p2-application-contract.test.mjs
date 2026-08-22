@@ -117,6 +117,9 @@ function createTransactionalFixture(options = {}) {
       const savepoints = new Map()
       let decided = false
       const transaction = {
+        revalidateLease() {
+          if (decided) throw new Error('transaction is closed')
+        },
         savepoint() {
           const token = {}
           savepoints.set(token, clone(model))
@@ -389,7 +392,7 @@ test('Application recovery retries after lock contention and rechecks after an e
   assert.equal(recoveryCalls, 3)
 })
 
-test('P2 command classification keeps queries lock-free and sends every P1/P2 write through a transaction', async () => {
+test('command classification keeps every query lock-free and sends every write through a transaction', async () => {
   const fixture = createTransactionalFixture()
   const snapshotId = fixture.model.snapshots[0].snapshotId
   const queries = {
@@ -403,7 +406,8 @@ test('P2 command classification keeps queries lock-free and sends every P1/P2 wr
     inspectSchema: {},
     listSnapshots: {},
     getSnapshot: { snapshotId },
-    getPin: { worktree: '/probe' }
+    getPin: { worktree: '/probe' },
+    planSync: { worktree: '/probe' }
   }
   const commands = {
     repairLegacy: { worktree: '/probe' },
@@ -420,7 +424,20 @@ test('P2 command classification keeps queries lock-free and sends every P1/P2 wr
     reapSessions: {},
     createSnapshot: {},
     setPin: { worktree: '/probe', snapshotId },
-    migrateState: { mode: 'dryRun' }
+    migrateState: { mode: 'dryRun' },
+    claimWorktree: {
+      worktree: '/probe',
+      snapshotId,
+      selectedSkills: ['ozdqp-development'],
+      sessionId: 'missing-attach-session'
+    },
+    sync: { worktree: '/probe', planHash: identifier('missing-sync-plan') },
+    migrateLegacy: { worktree: '/probe', mode: 'dryRun' },
+    rollbackLegacyMigration: {
+      worktree: '/probe',
+      migrationId: identifier('missing-migration'),
+      mode: 'dryRun'
+    }
   }
   assert.deepEqual(Object.keys(queries), [...QUERY_COMMAND_KINDS])
   assert.deepEqual(Object.keys(commands), [...WRITE_COMMAND_KINDS])
@@ -434,9 +451,16 @@ test('P2 command classification keeps queries lock-free and sends every P1/P2 wr
     await fixture.app.execute({ kind, meta: fixture.meta(`write-${kind}`), ...commands[kind] })
   }
   assert.deepEqual(fixture.transactionCalls.map((entry) => entry.commandKind), [...WRITE_COMMAND_KINDS])
+  const worktreeWrites = new Set([
+    'setPin',
+    'claimWorktree',
+    'sync',
+    'migrateLegacy',
+    'rollbackLegacyMigration'
+  ])
   for (const call of fixture.transactionCalls) {
-    assert.equal(call.scope, call.commandKind === 'setPin' ? 'worktree' : 'hub-global')
-    assert.equal(call.key, call.commandKind === 'setPin' ? identity('/probe').pathKey : 'hub-global')
+    assert.equal(call.scope, worktreeWrites.has(call.commandKind) ? 'worktree' : 'hub-global')
+    assert.equal(call.key, worktreeWrites.has(call.commandKind) ? identity('/probe').pathKey : 'hub-global')
   }
 })
 
@@ -460,7 +484,20 @@ test('an unsupported future state version rejects the complete write corpus befo
     reapSessions: {},
     createSnapshot: {},
     setPin: { worktree: '/probe', snapshotId },
-    migrateState: { mode: 'dryRun' }
+    migrateState: { mode: 'dryRun' },
+    claimWorktree: {
+      worktree: '/probe',
+      snapshotId,
+      selectedSkills: ['ozdqp-development'],
+      sessionId: 'missing-attach-session'
+    },
+    sync: { worktree: '/probe', planHash: identifier('missing-sync-plan') },
+    migrateLegacy: { worktree: '/probe', mode: 'dryRun' },
+    rollbackLegacyMigration: {
+      worktree: '/probe',
+      migrationId: identifier('missing-migration'),
+      mode: 'dryRun'
+    }
   }
   assert.deepEqual(Object.keys(commands), [...WRITE_COMMAND_KINDS])
   const originalState = clone(fixture.model.state)

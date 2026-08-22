@@ -18,6 +18,8 @@ test('runtime state, session text, history, and raw verification artifacts are i
     'skill-review/library/snapshots/0123456789abcdef.json',
     'skill-review/library/blobs/sha256/0123456789abcdef',
     'skill-review/locks/hub-global/owner.json',
+    'skill-review/materializations/current/0123456789abcdef.json',
+    'skill-review/materializations/migrations/0123456789abcdef.json',
     'skill-review/.state.json.skill-graft.bak',
     'skill-review/.application-ledger.json.skill-graft.bak',
     'skill-review/.sessions.json.skill-graft-state-example.tmp',
@@ -36,7 +38,8 @@ test('runtime state, session text, history, and raw verification artifacts are i
     'skill-review/sessions.json',
     'skill-review/history',
     'skill-review/library',
-    'skill-review/locks'
+    'skill-review/locks',
+    'skill-review/materializations'
   ])
   assert.equal(tracked.status, 0, tracked.stderr)
   assert.equal(tracked.stdout.trim(), '', `runtime files remain tracked:\n${tracked.stdout}`)

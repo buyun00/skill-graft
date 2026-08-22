@@ -1,4 +1,5 @@
 import type { JsonObject } from './common.js'
+import type { Sha256Identifier } from './snapshot.js'
 
 export type SkillKind = 'resident' | 'adopted' | 'inbox'
 
@@ -54,6 +55,14 @@ export type SessionTarget = {
   id: string
 }
 
+/** Locator-free durable proof that one attach session completed a materialization. */
+export type AttachCompletionProof = {
+  targetId: string
+  pathKey: Sha256Identifier
+  materializationId: Sha256Identifier
+  completedAt: string
+}
+
 /**
  * Shared session projection. Runner process details and runner-owned storage are
  * deliberately excluded; hosts expose only opaque runner and continuation IDs.
@@ -74,6 +83,7 @@ export type SessionView = {
   lastMessage?: string
   canResume: boolean
   inboxIds?: readonly string[]
+  attachCompletion?: AttachCompletionProof
 }
 
 export type WorktreeView = {

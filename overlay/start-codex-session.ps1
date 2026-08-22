@@ -5,14 +5,22 @@ param(
     [string]$Kind,
     [string]$Path,
     [string]$Intent,
-    [string]$Worktree
+    [string]$Worktree,
+    [Alias('HostRoot')]
+    [string]$PackageRoot,
+    [string]$DataRoot
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HubLib.ps1')
 
-$hubRoot = Get-HubRoot
+$packageRootPath = $null
+if (-not [string]::IsNullOrWhiteSpace($Worktree) -or
+    -not [string]::IsNullOrWhiteSpace($PackageRoot)) {
+    $packageRootPath = Get-SkillGraftPackageRoot -Worktree $Worktree -PackageRoot $PackageRoot
+}
+$hubRoot = Get-SkillGraftDataRoot -DataRoot $DataRoot -FallbackPackageRoot $packageRootPath
 $sessionsPath = Join-Path $hubRoot 'skill-review\sessions.json'
 $state = Read-JsonFile $sessionsPath ([pscustomobject]@{ sessions = @() })
 if ($null -eq $state.sessions) {

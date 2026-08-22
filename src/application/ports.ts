@@ -13,6 +13,7 @@ import type {
   LegacyAttachWorktreeInspection,
   LibrarySnapshotSourceV1,
   LibrarySnapshotManifestV1,
+  RuntimeAssetManifestV1,
   Sha256Identifier,
   SessionKind,
   SessionRequestOptions,
@@ -23,6 +24,7 @@ import type {
   LegacyWorktreeMigrationFact
 } from '../core/migration.js'
 import type { LibrarySnapshotFileFact } from '../core/snapshot.js'
+import type { AttachCompletionProof } from '../contracts/state.js'
 import type {
   HubStatusFacts,
   SkillHostFact,
@@ -127,6 +129,36 @@ export interface LibrarySnapshotRepositoryPort {
   read(snapshotId: Sha256Identifier): MaybePromise<LibrarySnapshotManifestV1 | null>
 }
 
+/**
+ * Narrow immutable-content boundary used by the Local materializer. Callers
+ * must name a file from an already validated manifest; adapters may not expose
+ * arbitrary CAS object reads or host paths through this port.
+ */
+export interface SnapshotContentPort {
+  readVerifiedFile(input: {
+    snapshotId: Sha256Identifier
+    path: string
+    expectedSize: number
+    expectedSha256: Sha256Identifier
+  }): MaybePromise<Uint8Array | null>
+}
+
+/**
+ * Read-only installed runtime assets. The Local adapter owns safe observation;
+ * Core owns the content-addressed manifest and callers can read only an exact
+ * file already named by that manifest.
+ */
+export interface RuntimeAssetRepositoryPort {
+  observe(): MaybePromise<RuntimeAssetManifestV1>
+  readVerifiedFile(input: {
+    runtimeAssetId: Sha256Identifier
+    path: string
+    expectedSize: number
+    expectedSha256: Sha256Identifier
+    expectedMode: '100644' | '100755'
+  }): MaybePromise<Uint8Array | null>
+}
+
 /** Raw state/facts only. Application validates and projects schema status. */
 export interface HubStateV2RepositoryPort {
   readDocument(): MaybePromise<unknown | null>
@@ -178,6 +210,19 @@ export type SessionResumeRequest = {
   options?: SessionRequestOptions
 }
 
+export type AttachCompletionRequest = {
+  sessionId: string
+  proof: AttachCompletionProof
+}
+
+export type AttachCompletionOutcome =
+  | { status: 'completed' | 'already-completed'; session: SessionView }
+  | {
+      status: 'not-authorized'
+      reason: 'not-found' | 'not-attach' | 'target-mismatch' | 'not-waiting' | 'exit-not-zero'
+    }
+  | { status: 'proof-conflict' }
+
 /**
  * Host-owned session boundary. The shared Application never sees a process id,
  * a runner-specific continuation id format, or a runner-owned file path.
@@ -188,6 +233,12 @@ export interface SessionPort {
   start(input: SessionStartRequest): MaybePromise<SessionView>
   resume(input: SessionResumeRequest): MaybePromise<SessionView>
   reap(sessionIds?: readonly string[]): MaybePromise<readonly SessionView[]>
+  /**
+   * Conditionally persists an attach completion in the active Hub write transaction.
+   * `completedAt` is metadata; idempotence compares the three identity fields and
+   * retains the first timestamp. No raw locator may enter the proof or outcome.
+   */
+  completeAttach(input: AttachCompletionRequest): MaybePromise<AttachCompletionOutcome>
 }
 
 export type RequestLedgerEntry = {

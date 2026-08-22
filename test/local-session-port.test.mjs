@@ -161,8 +161,11 @@ test('LocalSessionPort preflights a required unavailable runner before enqueue',
   const stored = readSessions(temporary.root)
   assert.equal(stored.length, 1)
   const prompt = fs.readFileSync(stored[0].promptFile, 'utf8')
-  assert.match(prompt, /sg apply-legacy-attach/)
+  assert.match(prompt, /sg snapshot create/)
+  assert.match(prompt, new RegExp(`attach-snapshot-${queued.id}`))
+  assert.match(prompt, /claim[\s\S]*plan-sync[\s\S]*sync/)
   assert.match(prompt, new RegExp(`--session-id "${queued.id}"`))
+  assert.doesNotMatch(prompt, /sg apply-legacy-attach/)
   assert.equal(prompt.includes('{{SESSION_ID}}'), false)
   assert.equal(availableCalls, 1, 'no-start must not probe runner availability')
   assert.equal(startCalls, 0)
@@ -184,4 +187,86 @@ test('LocalSessionPort wait timeout returns a durable running session instead of
   })
   assert.equal(session.status, 'running')
   assert.equal(readSessions(temporary.root)[0].status, 'running')
+})
+
+test('LocalSessionPort durably completes an attach with an idempotent locator-free proof and refuses resume or conflicts', async (t) => {
+  const temporary = createTemporaryTestHub(sourceRoot)
+  t.after(() => temporary.cleanup())
+  const port = createLocalSessionPort(createHub(temporary.root), { runner: fakeRunner() })
+  const worktree = path.join(temporary.root, 'completion-probe')
+  const queued = await port.start({
+    kind: 'attach',
+    locator: { kind: 'worktree', value: worktree },
+    intent: 'authorize one materialization',
+    options: { start: false }
+  })
+  const sessions = readSessions(temporary.root)
+  const row = sessions.find((candidate) => candidate.id === queued.id)
+  row.status = 'waiting'
+  row.exitCode = 0
+  row.endedAt = '2032-03-04T05:06:06.000Z'
+  row.codexSessionId = '0123456789abcdef0123456789abcdef'
+  writeSessions(temporary.root, sessions)
+
+  const proof = {
+    targetId: queued.target.id,
+    pathKey: `sha256:${'a'.repeat(64)}`,
+    materializationId: `sha256:${'b'.repeat(64)}`,
+    completedAt: '2032-03-04T05:06:07.000Z'
+  }
+  const completed = await port.completeAttach({ sessionId: queued.id, proof })
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.session.status, 'completed')
+  assert.equal(completed.session.canResume, false)
+  assert.deepEqual(completed.session.attachCompletion, proof)
+  assert.equal(JSON.stringify(completed.session).includes(worktree), false)
+
+  const stored = readSessions(temporary.root).find((candidate) => candidate.id === queued.id)
+  assert.equal(stored.status, 'completed')
+  assert.deepEqual(stored.attachCompletion, proof)
+  assert.deepEqual(Object.keys(stored.attachCompletion).sort(), [
+    'completedAt', 'materializationId', 'pathKey', 'targetId'
+  ])
+  assert.equal(JSON.stringify(stored.attachCompletion).includes(worktree), false)
+  const refreshed = await port.get(queued.id)
+  assert.equal(refreshed.status, 'completed', 'refresh must never demote a completed attach')
+  assert.equal(refreshed.canResume, false)
+  assert.equal(JSON.stringify(refreshed).includes(worktree), false)
+  await assert.rejects(
+    port.resume({ sessionId: queued.id, message: 'try to reopen completion' }),
+    (error) => isPortFault(error) && error.reason === 'request-in-progress'
+  )
+
+  const already = await port.completeAttach({
+    sessionId: queued.id,
+    proof: { ...proof, completedAt: '2040-01-01T00:00:00.000Z' }
+  })
+  assert.equal(already.status, 'already-completed')
+  assert.equal(already.session.attachCompletion.completedAt, proof.completedAt)
+  assert.equal(readSessions(temporary.root).find((candidate) => candidate.id === queued.id).attachCompletion.completedAt, proof.completedAt)
+
+  const conflict = await port.completeAttach({
+    sessionId: queued.id,
+    proof: { ...proof, materializationId: `sha256:${'c'.repeat(64)}` }
+  })
+  assert.deepEqual(conflict, { status: 'proof-conflict' })
+
+  const legacy = await port.start({
+    kind: 'attach',
+    locator: { kind: 'worktree', value: worktree },
+    intent: 'legacy completed row',
+    options: { start: false }
+  })
+  const legacySessions = readSessions(temporary.root)
+  const legacyRow = legacySessions.find((candidate) => candidate.id === legacy.id)
+  legacyRow.status = 'completed'
+  legacyRow.exitCode = 0
+  legacyRow.endedAt = '2032-03-04T05:06:06.000Z'
+  writeSessions(temporary.root, legacySessions)
+  const readable = await port.get(legacy.id)
+  assert.equal(readable.status, 'completed')
+  assert.equal(readable.attachCompletion, undefined)
+  assert.deepEqual(await port.completeAttach({ sessionId: legacy.id, proof: { ...proof, targetId: legacy.target.id } }), {
+    status: 'proof-conflict'
+  })
 })

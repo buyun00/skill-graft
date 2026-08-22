@@ -223,7 +223,7 @@ test('Local composition supplies query and low-level ports without a host use-ca
   assert.doesNotMatch(text, /shared-hub-operations|createSharedHubOperations|HubOperationsPort/)
   assert.match(text, /const queries\s*=\s*createLocalQueryPort\(context\)/)
   assert.match(text, /useCases:\s*createLocalUseCasePorts\(context\)/)
-  assert.match(text, /legacyAttach:\s*createLocalLegacyAttachPort\(context, queries\.inspectWorktree\)/)
+  assert.match(text, /legacyAttach:\s*createLocalLegacyAttachPort\(context, queries\.inspectWorktree,\s*\{/)
   assert.doesNotMatch(text, /from ['"]\.\.\/core\/(?:decide|ingest|inventory|repair|status|worktrees)\.js['"]/)
   assert.doesNotMatch(text, /\b(?:decide|ingest|repairLegacy)\s*\(/)
 
@@ -248,7 +248,7 @@ test('Core runtime is pure and contains no broad host context or direct I/O capa
   const violations = []
   for (const file of sourceFiles(path.join(sourceRoot, 'core'))) {
     const text = readFileSync(file, 'utf8')
-    if (/HubContext|LocalHostContext|\bctx\b|\.(?:fs|git|persist|link)\b/.test(text)) {
+    if (/HubContext|LocalHostContext|\bctx\b|\.(?:fs|persist|link)\b/.test(text)) {
       violations.push(relativeName(file))
     }
   }

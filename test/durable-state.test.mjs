@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url'
 
 const outputRoot = path.resolve(process.env.SKILL_GRAFT_TEST_DIST || 'dist')
 const durable = await import(pathToFileURL(path.join(outputRoot, 'adapters', 'durable-state.js')).href)
+const application = await import(pathToFileURL(path.join(outputRoot, 'application', 'index.js')).href)
 const durableFilesModuleUrl = pathToFileURL(path.join(outputRoot, 'adapters', 'durable-files.js')).href
 const durableFiles = await import(durableFilesModuleUrl)
 
@@ -61,6 +62,60 @@ function exclusiveMemoryLock() {
           }
         }
       }
+    }
+  }
+}
+
+function observableMemoryLock() {
+  let held = false
+  let lost = false
+  let renewals = 0
+  return {
+    lose() {
+      lost = true
+    },
+    renewals() {
+      return renewals
+    },
+    port: {
+      async acquire() {
+        if (held) return { status: 'busy', reason: 'held' }
+        held = true
+        lost = false
+        return {
+          status: 'acquired',
+          lease: {
+            ownerToken: 'observable-owner-token',
+            renew() {
+              renewals += 1
+              if (!held || lost) {
+                throw Object.assign(new Error('observable lease lost'), { code: 'LOCK_NOT_OWNED' })
+              }
+            },
+            release() {
+              held = false
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+function transactionParticipant(participantId, events, overrides = {}) {
+  return {
+    participantId,
+    async publish(context) {
+      events.push(`publish:${participantId}`)
+      await overrides.publish?.(context)
+    },
+    async rollback(context) {
+      events.push(`rollback:${participantId}`)
+      await overrides.rollback?.(context)
+    },
+    async finalize() {
+      events.push(`finalize:${participantId}`)
+      await overrides.finalize?.()
     }
   }
 }
@@ -424,8 +479,11 @@ test('transaction façade requires an owned one-shot decision and preserves save
   assert.equal(fs.existsSync(root), false)
 
   await host.transactions.withWriteTransaction(hubIdentity('initial'), async (transaction) => {
+    await transaction.revalidateLease()
     host.persist.writeJson(path.join(root, 'state.json'), { version: 1, value: 1 })
-    return transaction.commit('initial')
+    const decision = transaction.commit('initial')
+    assert.throws(() => transaction.revalidateLease(), /terminal decision/)
+    return decision
   })
 
   await assert.rejects(host.transactions.withWriteTransaction(hubIdentity('abort'), async (transaction) => {
@@ -469,6 +527,333 @@ test('transaction façade requires an owned one-shot decision and preserves save
     await host.transactions.withWriteTransaction(hubIdentity('nested-inner'), async (inner) => inner.commit(null))
     return transaction.commit(null)
   }), /nested write transactions/)
+})
+
+test('durable participants publish in order, finalize in reverse, and tolerate finalize failure', async (t) => {
+  const root = path.join(fixture(t), 'data')
+  const lock = observableMemoryLock()
+  const host = durable.createDurableTransactionHost({
+    root,
+    schemaFor: documentSchema,
+    lock: lock.port
+  })
+  const events = []
+  const first = transactionParticipant('materialize:first', events, {
+    async publish(context) {
+      events.push('revalidate:first')
+      await context.revalidateLease()
+    },
+    finalize() {
+      throw new Error('finalize-cleanup-failed')
+    }
+  })
+  const second = transactionParticipant('materialize:second', events)
+
+  const result = await host.transactions.withWriteTransaction(hubIdentity('participant-success'), async (transaction) => {
+    host.persist.writeJson(path.join(root, 'ledger.json'), { version: 1, status: 'terminal' })
+    transaction.enlist(first)
+    transaction.enlist(second)
+    return transaction.commit('committed')
+  })
+
+  assert.equal(result, 'committed')
+  assert.equal(readJson(root, 'ledger.json').status, 'terminal')
+  assert.deepEqual(events, [
+    'publish:materialize:first',
+    'revalidate:first',
+    'publish:materialize:second',
+    'finalize:materialize:second',
+    'finalize:materialize:first'
+  ])
+  assert.ok(lock.renewals() >= 3)
+})
+
+test('participant enlistment is portable, unique, terminal-bound, and one-shot across transactions', async (t) => {
+  const root = path.join(fixture(t), 'data')
+  const host = durable.createDurableTransactionHost({
+    root,
+    schemaFor: documentSchema,
+    lock: exclusiveMemoryLock()
+  })
+  const events = []
+  const first = transactionParticipant('participant@ONE+1', events)
+
+  await host.transactions.withWriteTransaction(hubIdentity('participant-identity'), async (transaction) => {
+    transaction.enlist(first)
+    assert.throws(() => transaction.enlist(first), /one-shot|already enlisted/)
+    assert.throws(
+      () => transaction.enlist(transactionParticipant('PARTICIPANT@one+1', events)),
+      /participantId is already enlisted/
+    )
+    assert.throws(
+      () => transaction.enlist(transactionParticipant('../not-portable', events)),
+      /portable opaque identifier/
+    )
+    host.persist.writeJson(path.join(root, 'identity.json'), { version: 1, value: 'accepted' })
+    return transaction.commit(null)
+  })
+  assert.deepEqual(events, ['publish:participant@ONE+1', 'finalize:participant@ONE+1'])
+
+  await assert.rejects(
+    host.transactions.withWriteTransaction(hubIdentity('participant-cross-transaction'), async (transaction) => {
+      transaction.enlist(first)
+      return transaction.commit(null)
+    }),
+    /one-shot/
+  )
+
+  await host.transactions.withWriteTransaction(hubIdentity('participant-after-decision'), async (transaction) => {
+    const decision = transaction.commit(null)
+    assert.throws(
+      () => transaction.enlist(transactionParticipant('participant:late', events)),
+      /terminal decision/
+    )
+    return decision
+  })
+})
+
+test('participants roll back on abort, callback failure, invalid decisions, and savepoint discard', async (t) => {
+  const root = path.join(fixture(t), 'data')
+  const host = durable.createDurableTransactionHost({
+    root,
+    schemaFor: documentSchema,
+    lock: exclusiveMemoryLock()
+  })
+
+  for (const scenario of ['abort', 'throw', 'invalid']) {
+    const events = []
+    const participant = transactionParticipant(`cleanup:${scenario}`, events, {
+      rollback: (context) => context.revalidateLease()
+    })
+    await assert.rejects(
+      host.transactions.withWriteTransaction(hubIdentity(`participant-${scenario}`), async (transaction) => {
+        transaction.enlist(participant)
+        host.persist.writeJson(path.join(root, `${scenario}.json`), { version: 1, value: scenario })
+        if (scenario === 'abort') return transaction.abort(new Error('participant-business-abort'))
+        if (scenario === 'throw') throw new Error('participant-callback-failed')
+        return { kind: 'commit', value: null }
+      })
+    )
+    assert.deepEqual(events, [`rollback:cleanup:${scenario}`])
+    assert.equal(fs.existsSync(path.join(root, `${scenario}.json`)), false)
+  }
+
+  const savepointEvents = []
+  await host.transactions.withWriteTransaction(hubIdentity('participant-savepoint'), async (transaction) => {
+    const retained = transactionParticipant('savepoint:retained', savepointEvents)
+    const discarded = transactionParticipant('savepoint:discarded', savepointEvents)
+    transaction.enlist(retained)
+    const savepoint = transaction.savepoint()
+    transaction.enlist(discarded)
+    transaction.rollbackTo(savepoint)
+    host.persist.writeJson(path.join(root, 'savepoint-participant.json'), { version: 1, value: 'retained' })
+    return transaction.commit(null)
+  })
+  assert.deepEqual(savepointEvents, [
+    'rollback:savepoint:discarded',
+    'publish:savepoint:retained',
+    'finalize:savepoint:retained'
+  ])
+
+  const noDocumentEvents = []
+  await assert.rejects(
+    host.transactions.withWriteTransaction(hubIdentity('participant-no-document'), async (transaction) => {
+      transaction.enlist(transactionParticipant('participant:no-document', noDocumentEvents))
+      return transaction.commit(null)
+    }),
+    /must stage at least one durable document/
+  )
+  assert.deepEqual(noDocumentEvents, ['rollback:participant:no-document'])
+})
+
+test('participant publish and pre-WAL failures roll back every enlistment in reverse order', async (t) => {
+  const publishRoot = path.join(fixture(t), 'publish-data')
+  const publishHost = durable.createDurableTransactionHost({
+    root: publishRoot,
+    schemaFor: documentSchema,
+    lock: exclusiveMemoryLock()
+  })
+  const publishEvents = []
+  await assert.rejects(
+    publishHost.transactions.withWriteTransaction(hubIdentity('participant-publish-failure'), async (transaction) => {
+      transaction.enlist(transactionParticipant('publish:a', publishEvents))
+      transaction.enlist(transactionParticipant('publish:b', publishEvents, {
+        publish() {
+          throw new Error('explicitly-unpublished')
+        }
+      }))
+      transaction.enlist(transactionParticipant('publish:c', publishEvents))
+      publishHost.persist.writeJson(path.join(publishRoot, 'state.json'), { version: 1, value: 'must-not-publish' })
+      return transaction.commit(null)
+    }),
+    /explicitly-unpublished/
+  )
+  assert.deepEqual(publishEvents, [
+    'publish:publish:a',
+    'publish:publish:b',
+    'rollback:publish:c',
+    'rollback:publish:b',
+    'rollback:publish:a'
+  ])
+  assert.equal(fs.existsSync(path.join(publishRoot, 'state.json')), false)
+
+  const spoofRoot = path.join(fixture(t), 'spoof-data')
+  const spoofHost = durable.createDurableTransactionHost({
+    root: spoofRoot,
+    schemaFor: documentSchema,
+    lock: exclusiveMemoryLock()
+  })
+  const spoofEvents = []
+  await assert.rejects(
+    spoofHost.transactions.withWriteTransaction(hubIdentity('participant-spoofed-lock-error'), async (transaction) => {
+      transaction.enlist(transactionParticipant('spoof:lock', spoofEvents, {
+        publish() {
+          throw Object.assign(new Error('spoofed-lock-not-owned'), { code: 'LOCK_NOT_OWNED' })
+        }
+      }))
+      spoofHost.persist.writeJson(path.join(spoofRoot, 'state.json'), { version: 1, value: 'must-roll-back' })
+      return transaction.commit(null)
+    }),
+    /spoofed-lock-not-owned/
+  )
+  assert.deepEqual(spoofEvents, ['publish:spoof:lock', 'rollback:spoof:lock'])
+  assert.equal(fs.existsSync(path.join(spoofRoot, 'state.json')), false)
+
+  const walRoot = path.join(fixture(t), 'wal-data')
+  let armed = false
+  let injected = false
+  const walHost = durable.createDurableTransactionHost({
+    root: walRoot,
+    schemaFor: documentSchema,
+    lock: exclusiveMemoryLock(),
+    checkpoint(name) {
+      if (armed && !injected && name === 'file-flushed') {
+        injected = true
+        throw new Error('pre-wal-publication-failed')
+      }
+    }
+  })
+  const walEvents = []
+  await assert.rejects(
+    walHost.transactions.withWriteTransaction(hubIdentity('participant-pre-wal-failure'), async (transaction) => {
+      transaction.enlist(transactionParticipant('pre-wal:one', walEvents, {
+        publish() {
+          armed = true
+        }
+      }))
+      walHost.persist.writeJson(path.join(walRoot, 'state.json'), { version: 1, value: 'must-roll-back' })
+      return transaction.commit(null)
+    }),
+    /pre-wal-publication-failed/
+  )
+  assert.deepEqual(walEvents, ['publish:pre-wal:one', 'rollback:pre-wal:one'])
+  assert.equal(fs.existsSync(path.join(walRoot, 'state.json')), false)
+})
+
+test('uncertain WAL publication and lease loss preserve participant recovery journals', async (t) => {
+  const uncertainRoot = path.join(fixture(t), 'uncertain-participant-data')
+  let hardlinkProbe
+  const uncertainHost = durable.createDurableTransactionHost({
+    root: uncertainRoot,
+    schemaFor: documentSchema,
+    lock: exclusiveMemoryLock(),
+    checkpoint(name, facts) {
+      if (hardlinkProbe || name !== 'atomic-replace-published'
+        || !String(facts.relativePath).endsWith('.wal.json')) return
+      const wal = path.join(uncertainRoot, ...String(facts.relativePath).split('/'))
+      hardlinkProbe = `${wal}.participant-unknown-hardlink`
+      fs.linkSync(wal, hardlinkProbe)
+      throw new Error('participant-wal-publication-uncertain')
+    }
+  })
+  const uncertainEvents = []
+  await assert.rejects(
+    uncertainHost.transactions.withWriteTransaction(hubIdentity('participant-wal-uncertain'), async (transaction) => {
+      transaction.enlist(transactionParticipant('uncertain:wal', uncertainEvents))
+      uncertainHost.persist.writeJson(path.join(uncertainRoot, 'state.json'), { version: 1, value: 'pending' })
+      return transaction.commit(null)
+    }),
+    durable.DurableRecoveryRequiredError
+  )
+  assert.deepEqual(uncertainEvents, ['publish:uncertain:wal'])
+  fs.unlinkSync(hardlinkProbe)
+  assert.equal((await uncertainHost.recover(hubIdentity('participant-wal-recover'))).recoveredTransactions, 1)
+  assert.equal(readJson(uncertainRoot, 'state.json').value, 'pending')
+
+  const leaseRoot = path.join(fixture(t), 'lease-participant-data')
+  const lock = observableMemoryLock()
+  const leaseHost = durable.createDurableTransactionHost({
+    root: leaseRoot,
+    schemaFor: documentSchema,
+    lock: lock.port
+  })
+  const leaseEvents = []
+  await assert.rejects(
+    leaseHost.transactions.withWriteTransaction(hubIdentity('participant-lease-loss'), async (transaction) => {
+      transaction.enlist(transactionParticipant('uncertain:lease', leaseEvents, {
+        async publish(context) {
+          lock.lose()
+          await context.revalidateLease()
+        }
+      }))
+      leaseHost.persist.writeJson(path.join(leaseRoot, 'state.json'), { version: 1, value: 'must-not-guess' })
+      return transaction.commit(null)
+    }),
+    (error) => error?.code === 'LOCK_NOT_OWNED'
+  )
+  assert.deepEqual(leaseEvents, ['publish:uncertain:lease'])
+  assert.equal(fs.existsSync(path.join(leaseRoot, 'state.json')), false)
+})
+
+test('memory transaction participants mirror publish, reverse rollback, and best-effort finalize', async () => {
+  const transactions = application.createMemoryApplicationTransactions()
+  const successEvents = []
+  await transactions.withWriteTransaction(hubIdentity('memory-participant-success'), async (transaction) => {
+    await transaction.revalidateLease()
+    transaction.enlist(transactionParticipant('memory:a', successEvents, {
+      finalize() {
+        throw new Error('ignored-memory-finalize')
+      }
+    }))
+    transaction.enlist(transactionParticipant('memory:b', successEvents))
+    return transaction.commit(null)
+  })
+  assert.deepEqual(successEvents, [
+    'publish:memory:a',
+    'publish:memory:b',
+    'finalize:memory:b',
+    'finalize:memory:a'
+  ])
+
+  const failureEvents = []
+  await assert.rejects(
+    transactions.withWriteTransaction(hubIdentity('memory-participant-failure'), async (transaction) => {
+      transaction.enlist(transactionParticipant('memory:one', failureEvents))
+      transaction.enlist(transactionParticipant('memory:two', failureEvents, {
+        publish() {
+          throw new Error('memory-publish-failed')
+        }
+      }))
+      return transaction.commit(null)
+    }),
+    /memory-publish-failed/
+  )
+  assert.deepEqual(failureEvents, [
+    'publish:memory:one',
+    'publish:memory:two',
+    'rollback:memory:two',
+    'rollback:memory:one'
+  ])
+  assert.deepEqual(transactions.participantEvents.map((event) => `${event.phase}:${event.participantId}`), [
+    'publish:memory:a',
+    'publish:memory:b',
+    'finalize:memory:b',
+    'finalize:memory:a',
+    'publish:memory:one',
+    'publish:memory:two',
+    'rollback:memory:two',
+    'rollback:memory:one'
+  ])
 })
 
 test('staging validates the serialized JSON shape and rejects unbounded or unserializable values', async (t) => {

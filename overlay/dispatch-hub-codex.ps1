@@ -15,22 +15,10 @@ function Resolve-SkillGraftCommand {
     return [string]$command.Source
 }
 
-$hubRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $sg = Resolve-SkillGraftCommand
-$hadHubRoot = Test-Path -LiteralPath 'Env:HUB_ROOT'
-$previousHubRoot = $env:HUB_ROOT
-try {
-    $env:HUB_ROOT = $hubRoot
-    & $sg 'analyze' '--contract-v1'
-    $sgExitCode = $LASTEXITCODE
-    $sgSucceeded = $?
-} finally {
-    if ($hadHubRoot) {
-        $env:HUB_ROOT = $previousHubRoot
-    } else {
-        Remove-Item -LiteralPath 'Env:HUB_ROOT' -ErrorAction SilentlyContinue
-    }
-}
+& $sg 'analyze' '--contract-v1'
+$sgExitCode = $LASTEXITCODE
+$sgSucceeded = $?
 
 if ($null -eq $sgExitCode) {
     $sgExitCode = if ($sgSucceeded) { 0 } else { 1 }

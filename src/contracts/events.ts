@@ -12,7 +12,11 @@ export const AUDIT_EVENT_TYPES = [
   'inbox.transitioned',
   'session.requested',
   'session.reaped',
-  'state.changed'
+  'state.changed',
+  'worktree.claimed',
+  'worktree.materialized',
+  'worktree.legacy-migrated',
+  'worktree.legacy-rolled-back'
 ] as const
 
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number]

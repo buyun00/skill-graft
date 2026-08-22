@@ -10,6 +10,14 @@ import type {
 import type { LegacyDetachApplyEffect } from './legacy-detach.js'
 import type { HubStateV2 } from './hub-state-v2.js'
 import type { MigrationPlanV1 } from './migration.js'
+import type {
+  LegacyMigrationPlanV1,
+  LegacyMigrationRecordV1,
+  LegacyRollbackPlanV1,
+  MaterializationMarkerV1,
+  MaterializePlanSummaryV1,
+  MaterializePlanV1
+} from './materialization.js'
 import type { LibrarySnapshotManifestV1, Sha256Identifier } from './snapshot.js'
 import type {
   HistoryRecordView,
@@ -168,6 +176,51 @@ export type MigrateStateResult = {
   state: HubStateV2 | null
 }
 
+export type PlanSyncResult = {
+  action: 'planSync'
+  status: 'planned' | 'conflict'
+  plan: MaterializePlanV1
+}
+
+export type ClaimWorktreeResult = {
+  action: 'claimWorktree'
+  pathKey: Sha256Identifier
+  worktreeId: string
+  pin: WorktreePinV1
+  changed: boolean
+}
+
+export type SyncResult = {
+  action: 'sync'
+  pathKey: Sha256Identifier
+  worktreeId: string
+  changed: boolean
+  planHash: Sha256Identifier
+  marker: MaterializationMarkerV1
+  pin: WorktreePinV1
+  summary: MaterializePlanSummaryV1
+  /** True when the supplied attach session is durably completed or already held the same proof. */
+  sessionCompleted: boolean
+}
+
+export type MigrateLegacyResult = {
+  action: 'migrateLegacy'
+  mode: 'dryRun' | 'commit'
+  status: 'planned' | 'conflict' | 'committed' | 'already-migrated' | 'not-required'
+  plan: LegacyMigrationPlanV1 | null
+  migration: LegacyMigrationRecordV1 | null
+  pin: WorktreePinV1 | null
+}
+
+export type RollbackLegacyMigrationResult = {
+  action: 'rollbackLegacyMigration'
+  mode: 'dryRun' | 'commit'
+  status: 'planned' | 'conflict' | 'rolled-back' | 'already-rolled-back'
+  plan: LegacyRollbackPlanV1 | null
+  migration: LegacyMigrationRecordV1 | null
+  pin: WorktreePinV1 | null
+}
+
 export type CommandDataByKind = {
   status: HubStatusView
   listSkills: SkillInventoryView
@@ -180,6 +233,7 @@ export type CommandDataByKind = {
   listSnapshots: ListSnapshotsResult
   getSnapshot: GetSnapshotResult
   getPin: GetPinResult
+  planSync: PlanSyncResult
   repairLegacy: RepairLegacyResult
   applyLegacyAttach: ApplyLegacyAttachResult
   applyLegacyDetach: ApplyLegacyDetachResult
@@ -195,6 +249,10 @@ export type CommandDataByKind = {
   createSnapshot: CreateSnapshotResult
   setPin: SetPinResult
   migrateState: MigrateStateResult
+  claimWorktree: ClaimWorktreeResult
+  sync: SyncResult
+  migrateLegacy: MigrateLegacyResult
+  rollbackLegacyMigration: RollbackLegacyMigrationResult
 }
 
 export const UNKNOWN_COMMAND_KIND = 'unknown' as const

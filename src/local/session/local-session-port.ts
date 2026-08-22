@@ -4,6 +4,7 @@ import type { SessionView } from '../../contracts/index.js'
 import type { LocalHostContext as HubContext } from '../../adapters/host-context.js'
 import {
   enqueueSession,
+  completeAttachSession,
   finalizeSession,
   findSession,
   listSessions,
@@ -136,6 +137,10 @@ export function createLocalSessionPort(ctx: HubContext, options: LocalSessionPor
       return toSessionView(ctx, session)
     },
     async resume(input: SessionResumeRequest) {
+      const existing = findSession(ctx, input.sessionId)
+      if (existing?.kind === 'attach' && existing.status === 'completed') {
+        throw portFault('request-in-progress')
+      }
       let session = resumeSession(ctx, { id: input.sessionId, message: input.message })
       if (!session.codexSessionId) {
         saveSession(ctx, session)
@@ -150,6 +155,9 @@ export function createLocalSessionPort(ctx: HubContext, options: LocalSessionPor
     },
     reap(sessionIds?: readonly string[]) {
       return toSessionViews(ctx, reapSessions(ctx, (pid) => runner.pidAlive(pid), sessionIds))
+    },
+    completeAttach(input) {
+      return completeAttachSession(ctx, input)
     },
     needsReap(sessionIds?: readonly string[]) {
       return sessionsNeedReap(ctx, (pid) => runner.pidAlive(pid), sessionIds)

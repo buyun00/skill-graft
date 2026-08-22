@@ -103,7 +103,8 @@ function createFacadeSandbox(t) {
     SG_FAKE_LOG: log,
     SG_FAKE_STDOUT: 'fake-sg-stdout',
     SG_FAKE_STDERR: 'fake-sg-stderr',
-    SG_FAKE_EXIT: '23'
+    SG_FAKE_EXIT: '23',
+    HUB_ROOT: guardedRoot
   }
   for (const name of ['APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP']) fs.mkdirSync(env[name], { recursive: true })
   return { root, packageRoot, overlay, guardedRoot, log, env }
@@ -126,13 +127,86 @@ function invokeFacade(sandbox, name, args, input = '') {
   })
 }
 
+function gitAvailable() {
+  return spawnSync('git', ['--version'], { encoding: 'utf8', windowsHide: true }).status === 0
+}
+
+function runGit(cwd, args) {
+  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true })
+  assert.equal(result.status, 0, result.stderr)
+  return result.stdout.trim()
+}
+
+function createRelocatedOverlaySandbox(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-relocated-overlay-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const worktree = path.join(root, 'game worktree')
+  const configuredPackage = path.join(root, 'configured package')
+  const explicitPackage = path.join(root, 'explicit package')
+  const copiedOverlay = path.join(worktree, '.codex', 'local-overlay')
+  const bin = path.join(root, 'fake-bin')
+  const log = path.join(root, 'node-call.json')
+  for (const directory of [
+    worktree,
+    path.join(configuredPackage, 'overlay'),
+    path.join(configuredPackage, 'dist', 'control'),
+    path.join(explicitPackage, 'overlay'),
+    path.join(explicitPackage, 'dist', 'control'),
+    copiedOverlay,
+    bin
+  ]) fs.mkdirSync(directory, { recursive: true })
+  fs.writeFileSync(path.join(configuredPackage, 'dist', 'control', 'cli.js'), '// configured package CLI\n')
+  fs.writeFileSync(path.join(explicitPackage, 'dist', 'control', 'cli.js'), '// explicit package CLI\n')
+  runGit(worktree, ['init', '--quiet'])
+  runGit(worktree, ['config', 'ozdqp.localOverlaySource', configuredPackage])
+  for (const name of ['HubLib.ps1', 'attach-library.ps1', 'sync-codex-worktree-overlay.ps1']) {
+    fs.copyFileSync(path.join(overlayRoot, name), path.join(copiedOverlay, name))
+  }
+
+  const fakeNode = path.join(root, 'fake-node.mjs')
+  fs.writeFileSync(fakeNode, [
+    "import fs from 'node:fs'",
+    "fs.writeFileSync(process.env.NODE_FAKE_LOG, JSON.stringify({ args: process.argv.slice(2), dataRoot: process.env.HUB_ROOT, skillGraftHome: process.env.SKILL_GRAFT_HOME }))",
+    ''
+  ].join('\n'))
+  fs.writeFileSync(path.join(bin, 'node.cmd'), [
+    '@echo off',
+    `"${process.execPath}" "${fakeNode}" %*`,
+    'exit /b %ERRORLEVEL%',
+    ''
+  ].join('\r\n'))
+  const dataRoot = path.join(root, 'independent data root')
+  fs.mkdirSync(dataRoot)
+  const env = {
+    ...process.env,
+    PATH: `${bin}${path.delimiter}${process.env.PATH || ''}`,
+    NODE_FAKE_LOG: log,
+    HUB_ROOT: dataRoot,
+    SKILL_GRAFT_HOME: dataRoot
+  }
+  return { root, worktree, configuredPackage, explicitPackage, copiedOverlay, dataRoot, log, env }
+}
+
+function invokeRelocatedOverlay(sandbox, name, args) {
+  return spawnSync(powershellExe(), [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', path.join(sandbox.copiedOverlay, name),
+    ...args
+  ], {
+    cwd: sandbox.worktree,
+    encoding: 'utf8',
+    env: sandbox.env,
+    windowsHide: true
+  })
+}
+
 test('every shipped PowerShell entry keeps review decisions behind typed sg commands', () => {
   const files = walkPowerShell(overlayRoot)
   const names = files.map((file) => path.relative(overlayRoot, file).replaceAll('\\', '/'))
   for (const name of facadeNames) assert.ok(names.includes(name), `${name} must remain a shipped compatibility asset`)
-  const installSource = fs.readFileSync(path.join(repoRoot, 'src', 'control', 'install.ts'), 'utf8')
-  assert.match(installSource, /join\(dataRoot, 'overlay', 'analyze-remote-skill-update\.ps1'\)/,
-    'the installed data-root contract must retain its required ingest facade asset')
 
   const directReviewMutation = /(?:skill-review[\\/]state\.json|skills[\\/]inbox|\bWrite-JsonFile\b|\bNew-HistoryRecord\b)/i
   const directMutationFiles = files
@@ -176,6 +250,37 @@ test('every shipped PowerShell entry keeps review decisions behind typed sg comm
       `${name} must not retain a direct file/process effect`)
   }
 
+  const inferredParentRoot = /Join-Path\s+\$PSScriptRoot\s+['"]\.\.['"]/i
+  for (const file of files) {
+    assert.doesNotMatch(fs.readFileSync(file, 'utf8'), inferredParentRoot,
+      `${path.basename(file)} must not infer the Hub from its copied overlay parent`)
+  }
+  const hubLibrary = fs.readFileSync(path.join(overlayRoot, 'HubLib.ps1'), 'utf8')
+  assert.match(hubLibrary, /config --get ozdqp\.localOverlaySource/)
+  assert.match(hubLibrary, /dist\\control\\cli\.js/)
+  assert.match(hubLibrary, /IsPathRooted/)
+  assert.match(hubLibrary, /must be outside the target worktree/)
+  for (const name of ['attach-library.ps1', 'sync-codex-worktree-overlay.ps1']) {
+    const source = fs.readFileSync(path.join(overlayRoot, name), 'utf8')
+    assert.match(source, /Join-Path \$PSScriptRoot 'HubLib\.ps1'/)
+    assert.match(source, /Get-SkillGraftPackageRoot -Worktree \$TargetWorktree -PackageRoot \$PackageRoot/)
+    assert.match(source, /Join-Path \$packageRoot 'dist\\control\\cli\.js'/)
+    assert.doesNotMatch(source, /\$env:(?:HUB_ROOT|SKILL_GRAFT_HOME)\s*=/)
+  }
+  for (const name of ['post-checkout', 'reference-transaction']) {
+    const source = fs.readFileSync(path.join(overlayRoot, 'hooks', name), 'utf8')
+    assert.match(source, /git -C "\$game" config --get ozdqp\.localOverlaySource/)
+    assert.match(source, /git -C "\$game" config --get ozdqp\.skillWatchWorkspace/)
+    assert.match(source, /case "\$hub" in[\s\S]*\[A-Za-z\]:\/\*/)
+    assert.match(source, /SKILL_GRAFT_HOME="\$data_root" HUB_ROOT="\$data_root" node "\$cli"/)
+    assert.doesNotMatch(source, /HUB_ROOT="\$hub"/)
+  }
+  const checkoutHook = fs.readFileSync(path.join(overlayRoot, 'hooks', 'post-checkout'), 'utf8')
+  assert.match(checkoutHook, /data_root="\$\{primary_root:-\$legacy_root\}"/)
+  assert.doesNotMatch(checkoutHook, /HUB_ROOT:-\$hub|data_root=.*\$hub/)
+  assert.match(checkoutHook, /list="\$\{data_root%\/\}\/overlay\/do-not-auto-attach\.txt"/)
+  assert.doesNotMatch(checkoutHook, /\$\{hub%\/\}\/overlay\/(?:do-not-auto-attach|attached-worktrees)\.txt/)
+
   for (const file of files) {
     const source = fs.readFileSync(file, 'utf8')
     assert.doesNotMatch(source, /(?:&|\.)[^\r\n]*(?:promote-inbox|manage-skill-visibility)\.ps1/i,
@@ -194,7 +299,10 @@ test('every shipped PowerShell entry keeps review decisions behind typed sg comm
 
   const attachPrompt = fs.readFileSync(path.join(overlayRoot, 'prompts', 'attach.txt'), 'utf8')
   const detachPrompt = fs.readFileSync(path.join(overlayRoot, 'prompts', 'detach.txt'), 'utf8')
-  assert.match(attachPrompt, /^sg apply-legacy-attach .*\{\{SESSION_ID\}\}.*--contract-v1$/m)
+  assert.match(attachPrompt, /^sg snapshot create .*\{\{SESSION_ID\}\}.*--contract-v1$/m)
+  assert.match(attachPrompt, /exit 0.*waiting/s)
+  assert.match(attachPrompt, /claim.*plan-sync.*sync/s)
+  assert.doesNotMatch(attachPrompt, /^sg (?:claim|plan-sync|sync|migrate-legacy|apply-legacy-attach)\b/m)
   assert.match(detachPrompt, /^sg apply-legacy-detach .*\{\{SESSION_ID\}\}.*--contract-v1$/m)
   assert.equal((detachPrompt.match(/^sg\s+/gm) || []).length, 1)
   assert.doesNotMatch(detachPrompt, /attached-worktrees\.txt|skill-review[\\/]history|(?:Set|Add)-Content|Copy-Item|Move-Item|New-Item|Remove-Item|\bgit\s+-C\b/i)
@@ -253,6 +361,24 @@ test('legacy ingest facade forwards redirected hook payload without interpreting
   assert.deepEqual(snapshotTree(sandbox.guardedRoot), before)
 })
 
+test('legacy ingest facade rejects a relative explicit host locator before invoking sg', {
+  skip: !powershellExe()
+}, (t) => {
+  const sandbox = createFacadeSandbox(t)
+  const gameRepo = path.join(sandbox.root, 'game')
+  fs.mkdirSync(gameRepo)
+  const before = snapshotTree(sandbox.guardedRoot)
+  const result = invokeFacade(sandbox, 'analyze-remote-skill-update.ps1', [
+    '-GameRepo', gameRepo,
+    '-HubRoot', 'relative-host'
+  ])
+
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /HubRoot must be an absolute path/)
+  assert.equal(fs.existsSync(sandbox.log), false)
+  assert.deepEqual(snapshotTree(sandbox.guardedRoot), before)
+})
+
 test('legacy decide and dispatch facades only map argv to fake typed sg and project process results', {
   skip: !powershellExe()
 }, (t) => {
@@ -273,7 +399,7 @@ test('legacy decide and dispatch facades only map argv to fake typed sg and proj
     '--merge-target', 'skills/ozdqp-development', '--contract-v1'
   ])
   assert.equal(call.stdin, '')
-  assert.equal(call.hubRoot, path.resolve(sandbox.packageRoot))
+  assert.equal(call.hubRoot, path.resolve(sandbox.guardedRoot))
   assert.deepEqual(snapshotTree(sandbox.packageRoot), packageBefore)
 
   fs.rmSync(sandbox.log, { force: true })
@@ -282,6 +408,170 @@ test('legacy decide and dispatch facades only map argv to fake typed sg and proj
   call = JSON.parse(fs.readFileSync(sandbox.log, 'utf8'))
   assert.deepEqual(call.args, ['analyze', '--contract-v1'])
   assert.equal(call.stdin, '')
-  assert.equal(call.hubRoot, path.resolve(sandbox.packageRoot))
+  assert.equal(call.hubRoot, path.resolve(sandbox.guardedRoot))
   assert.deepEqual(snapshotTree(sandbox.packageRoot), packageBefore)
+})
+
+test('copied live wrappers launch the configured package while preserving the independent data root', {
+  skip: !powershellExe() || !gitAvailable()
+}, (t) => {
+  const sandbox = createRelocatedOverlaySandbox(t)
+  const cases = [
+    {
+      name: 'sync-codex-worktree-overlay.ps1',
+      args: ['-TargetWorktree', sandbox.worktree, '-RequestId', 'sync-123'],
+      expected: ['repair-links', '--worktree', sandbox.worktree, '--request-id', 'sync-123']
+    },
+    {
+      name: 'attach-library.ps1',
+      args: ['-TargetWorktree', sandbox.worktree, '-SessionId', 'session-123'],
+      expected: [
+        'apply-legacy-attach', '--worktree', sandbox.worktree, '--source-policy', 'requireMatch',
+        '--visibility', 'disable', '--session-id', 'session-123'
+      ]
+    }
+  ]
+  for (const entry of cases) {
+    fs.rmSync(sandbox.log, { force: true })
+    const result = invokeRelocatedOverlay(sandbox, entry.name, entry.args)
+    assert.equal(result.status, 0, result.stderr)
+    const call = JSON.parse(fs.readFileSync(sandbox.log, 'utf8'))
+    assert.equal(call.args[0], path.join(sandbox.configuredPackage, 'dist', 'control', 'cli.js'))
+    assert.deepEqual(call.args.slice(1), entry.expected)
+    assert.equal(call.dataRoot, path.resolve(sandbox.dataRoot))
+    assert.equal(call.skillGraftHome, path.resolve(sandbox.dataRoot))
+    assert.notEqual(path.dirname(path.dirname(path.dirname(call.args[0]))), path.resolve(sandbox.worktree, '.codex'))
+  }
+
+  fs.rmSync(sandbox.log, { force: true })
+  const explicit = invokeRelocatedOverlay(sandbox, 'sync-codex-worktree-overlay.ps1', [
+    '-TargetWorktree', sandbox.worktree,
+    '-PackageRoot', sandbox.explicitPackage
+  ])
+  assert.equal(explicit.status, 0, explicit.stderr)
+  const explicitCall = JSON.parse(fs.readFileSync(sandbox.log, 'utf8'))
+  assert.equal(explicitCall.args[0], path.join(sandbox.explicitPackage, 'dist', 'control', 'cli.js'))
+  assert.equal(explicitCall.dataRoot, path.resolve(sandbox.dataRoot))
+
+  const nestedHost = path.join(sandbox.worktree, 'nested package')
+  fs.mkdirSync(path.join(nestedHost, 'overlay'), { recursive: true })
+  fs.mkdirSync(path.join(nestedHost, 'dist', 'control'), { recursive: true })
+  fs.writeFileSync(path.join(nestedHost, 'dist', 'control', 'cli.js'), '// unsafe nested CLI\n')
+  fs.rmSync(sandbox.log, { force: true })
+  const nested = invokeRelocatedOverlay(sandbox, 'sync-codex-worktree-overlay.ps1', [
+    '-TargetWorktree', sandbox.worktree,
+    '-PackageRoot', nestedHost
+  ])
+  assert.notEqual(nested.status, 0)
+  assert.match(nested.stderr, /must be outside the target worktree/)
+  assert.equal(fs.existsSync(sandbox.log), false)
+
+  runGit(sandbox.worktree, ['config', 'ozdqp.localOverlaySource', 'relative-host'])
+  fs.rmSync(sandbox.log, { force: true })
+  const unsafe = invokeRelocatedOverlay(sandbox, 'sync-codex-worktree-overlay.ps1', [
+    '-TargetWorktree', sandbox.worktree
+  ])
+  assert.notEqual(unsafe.status, 0)
+  assert.match(unsafe.stderr, /must be an absolute path/)
+  assert.equal(fs.existsSync(sandbox.log), false)
+})
+
+test('live Git hooks launch package CLI without rebinding the independent data root', {
+  skip: !gitAvailable()
+}, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-relocated-hooks-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const worktree = path.join(root, 'game worktree')
+  const packageRoot = path.join(root, 'runtime package')
+  const dataRoot = path.join(root, 'independent data')
+  const hookRoot = path.join(packageRoot, 'overlay', 'hooks')
+  const cli = path.join(packageRoot, 'dist', 'control', 'cli.js')
+  const log = path.join(root, 'hook-calls.jsonl')
+  fs.mkdirSync(worktree, { recursive: true })
+  fs.mkdirSync(hookRoot, { recursive: true })
+  fs.mkdirSync(path.dirname(cli), { recursive: true })
+  fs.mkdirSync(path.join(dataRoot, 'overlay'), { recursive: true })
+  for (const name of ['post-checkout', 'reference-transaction']) {
+    const target = path.join(hookRoot, name)
+    fs.copyFileSync(path.join(overlayRoot, 'hooks', name), target)
+    fs.chmodSync(target, 0o755)
+  }
+  fs.writeFileSync(cli, [
+    "const fs = require('node:fs')",
+    "const stdin = fs.readFileSync(0, 'utf8')",
+    "fs.appendFileSync(process.env.HOOK_FAKE_LOG, JSON.stringify({ args: process.argv.slice(2), stdin, packageEntry: __filename, skillGraftHome: process.env.SKILL_GRAFT_HOME || null, hubRoot: process.env.HUB_ROOT || null }) + '\\n')",
+    ''
+  ].join('\n'))
+
+  runGit(worktree, ['init', '--quiet'])
+  runGit(worktree, ['config', 'user.email', 'hooks@example.invalid'])
+  runGit(worktree, ['config', 'user.name', 'Hook Probe'])
+  fs.writeFileSync(path.join(worktree, 'seed.txt'), 'seed\n')
+  runGit(worktree, ['add', 'seed.txt'])
+  runGit(worktree, ['commit', '--quiet', '-m', 'seed'])
+  const canonicalWorktree = runGit(worktree, ['rev-parse', '--show-toplevel'])
+  fs.writeFileSync(path.join(dataRoot, 'overlay', 'attached-worktrees.txt'), `${canonicalWorktree}\n`)
+  fs.writeFileSync(path.join(dataRoot, 'overlay', 'do-not-auto-attach.txt'), '')
+  runGit(worktree, ['config', 'ozdqp.localOverlaySource', packageRoot])
+  runGit(worktree, ['config', 'ozdqp.skillWatchWorkspace', dataRoot])
+  runGit(worktree, ['config', 'ozdqp.skillHubAutoAttach', 'false'])
+  runGit(worktree, ['config', 'ozdqp.skillWatchEnabled', 'true'])
+  runGit(worktree, ['config', 'core.hooksPath', hookRoot])
+
+  const env = { ...process.env, SKILL_GRAFT_HOME: dataRoot, HOOK_FAKE_LOG: log }
+  delete env.HUB_ROOT
+  const checkout = spawnSync('git', ['-C', worktree, 'checkout', '--quiet', '-b', 'hook-probe'], {
+    encoding: 'utf8', env, windowsHide: true
+  })
+  assert.equal(checkout.status, 0, checkout.stderr)
+  const update = spawnSync('git', [
+    '-C', worktree, 'update-ref', 'refs/heads/transaction-probe', 'HEAD'
+  ], { encoding: 'utf8', env, windowsHide: true })
+  assert.equal(update.status, 0, update.stderr)
+
+  const calls = fs.readFileSync(log, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line))
+  const repair = calls.find((call) => call.args[0] === 'repair-links')
+  const ingest = calls.find((call) => call.args[0] === 'ingest'
+    && call.stdin.includes('refs/heads/transaction-probe'))
+  assert.deepEqual(repair.args, ['repair-links', '--worktree', canonicalWorktree])
+  assert.deepEqual(ingest.args, ['ingest', '--game-repo', canonicalWorktree, '--dispatch'])
+  assert.match(ingest.stdin, /refs\/heads\/transaction-probe/)
+  for (const call of [repair, ingest]) {
+    assert.equal(path.resolve(call.packageEntry), path.resolve(cli))
+    assert.equal(path.resolve(call.skillGraftHome), path.resolve(dataRoot))
+    assert.equal(path.resolve(call.hubRoot), path.resolve(dataRoot))
+  }
+
+  fs.rmSync(log, { force: true })
+  const configuredEnv = { ...process.env, HOOK_FAKE_LOG: log }
+  for (const key of Object.keys(configuredEnv)) {
+    if (key.toUpperCase() === 'SKILL_GRAFT_HOME' || key.toUpperCase() === 'HUB_ROOT') delete configuredEnv[key]
+  }
+  const configuredCheckout = spawnSync('git', ['-C', worktree, 'checkout', '--quiet', '-b', 'configured-root-probe'], {
+    encoding: 'utf8', env: configuredEnv, windowsHide: true
+  })
+  assert.equal(configuredCheckout.status, 0, configuredCheckout.stderr)
+  const configuredUpdate = spawnSync('git', [
+    '-C', worktree, 'update-ref', 'refs/heads/configured-root-transaction', 'HEAD'
+  ], { encoding: 'utf8', env: configuredEnv, windowsHide: true })
+  assert.equal(configuredUpdate.status, 0, configuredUpdate.stderr)
+  const configuredCalls = fs.readFileSync(log, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line))
+  assert.ok(configuredCalls.some((call) => call.args[0] === 'repair-links'))
+  assert.ok(configuredCalls.some((call) => call.args[0] === 'ingest'))
+  for (const call of configuredCalls) {
+    assert.equal(path.resolve(call.skillGraftHome), path.resolve(dataRoot))
+    assert.equal(path.resolve(call.hubRoot), path.resolve(dataRoot))
+  }
+
+  fs.rmSync(log, { force: true })
+  const conflictEnv = {
+    ...configuredEnv,
+    SKILL_GRAFT_HOME: dataRoot,
+    HUB_ROOT: path.join(root, 'conflicting data root')
+  }
+  const conflictCheckout = spawnSync('git', ['-C', worktree, 'checkout', '--quiet', '-b', 'conflicting-root-probe'], {
+    encoding: 'utf8', env: conflictEnv, windowsHide: true
+  })
+  assert.equal(conflictCheckout.status, 0, conflictCheckout.stderr)
+  assert.equal(fs.existsSync(log), false, 'conflicting data-root aliases must make hooks fail closed before CLI launch')
 })

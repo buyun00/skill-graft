@@ -30,7 +30,7 @@ const pathApi = {
 const INSTALL_ENVIRONMENT_NAMES = [
   'SKILL_GRAFT_HOME', 'HUB_ROOT', 'SG_INSTALL_DIR', 'HUB_API_PORT',
   'SKILL_GRAFT_INVOCATION_TRACE', 'SKILL_GRAFT_REAL_E2E', 'SKILL_GRAFT_RUN_ID', 'SKILL_GRAFT_E2E_ROOT',
-  'PATH', 'DSH_HOME', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP',
+  'PATH', 'DSH_HOME', 'HOME', 'XDG_CONFIG_HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP',
   'HUB_SPAWN_CODEX', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_OPTIONAL_LOCKS'
 ]
 
@@ -357,6 +357,7 @@ test('POSIX detached launch spec executes a complete reviewed environment with f
     '  port: process.env.HUB_API_PORT,',
     '  path: process.env.PATH,',
     '  home: process.env.HOME,',
+    '  xdg: process.env.XDG_CONFIG_HOME,',
     '  preserved: process.env.SG_PRESERVED,',
     "  inheritedOnly: Object.prototype.hasOwnProperty.call(process.env, 'SG_DETACHED_INHERITED_ONLY'),",
     "  git: Object.keys(process.env).filter((name) => /^GIT_/i.test(name)).sort(),",
@@ -369,6 +370,7 @@ test('POSIX detached launch spec executes a complete reviewed environment with f
   Object.assign(baseEnvironment, {
     PATH: process.env.PATH || '',
     HOME: path.join(root, 'ordinary-home'),
+    XDG_CONFIG_HOME: path.join(root, 'ordinary-xdg'),
     SKILL_GRAFT_HOME: '/conflicting/primary',
     HUB_ROOT: '/conflicting/legacy',
     SG_PRESERVED: 'ordinary-value',
@@ -411,6 +413,7 @@ test('POSIX detached launch spec executes a complete reviewed environment with f
     port: '22911',
     path: baseEnvironment.PATH,
     home: baseEnvironment.HOME,
+    xdg: baseEnvironment.XDG_CONFIG_HOME,
     preserved: 'ordinary-value',
     inheritedOnly: false,
     git: Object.keys(baseEnvironment).filter((name) => /^GIT_/i.test(name)).sort(),
@@ -425,6 +428,7 @@ test('POSIX detached launch spec executes a complete reviewed environment with f
       PATH: process.env.PATH || '',
       DSH_HOME: '/trace/home/dsh-home',
       HOME: '/trace/home',
+      XDG_CONFIG_HOME: '/trace/home/xdg-config',
       USERPROFILE: '/trace/home',
       APPDATA: '/trace/home/appdata',
       LOCALAPPDATA: '/trace/home/localappdata',
@@ -464,6 +468,7 @@ test('POSIX detached launch spec executes a complete reviewed environment with f
     port: '22912',
     path: trace.pinned.PATH,
     home: trace.pinned.HOME,
+    xdg: trace.pinned.XDG_CONFIG_HOME,
     preserved: 'ordinary-value',
     inheritedOnly: false,
     git: ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_OPTIONAL_LOCKS'],
@@ -686,7 +691,7 @@ test('trace run-daemon launcher assigns each data-root alias exactly once and fa
   fs.mkdirSync(path.dirname(cliPath), { recursive: true })
   fs.writeFileSync(cliPath, [
     "const fs = require('node:fs')",
-    "fs.writeFileSync(process.env.SG_RUN_DAEMON_MARKER, JSON.stringify({ args: process.argv.slice(2), primary: process.env.SKILL_GRAFT_HOME, legacy: process.env.HUB_ROOT }))"
+    "fs.writeFileSync(process.env.SG_RUN_DAEMON_MARKER, JSON.stringify({ args: process.argv.slice(2), primary: process.env.SKILL_GRAFT_HOME, legacy: process.env.HUB_ROOT, xdg: process.env.XDG_CONFIG_HOME }))"
   ].join('\n'))
   const paths = resolveInstallPaths(pathApi, {
     hubRoot: packageRoot,
@@ -703,6 +708,7 @@ test('trace run-daemon launcher assigns each data-root alias exactly once and fa
       PATH: process.env.PATH || path.dirname(process.execPath),
       DSH_HOME: path.join(home, 'dsh'),
       HOME: home,
+      XDG_CONFIG_HOME: path.join(home, 'xdg-config'),
       USERPROFILE: home,
       APPDATA: path.join(home, 'appdata'),
       LOCALAPPDATA: path.join(home, 'localappdata'),
@@ -718,6 +724,7 @@ test('trace run-daemon launcher assigns each data-root alias exactly once and fa
   const launcher = renderShims(paths, trace).runDaemonCmd
   assert.equal((launcher.match(/^set "SKILL_GRAFT_HOME=/gm) || []).length, 1)
   assert.equal((launcher.match(/^set "HUB_ROOT=/gm) || []).length, 1)
+  assert.equal((launcher.match(/^set "XDG_CONFIG_HOME=/gm) || []).length, 1)
   fs.mkdirSync(paths.installDir, { recursive: true })
   fs.writeFileSync(paths.runDaemonCmd, launcher)
   const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', paths.runDaemonCmd], {
@@ -731,7 +738,8 @@ test('trace run-daemon launcher assigns each data-root alias exactly once and fa
   assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), {
     args: ['daemon', 'run'],
     primary: path.resolve(dataRoot),
-    legacy: path.resolve(dataRoot)
+    legacy: path.resolve(dataRoot),
+    xdg: path.join(home, 'xdg-config')
   })
 })
 

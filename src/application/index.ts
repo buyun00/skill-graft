@@ -21,16 +21,30 @@ export type {
   LibrarySnapshotRepositoryPort,
   LibrarySnapshotObservation,
   P2ApplicationPorts,
+  RuntimeAssetRepositoryPort,
   RequestLedgerEntry,
   RequestLedgerPort,
+  AttachCompletionOutcome,
+  AttachCompletionRequest,
   SessionPort,
   SessionResumeRequest,
   SessionStartRequest,
   SkillReadPortResult,
   WorktreeIdentity,
   WorktreeIdentityPort,
-  WorktreeInspection
+  WorktreeInspection,
+  SnapshotContentPort
 } from './ports.js'
+export type {
+  MaterializationRecordPort,
+  MaterializationRecoveryReport,
+  LegacyMigrationInspection,
+  LegacyRollbackInspection,
+  MaterializeInspection,
+  MaterializePort,
+  MaterializePreparedReport,
+  P3ApplicationPorts
+} from './materialize-port.js'
 export type { PortFault, PortFaultReason } from './port-fault.js'
 export {
   APPLICATION_TRANSACTION_ERROR_CODES,
@@ -42,6 +56,8 @@ export type {
   ApplicationTransactionError,
   ApplicationTransactionErrorCode,
   ApplicationTransactionIdentity,
+  ApplicationTransactionParticipant,
+  ApplicationTransactionParticipantContext,
   ApplicationTransactionPort,
   ApplicationTransactionSavepoint,
   ApplicationWriteTransaction

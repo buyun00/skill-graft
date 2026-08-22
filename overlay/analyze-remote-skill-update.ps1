@@ -20,11 +20,22 @@ function Resolve-LegacyPath([string]$Value, [string]$Name) {
     if ([string]::IsNullOrWhiteSpace($Value)) {
         throw "$Name must not be empty"
     }
+    $candidate = $Value.Trim()
+    if ($candidate -ne $Value) {
+        throw "$Name must not have surrounding whitespace"
+    }
+    if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+        throw "$Name must be an absolute path"
+    }
     try {
-        return [System.IO.Path]::GetFullPath($Value.Trim())
+        $resolved = [System.IO.Path]::GetFullPath($candidate)
     } catch {
         throw "$Name is not a valid path"
     }
+    if (-not [System.IO.Directory]::Exists($resolved)) {
+        throw "$Name must be an existing directory"
+    }
+    return $resolved
 }
 
 function Resolve-SkillGraftCommand {

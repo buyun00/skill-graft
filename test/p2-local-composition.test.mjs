@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -9,6 +10,12 @@ import { fileURLToPath } from 'node:url'
 import { createHub } from '../dist/adapters/create-hub.js'
 import { createLocalDurableSchemaResolver } from '../dist/adapters/local-durable-schema.js'
 import { createLocalP2ApplicationPorts } from '../dist/adapters/local-p2-ports.js'
+import { LOCAL_RUNTIME_ASSET_PATHS } from '../dist/adapters/local-runtime-assets.js'
+import {
+  LEGACY_MIGRATION_ID_HASH_DOMAIN,
+  canonicalLegacyMigrationRecordIdentityPayload,
+  domainSeparatedSha256
+} from '../dist/core/index.js'
 import { createLibrarySnapshotManifest } from '../dist/core/snapshot.js'
 import { createLocalHost, openLocalHost } from '../dist/local/create-local-host.js'
 
@@ -17,6 +24,86 @@ const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 
 function sha256(value) {
   return createHash('sha256').update(String(value)).digest('hex')
+}
+
+function sha256Identifier(value) {
+  return `sha256:${sha256(value)}`
+}
+
+function writeFixtureFile(file, contents) {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, contents, 'utf8')
+}
+
+function writeJson(file, value) {
+  writeFixtureFile(file, `${JSON.stringify(value, null, 2)}\n`)
+}
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, 'utf8'))
+}
+
+function git(cwd, args) {
+  const result = spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    windowsHide: true
+  })
+  assert.equal(result.status, 0, [result.stdout, result.stderr].filter(Boolean).join('\n'))
+  return result.stdout || ''
+}
+
+function stringLeaves(value, leaves = []) {
+  if (typeof value === 'string') leaves.push(value)
+  else if (Array.isArray(value)) value.forEach((entry) => stringLeaves(entry, leaves))
+  else if (value && typeof value === 'object') Object.values(value).forEach((entry) => stringLeaves(entry, leaves))
+  return leaves
+}
+
+function assertLocatorFree(value, locators) {
+  const probes = locators.map((locator) => path.resolve(locator).replaceAll('\\', '/').toLowerCase())
+  for (const leaf of stringLeaves(value)) {
+    const normalized = leaf.replaceAll('\\', '/').toLowerCase()
+    assert.equal(probes.some((probe) => normalized.includes(probe)), false, `host locator leaked: ${leaf}`)
+  }
+}
+
+function assertNoTransactionResidue(root) {
+  const journal = path.join(root, '.skill-graft-transactions')
+  assert.deepEqual(fs.existsSync(journal) ? fs.readdirSync(journal) : [], [])
+}
+
+function gitPath(worktree, relativePath) {
+  const resolved = git(worktree, ['rev-parse', '--git-path', relativePath]).trim()
+  assert.notEqual(resolved, '', `Git did not resolve ${relativePath}`)
+  return path.isAbsolute(resolved) ? path.normalize(resolved) : path.resolve(worktree, resolved)
+}
+
+function relativeTree(root) {
+  if (!fs.existsSync(root)) return []
+  const entries = []
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name)
+      entries.push(path.relative(root, absolute).replaceAll('\\', '/'))
+      if (entry.isDirectory() && !entry.isSymbolicLink()) visit(absolute)
+    }
+  }
+  visit(root)
+  return entries.sort()
+}
+
+function assertNoMaterializerGitResidue(worktree) {
+  const transactions = gitPath(worktree, 'skill-graft/transactions')
+  assert.deepEqual(relativeTree(transactions), [], 'materializer transaction token/phase residue remains')
+  assert.equal(fs.existsSync(gitPath(worktree, 'config.worktree.lock')), false)
+  assert.equal(fs.existsSync(gitPath(worktree, 'index.lock')), false)
+
+  const privateRoot = gitPath(worktree, 'skill-graft')
+  const ownedLocks = relativeTree(privateRoot).filter((relative) => (
+    /(?:^|[./-])lock(?:$|[./-])/i.test(relative)
+    || /\.(?:prepare|finalize)(?:$|[./-])/i.test(relative)
+  ))
+  assert.deepEqual(ownedLocks, [], 'materializer private-sidecar owned lock/phase residue remains')
 }
 
 function pathPort() {
@@ -201,6 +288,30 @@ test('Local durable schemas strictly cover state, sessions, history, and transac
   assert.equal(sessionsSchema.validate({ sessions: [session] }).valid, true)
   assert.equal(sessionsSchema.validate({ sessions: [{ ...session, rawSecret: 'must fail' }] }).valid, false)
   assert.equal(sessionsSchema.validate({ sessions: [session, session] }).valid, false)
+  const legacyCompleted = {
+    ...session,
+    kind: 'attach',
+    status: 'completed',
+    exitCode: 0,
+    canResume: false
+  }
+  assert.equal(sessionsSchema.validate({ sessions: [legacyCompleted] }).valid, true)
+  const attachCompletion = {
+    targetId: `worktree:${'a'.repeat(24)}`,
+    pathKey: `sha256:${'b'.repeat(64)}`,
+    materializationId: `sha256:${'c'.repeat(64)}`,
+    completedAt: NOW
+  }
+  assert.equal(sessionsSchema.validate({ sessions: [{ ...legacyCompleted, attachCompletion }] }).valid, true)
+  for (const malformed of [
+    { ...legacyCompleted, attachCompletion: { ...attachCompletion, locator: 'C:\\raw\\probe' } },
+    { ...legacyCompleted, status: 'waiting', attachCompletion },
+    { ...legacyCompleted, canResume: true, attachCompletion },
+    { ...legacyCompleted, attachCompletion: { ...attachCompletion, targetId: 'C:\\raw\\probe' } },
+    { ...legacyCompleted, attachCompletion: { ...attachCompletion, materializationId: 'not-a-digest' } }
+  ]) {
+    assert.equal(sessionsSchema.validate({ sessions: [malformed] }).valid, false)
+  }
 
   const historySchema = schemaFor('skill-review/history/session-1.json')
   assert.equal(historySchema.validate({
@@ -224,6 +335,53 @@ test('Local durable schemas strictly cover state, sessions, history, and transac
   assert.equal(snapshotSchema.validate(manifestResult.manifest).valid, true)
   assert.equal(snapshotSchema.validate({ ...manifestResult.manifest, unexpected: true }).valid, false)
   assert.equal(schemaFor('skill-review/library/snapshots/not-a-hash.json'), undefined)
+
+  const pathKey = sha256Identifier('schema-materialization-path')
+  const currentRecord = { schemaVersion: 1, pathKey, marker: null }
+  const currentSchema = schemaFor(`skill-review/materializations/current/${pathKey.slice(7)}.json`)
+  assert.ok(currentSchema)
+  assert.equal(currentSchema.validate(currentRecord).valid, true)
+  assert.equal(currentSchema.validate({ ...currentRecord, locator: 'C:\\raw\\probe' }).valid, false)
+  assert.equal(currentSchema.validate({ ...currentRecord, pathKey: sha256Identifier('wrong-path') }).valid, false)
+  assert.equal(
+    schemaFor(`skill-review/materializations/current/${sha256('wrong-route')}.json`).validate(currentRecord).valid,
+    false
+  )
+  assert.equal(schemaFor('skill-review/materializations/current/not-a-hash.json'), undefined)
+
+  const migrationIdentity = {
+    planHash: sha256Identifier('schema-migration-plan'),
+    pathKey,
+    worktreeId: `worktree:${'a'.repeat(24)}`,
+    snapshotId: sha256Identifier('schema-migration-snapshot'),
+    materializationId: sha256Identifier('schema-migration-materialization'),
+    visibilityStateId: sha256Identifier('schema-migration-visibility'),
+    backupManifestId: sha256Identifier('schema-migration-backup'),
+    backupPrivateStateId: sha256Identifier('schema-migration-private'),
+    artifacts: [],
+    createdArtifacts: [],
+    gitVisibilityDigest: sha256Identifier('schema-migration-git')
+  }
+  const migrationId = domainSeparatedSha256(
+    LEGACY_MIGRATION_ID_HASH_DOMAIN,
+    canonicalLegacyMigrationRecordIdentityPayload(migrationIdentity)
+  )
+  const migrationRecord = {
+    schemaVersion: 1,
+    migrationId,
+    ...migrationIdentity,
+    status: 'committed'
+  }
+  const migrationSchema = schemaFor(`skill-review/materializations/migrations/${migrationId.slice(7)}.json`)
+  assert.ok(migrationSchema)
+  assert.equal(migrationSchema.validate(migrationRecord).valid, true)
+  assert.equal(migrationSchema.validate({ ...migrationRecord, locator: 'C:\\raw\\probe' }).valid, false)
+  assert.equal(migrationSchema.validate({ ...migrationRecord, migrationId: sha256Identifier('wrong-id') }).valid, false)
+  assert.equal(
+    schemaFor(`skill-review/materializations/migrations/${sha256('wrong-route')}.json`).validate(migrationRecord).valid,
+    false
+  )
+  assert.equal(schemaFor('skill-review/materializations/migrations/not-a-hash.json'), undefined)
 })
 
 test('fresh Local data root inspects empty, snapshots, and migrates through dry-run and commit', async (t) => {
@@ -261,6 +419,199 @@ test('fresh Local data root inspects empty, snapshots, and migrates through dry-
   const current = await execute('fresh-inspect-current', { kind: 'inspectSchema' })
   assert.equal(current.ok, true)
   assert.equal(current.data.status, 'current')
+})
+
+test('Local composition claims, materializes, completes attach, and reopens as an exact keep', { timeout: 120_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p3-composition-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const dataRoot = path.join(root, 'data')
+  const worktree = path.join(root, 'game-tree')
+  const selectedSkill = 'ozdqp-development'
+  const overrideContents = '# composition override\n'
+  const skillContents = '# composition skill\n'
+  writeFixtureFile(path.join(dataRoot, 'AGENTS.override.md'), overrideContents)
+  writeFixtureFile(path.join(dataRoot, 'skills', selectedSkill, 'SKILL.md'), skillContents)
+  fs.mkdirSync(worktree, { recursive: true })
+  git(worktree, ['init', '-q'])
+  writeFixtureFile(path.join(worktree, 'project.txt'), 'tracked project file\n')
+  git(worktree, ['add', 'project.txt'])
+  git(worktree, [
+    '-c', 'user.name=Composition Test',
+    '-c', 'user.email=composition@example.invalid',
+    'commit', '-qm', 'fixture'
+  ])
+  git(worktree, ['config', 'extensions.worktreeConfig', 'true'])
+
+  const host = await openLocalHost({ packageRoot: PACKAGE_ROOT, dataRoot, hostId: 'local-p3-composition' })
+  const execute = (requestId, payload) => host.application.execute({
+    ...payload,
+    meta: host.commandMeta('test', requestId)
+  })
+  const created = await execute('composition-create-snapshot', { kind: 'createSnapshot' })
+  assert.equal(created.ok, true, JSON.stringify(created))
+  const snapshotId = created.data.snapshot.snapshotId
+  const migration = await execute('composition-plan-v1-migration', { kind: 'migrateState', mode: 'dryRun' })
+  assert.equal(migration.ok, true, JSON.stringify(migration))
+  const migrated = await execute('composition-commit-v1-migration', {
+    kind: 'migrateState',
+    mode: 'commit',
+    planHash: migration.data.plan.planHash
+  })
+  assert.equal(migrated.ok, true, JSON.stringify(migrated))
+
+  const sessionId = 'composition-attach-session'
+  const reviewRoot = path.join(dataRoot, 'skill-review')
+  const promptFile = path.join(reviewRoot, `prompt-${sessionId}.txt`)
+  const logFile = path.join(reviewRoot, `session-${sessionId}.log`)
+  const lastFile = path.join(reviewRoot, `session-${sessionId}.last.txt`)
+  writeFixtureFile(promptFile, 'authorize one materialization\n')
+  writeFixtureFile(logFile, '')
+  writeFixtureFile(lastFile, '')
+  writeJson(path.join(reviewRoot, 'sessions.json'), {
+    sessions: [{
+      id: sessionId,
+      kind: 'attach',
+      path: '',
+      worktree,
+      intent: 'authorize one materialization',
+      pid: 0,
+      promptFile,
+      logFile,
+      lastFile,
+      startedAt: NOW,
+      status: 'waiting',
+      exitCode: 0,
+      error: '',
+      codexSessionId: '00000000-0000-0000-0000-000000000001',
+      endedAt: NOW,
+      canResume: true,
+      summary: '',
+      lastMessage: '',
+      inboxIds: []
+    }]
+  })
+
+  const claimed = await execute('composition-claim', {
+    kind: 'claimWorktree',
+    worktree,
+    snapshotId,
+    selectedSkills: [selectedSkill],
+    sessionId
+  })
+  assert.equal(claimed.ok, true, JSON.stringify(claimed))
+  assert.equal(claimed.data.changed, true)
+  assert.equal(claimed.data.pin.claimState, 'claimed')
+  assert.equal(claimed.data.pin.materializedSnapshot, null)
+
+  const planned = await execute('composition-plan-sync', { kind: 'planSync', worktree })
+  assert.equal(planned.ok, true, JSON.stringify(planned))
+  assert.equal(planned.data.status, 'planned')
+  assert.equal(planned.data.plan.executable, true)
+  assert.deepEqual(
+    planned.data.plan.operations.map(({ targetRelativePath, action }) => [targetRelativePath, action]),
+    [
+      ['.agents/skills/ozdqp-development', 'create'],
+      ['.codex/local-overlay', 'create'],
+      ['AGENTS.override.md', 'create']
+    ]
+  )
+
+  const synced = await execute('composition-sync', {
+    kind: 'sync',
+    worktree,
+    planHash: planned.data.plan.planHash,
+    sessionId
+  })
+  assert.equal(synced.ok, true, JSON.stringify(synced))
+  assert.equal(synced.data.changed, true)
+  assert.equal(synced.data.sessionCompleted, true)
+  assert.equal(synced.data.pin.materializedSnapshot, snapshotId)
+  assert.equal(fs.readFileSync(path.join(worktree, 'project.txt'), 'utf8'), 'tracked project file\n')
+  assert.equal(git(worktree, ['status', '--porcelain=v1']), '')
+  assert.equal(fs.readFileSync(path.join(worktree, 'AGENTS.override.md'), 'utf8'), overrideContents)
+  assert.equal(
+    fs.readFileSync(path.join(worktree, '.agents', 'skills', selectedSkill, 'SKILL.md'), 'utf8'),
+    skillContents
+  )
+  for (const relative of LOCAL_RUNTIME_ASSET_PATHS) {
+    assert.deepEqual(
+      fs.readFileSync(path.join(worktree, '.codex', 'local-overlay', ...relative.split('/'))),
+      fs.readFileSync(path.join(PACKAGE_ROOT, 'overlay', ...relative.split('/'))),
+      relative
+    )
+  }
+
+  const stateFile = path.join(reviewRoot, 'state.json')
+  const state = readJson(stateFile)
+  const pin = state.worktrees[claimed.data.pathKey]
+  assert.deepEqual(pin, synced.data.pin)
+  const currentFile = path.join(
+    reviewRoot,
+    'materializations',
+    'current',
+    `${claimed.data.pathKey.slice('sha256:'.length)}.json`
+  )
+  const currentRecord = readJson(currentFile)
+  assert.equal(currentRecord.pathKey, claimed.data.pathKey)
+  assert.equal(currentRecord.marker.materializationId, synced.data.marker.materializationId)
+  const completedSession = readJson(path.join(reviewRoot, 'sessions.json')).sessions[0]
+  assert.equal(completedSession.status, 'completed')
+  assert.equal(completedSession.canResume, false)
+  assert.deepEqual(Object.keys(completedSession.attachCompletion).sort(), [
+    'completedAt', 'materializationId', 'pathKey', 'targetId'
+  ])
+  assert.deepEqual(
+    {
+      targetId: completedSession.attachCompletion.targetId,
+      pathKey: completedSession.attachCompletion.pathKey,
+      materializationId: completedSession.attachCompletion.materializationId
+    },
+    {
+      targetId: claimed.data.worktreeId,
+      pathKey: claimed.data.pathKey,
+      materializationId: synced.data.marker.materializationId
+    }
+  )
+  assertLocatorFree(
+    [claimed.data, planned.data, synced.data, pin, currentRecord, completedSession.attachCompletion],
+    [PACKAGE_ROOT, dataRoot, worktree]
+  )
+  assertNoTransactionResidue(dataRoot)
+  assertNoMaterializerGitResidue(worktree)
+
+  const durableBeforeReopen = {
+    state: fs.readFileSync(stateFile),
+    current: fs.readFileSync(currentFile),
+    sessions: fs.readFileSync(path.join(reviewRoot, 'sessions.json'))
+  }
+  const reopened = await openLocalHost({ packageRoot: PACKAGE_ROOT, dataRoot, hostId: 'local-p3-composition-reopen' })
+  const reopenExecute = (requestId, payload) => reopened.application.execute({
+    ...payload,
+    meta: reopened.commandMeta('test', requestId)
+  })
+  const keepPlan = await reopenExecute('composition-reopen-plan', { kind: 'planSync', worktree })
+  assert.equal(keepPlan.ok, true, JSON.stringify(keepPlan))
+  assert.equal(keepPlan.data.status, 'planned')
+  assert.equal(keepPlan.data.plan.executable, true)
+  assert.equal(keepPlan.data.plan.operations.every((operation) => operation.action === 'keep'), true)
+  assert.equal(keepPlan.data.plan.git.operations.every((operation) => operation.action === 'keep'), true)
+  assert.equal(keepPlan.data.plan.git.configuration.action, 'keep')
+  const noOp = await reopenExecute('composition-reopen-sync', {
+    kind: 'sync',
+    worktree,
+    planHash: keepPlan.data.plan.planHash,
+    sessionId
+  })
+  assert.equal(noOp.ok, true, JSON.stringify(noOp))
+  assert.equal(noOp.data.changed, false)
+  assert.equal(noOp.data.sessionCompleted, true)
+  assert.equal(noOp.data.marker.materializationId, synced.data.marker.materializationId)
+  assert.deepEqual(fs.readFileSync(stateFile), durableBeforeReopen.state)
+  assert.deepEqual(fs.readFileSync(currentFile), durableBeforeReopen.current)
+  assert.deepEqual(fs.readFileSync(path.join(reviewRoot, 'sessions.json')), durableBeforeReopen.sessions)
+  assertLocatorFree([keepPlan.data, noOp.data], [PACKAGE_ROOT, dataRoot, worktree])
+  assertNoTransactionResidue(dataRoot)
+  assertNoMaterializerGitResidue(worktree)
 })
 
 test('Local recovery rechecks late WALs, rejects malformed commands before recovery I/O, and clears failed attempts', async (t) => {

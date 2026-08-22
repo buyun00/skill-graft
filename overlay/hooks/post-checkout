@@ -1,14 +1,19 @@
 #!/bin/sh
 
-hub="$(git config --get ozdqp.skillWatchWorkspace 2>/dev/null)"
-if [ -z "$hub" ]; then
-    exit 0
-fi
-
 game="$(git rev-parse --show-toplevel 2>/dev/null)"
 if [ -z "$game" ]; then
     exit 0
 fi
+
+hub="$(git -C "$game" config --get ozdqp.localOverlaySource 2>/dev/null)"
+if [ -z "$hub" ]; then
+    exit 0
+fi
+hub="$(printf '%s' "$hub" | tr '\\\\' '/')"
+case "$hub" in
+    /*|[A-Za-z]:/*) ;;
+    *) exit 0 ;;
+esac
 
 cli="${hub%/}/dist/control/cli.js"
 if [ ! -f "$cli" ]; then
@@ -16,15 +21,29 @@ if [ ! -f "$cli" ]; then
 fi
 
 auto="$(git config --get --bool ozdqp.skillHubAutoAttach 2>/dev/null)"
-list="${hub%/}/overlay/do-not-auto-attach.txt"
-attached="${hub%/}/overlay/attached-worktrees.txt"
+primary_root="$(printf '%s' "${SKILL_GRAFT_HOME:-}" | tr '\\\\' '/')"
+legacy_root="$(printf '%s' "${HUB_ROOT:-}" | tr '\\\\' '/')"
+if [ -n "$primary_root" ] && [ -n "$legacy_root" ] && [ "${primary_root%/}" != "${legacy_root%/}" ]; then
+    exit 0
+fi
+data_root="${primary_root:-$legacy_root}"
+if [ -z "$data_root" ]; then
+    data_root="$(git -C "$game" config --get ozdqp.skillWatchWorkspace 2>/dev/null)"
+fi
+data_root="$(printf '%s' "$data_root" | tr '\\\\' '/')"
+case "$data_root" in
+    /*|[A-Za-z]:/*) ;;
+    *) exit 0 ;;
+esac
+list="${data_root%/}/overlay/do-not-auto-attach.txt"
+attached="${data_root%/}/overlay/attached-worktrees.txt"
 
 if grep -Fqx "$game" "$list" 2>/dev/null; then
     exit 0
 fi
 
 if grep -Fqx "$game" "$attached" 2>/dev/null; then
-    HUB_ROOT="$hub" node "$cli" repair-links --worktree "$game" >/dev/null
+    SKILL_GRAFT_HOME="$data_root" HUB_ROOT="$data_root" node "$cli" repair-links --worktree "$game" >/dev/null
     exit 0
 fi
 
@@ -33,6 +52,5 @@ if [ "$auto" != "true" ]; then
 fi
 
 echo "[OZDQP Skill Hub] new worktree detected; launching Codex attach session (no silent strip)."
-HUB_ROOT="$hub" node "$cli" attach --worktree "$game" >/dev/null
+SKILL_GRAFT_HOME="$data_root" HUB_ROOT="$data_root" node "$cli" attach --worktree "$game" >/dev/null
 exit 0
-

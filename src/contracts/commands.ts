@@ -14,7 +14,8 @@ export const QUERY_COMMAND_KINDS = [
   'inspectSchema',
   'listSnapshots',
   'getSnapshot',
-  'getPin'
+  'getPin',
+  'planSync'
 ] as const
 
 export const WRITE_COMMAND_KINDS = [
@@ -32,7 +33,11 @@ export const WRITE_COMMAND_KINDS = [
   'reapSessions',
   'createSnapshot',
   'setPin',
-  'migrateState'
+  'migrateState',
+  'claimWorktree',
+  'sync',
+  'migrateLegacy',
+  'rollbackLegacyMigration'
 ] as const
 
 export type QueryCommandKind = (typeof QUERY_COMMAND_KINDS)[number]
@@ -76,6 +81,10 @@ export interface GetSnapshotCommand extends BaseCommand<'getSnapshot'> {
 }
 
 export interface GetPinCommand extends BaseCommand<'getPin'> {
+  worktree: string
+}
+
+export interface PlanSyncCommand extends BaseCommand<'planSync'> {
   worktree: string
 }
 
@@ -171,6 +180,33 @@ export interface MigrateStateCommand extends BaseCommand<'migrateState'> {
   planHash?: Sha256Identifier
 }
 
+export interface ClaimWorktreeCommand extends BaseCommand<'claimWorktree'> {
+  worktree: string
+  snapshotId: Sha256Identifier
+  selectedSkills: readonly string[]
+  sessionId: string
+}
+
+export interface SyncCommand extends BaseCommand<'sync'> {
+  worktree: string
+  planHash: Sha256Identifier
+  /** Optional only for P2 pin/ordinary upgrade compatibility. Official attach flows always provide it. */
+  sessionId?: string
+}
+
+type PlanCommitMode =
+  | { mode: 'dryRun'; planHash?: never }
+  | { mode: 'commit'; planHash: Sha256Identifier }
+
+export type MigrateLegacyCommand = BaseCommand<'migrateLegacy'> & {
+  worktree: string
+} & PlanCommitMode
+
+export type RollbackLegacyMigrationCommand = BaseCommand<'rollbackLegacyMigration'> & {
+  worktree: string
+  migrationId: Sha256Identifier
+} & PlanCommitMode
+
 export type QueryCommand =
   | StatusCommand
   | ListSkillsCommand
@@ -183,6 +219,7 @@ export type QueryCommand =
   | ListSnapshotsCommand
   | GetSnapshotCommand
   | GetPinCommand
+  | PlanSyncCommand
 
 export type WriteCommand =
   | RepairLegacyCommand
@@ -200,5 +237,9 @@ export type WriteCommand =
   | CreateSnapshotCommand
   | SetPinCommand
   | MigrateStateCommand
+  | ClaimWorktreeCommand
+  | SyncCommand
+  | MigrateLegacyCommand
+  | RollbackLegacyMigrationCommand
 
 export type HubCommand = QueryCommand | WriteCommand

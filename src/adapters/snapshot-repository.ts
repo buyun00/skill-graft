@@ -3,7 +3,8 @@ import path from 'node:path'
 import { ApplicationTransactionErrorBase } from '../application/transaction-port.js'
 import type {
   LibrarySnapshotObservation,
-  LibrarySnapshotRepositoryPort
+  LibrarySnapshotRepositoryPort,
+  SnapshotContentPort
 } from '../application/ports.js'
 import type { TransactionAwarePersistPort } from './durable-state.js'
 import {
@@ -220,7 +221,7 @@ function readSourceFile(
 
 export function createSnapshotRepository(
   options: SnapshotRepositoryOptions
-): LibrarySnapshotRepositoryPort {
+): LibrarySnapshotRepositoryPort & SnapshotContentPort {
   const repositoryRoot = path.resolve(options.root)
   const sourceRootInput = path.resolve(options.sourceRoot)
   const files = new DurableFileRoot(options)
@@ -563,6 +564,29 @@ export function createSnapshotRepository(
     read(snapshotId) {
       if (!SHA256_PATTERN.test(snapshotId)) throw new SnapshotRepositoryError('snapshot id is invalid')
       return readManifest(snapshotId)
+    },
+
+    readVerifiedFile(input) {
+      if (!SHA256_PATTERN.test(input.snapshotId)
+        || !SHA256_PATTERN.test(input.expectedSha256)
+        || !Number.isSafeInteger(input.expectedSize)
+        || input.expectedSize < 0) {
+        throw new SnapshotRepositoryError('snapshot content request is invalid')
+      }
+      const manifest = readManifest(input.snapshotId)
+      if (!manifest) return null
+      const expected = manifest.files.find((file) => file.path === input.path)
+      if (!expected) return null
+      if (expected.size !== input.expectedSize || expected.sha256 !== input.expectedSha256) {
+        throw new SnapshotRepositoryError('snapshot content request does not match its manifest')
+      }
+      const blob = readImmutableBlob(expected.sha256)
+      if (blob.status === 'missing'
+        || blob.bytes.length !== expected.size
+        || blob.sha256 !== expected.sha256) {
+        throw new SnapshotRepositoryError('snapshot content failed immutable blob verification')
+      }
+      return new Uint8Array(blob.bytes)
     }
   }
 }

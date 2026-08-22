@@ -34,7 +34,7 @@ const pathApi = {
 const INSTALL_ENVIRONMENT_NAMES = [
   'SKILL_GRAFT_HOME', 'HUB_ROOT', 'SG_INSTALL_DIR', 'HUB_API_PORT',
   'SKILL_GRAFT_INVOCATION_TRACE', 'SKILL_GRAFT_REAL_E2E', 'SKILL_GRAFT_RUN_ID', 'SKILL_GRAFT_E2E_ROOT',
-  'PATH', 'DSH_HOME', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP',
+  'PATH', 'DSH_HOME', 'HOME', 'XDG_CONFIG_HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP',
   'HUB_SPAWN_CODEX', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_OPTIONAL_LOCKS'
 ]
 
@@ -109,6 +109,7 @@ function tracePinnedEnvironment(runRoot) {
     PATH: path.join(home, 'safe-bin'),
     DSH_HOME: path.join(home, 'dsh-home'),
     HOME: home,
+    XDG_CONFIG_HOME: path.join(home, 'xdg-config'),
     USERPROFILE: home,
     APPDATA: path.join(home, 'appdata'),
     LOCALAPPDATA: path.join(home, 'localappdata'),
@@ -233,6 +234,7 @@ test('setup pins validated trace gates only into the detached daemon launcher', 
     'PATH',
     'DSH_HOME',
     'HOME',
+    'XDG_CONFIG_HOME',
     'USERPROFILE',
     'APPDATA',
     'LOCALAPPDATA',
@@ -258,6 +260,7 @@ test('setup pins validated trace gates only into the detached daemon launcher', 
 test('setup refuses trace-gated detached launchers with unowned or unsafe pinned environments', async (t) => {
   for (const scenario of [
     { name: 'outside-home', mutate: (env, root) => env.set('HOME', path.join(root, 'outside-home')), pattern: /HOME must identify/ },
+    { name: 'outside-xdg', mutate: (env, root) => env.set('XDG_CONFIG_HOME', path.join(root, 'outside-xdg')), pattern: /XDG_CONFIG_HOME must identify/ },
     { name: 'codex-enabled', mutate: (env) => env.set('HUB_SPAWN_CODEX', '1'), pattern: /HUB_SPAWN_CODEX=0/ },
     { name: 'cmd-injection', mutate: (env) => env.set('PATH', 'safe"\r\nset HOSTILE=1'), pattern: /unsafe for a cmd environment/ }
   ]) {

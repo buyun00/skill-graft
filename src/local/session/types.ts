@@ -1,3 +1,5 @@
+import type { AttachCompletionProof } from '../../contracts/state.js'
+
 export type HubSession = {
   id: string
   kind: string
@@ -20,4 +22,5 @@ export type HubSession = {
   endedAt?: string
   canResume?: boolean
   inboxIds?: string[]
+  attachCompletion?: AttachCompletionProof
 }

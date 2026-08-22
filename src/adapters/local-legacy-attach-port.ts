@@ -19,6 +19,8 @@ type WorktreeInspector = (worktree: string) => MaybePromise<WorktreeInspection>
 export type LocalLegacyAttachPortOptions = {
   /** Test/diagnostic seam. Production composition leaves this undefined. */
   checkpoint?: (step: string) => void
+  /** Installed package root containing immutable overlay hooks. */
+  packageRoot?: string
 }
 
 type UndoJournal = Array<() => void>
@@ -360,11 +362,21 @@ function linkArtifact(context: LocalHostContext, worktree: string, artifact: App
   return 'hardlink'
 }
 
-function gitConfiguration(context: LocalHostContext, worktree: string) {
-  const hooks = safeInside(context.hubRoot, 'overlay/hooks')
+function gitConfiguration(context: LocalHostContext, worktree: string, packageRootInput?: string) {
+  const packageRoot = packageRootInput ?? context.hubRoot
+  if (!path.isAbsolute(packageRoot)) throw new Error('legacy attach package root must be absolute')
+  const rootStat = lstat(packageRoot)
+  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error('legacy attach package root is not a plain directory')
+  }
+  if (isInside(comparable(worktree), comparable(packageRoot))) {
+    throw new Error('legacy attach package root must be outside the worktree')
+  }
+  const hooks = safeInside(packageRoot, 'overlay/hooks')
+  if (!lstat(hooks)?.isDirectory()) throw new Error('legacy attach overlay hooks are missing')
   return [
     { cwd: worktree, key: 'core.hooksPath', value: hooks },
-    { cwd: worktree, key: 'ozdqp.localOverlaySource', value: context.hubRoot },
+    { cwd: worktree, key: 'ozdqp.localOverlaySource', value: packageRoot },
     { cwd: worktree, key: 'ozdqp.skillWatchWorkspace', value: context.hubRoot },
     { cwd: worktree, key: 'ozdqp.skillWatchEnabled', value: 'true' },
     { cwd: context.hubRoot, key: 'ozdqp.gameRepo', value: worktree }
@@ -487,7 +499,9 @@ export function createLocalLegacyAttachPort(
       const skipSnapshot = plan.visibility.mode === 'disable'
         ? readSkipWorktree(context, plan.worktree, plan.visibility.trackedPaths)
         : new Map<string, boolean>()
-      const configuration = plan.configureGit ? gitConfiguration(context, plan.worktree) : []
+      const configuration = plan.configureGit
+        ? gitConfiguration(context, plan.worktree, options.packageRoot)
+        : []
       const configSnapshots: GitConfigSnapshot[] = configuration.map((entry) => ({
         cwd: entry.cwd,
         key: entry.key,

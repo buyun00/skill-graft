@@ -158,3 +158,29 @@ export function transitionWorktreePin(
     selectedSkills
   })
 }
+
+/**
+ * Clear materialized truth only after transaction recovery has proved both
+ * external and durable marker records absent (including explicit legacy
+ * rollback). This is not a generic failed-sync compensator: an earlier valid
+ * marker must retain its matching materialized snapshot. The claim and
+ * requested selection remain authoritative.
+ */
+export function rollbackMaterializedWorktreePin(
+  current: WorktreePinV1
+): WorktreePinTransitionResult {
+  const validation = validateWorktreePinV1(current)
+  if (!validation.valid) {
+    return { ok: false, error: { code: 'PIN_INVALID', message: 'current pin does not satisfy WorktreePinV1' } }
+  }
+  if (validation.value.claimState !== 'claimed') {
+    return {
+      ok: false,
+      error: {
+        code: 'PIN_TRANSITION_NOT_ALLOWED',
+        message: 'only a claimed pin can compensate materialized state'
+      }
+    }
+  }
+  return accepted(validation.value, { ...validation.value, materializedSnapshot: null })
+}

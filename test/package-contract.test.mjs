@@ -81,7 +81,12 @@ test('Local release tarball is a clean built distribution without source or mach
   for (const prefix of ['src/', 'test/', 'docs/', 'artifacts/', 'scripts/']) {
     assert.deepEqual(files.filter((file) => file.startsWith(prefix)), [], `${prefix} must not ship`)
   }
-  for (const runtimePrefix of ['.skill-graft-transactions/', 'skill-review/library/', 'skill-review/locks/']) {
+  for (const runtimePrefix of [
+    '.skill-graft-transactions/',
+    'skill-review/library/',
+    'skill-review/locks/',
+    'skill-review/materializations/'
+  ]) {
     assert.deepEqual(files.filter((file) => file.startsWith(runtimePrefix)), [], `${runtimePrefix} runtime data must not ship`)
   }
   const npmignore = fs.readFileSync(path.join(hubRoot, '.npmignore'), 'utf8')

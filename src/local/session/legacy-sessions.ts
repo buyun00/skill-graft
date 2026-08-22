@@ -1,4 +1,11 @@
-import type { SessionKind, SessionStatus, SessionTarget, SessionView } from '../../contracts/state.js'
+import type {
+  AttachCompletionProof,
+  SessionKind,
+  SessionStatus,
+  SessionTarget,
+  SessionView
+} from '../../contracts/state.js'
+import type { AttachCompletionOutcome, AttachCompletionRequest } from '../../application/ports.js'
 import type { LocalHostContext as HubContext } from '../../adapters/host-context.js'
 import { worktreeTargetId } from '../../adapters/worktree-target.js'
 import type { HubSession } from './types.js'
@@ -62,7 +69,7 @@ function refreshFromDisk(ctx: HubContext, session: HubSession) {
   if (id) session.codexSessionId = id
   const summary = extractAcceptanceSummary(last || log)
   if (summary) session.summary = summary
-  if (session.status === 'completed') {
+  if (session.status === 'completed' && session.kind !== 'attach') {
     session.status = session.exitCode === 0 ? 'waiting' : 'failed'
   }
 }
@@ -164,6 +171,9 @@ export function resumeSession(ctx: HubContext, input: { id: string; message: str
   const session = findSession(ctx, input.id)
   if (!session) throw new Error('session not found')
   if (session.status === 'running') throw new Error('session still running')
+  if (session.kind === 'attach' && session.status === 'completed') {
+    throw new Error('completed attach session cannot be resumed')
+  }
   const prev = ctx.fs.readText(session.logFile) || ''
   ctx.fs.writeText(session.logFile, `${prev}\n\n--------\nuser\n${message}\n`)
   session.intent = message
@@ -187,7 +197,10 @@ export function presentSession(ctx: HubContext, session: HubSession): HubSession
   refreshFromDisk(ctx, copy)
   return {
     ...copy,
-    canResume: Boolean(copy.codexSessionId) && copy.status !== 'running' && copy.status !== 'queued'
+    canResume: Boolean(copy.codexSessionId)
+      && copy.status !== 'running'
+      && copy.status !== 'queued'
+      && !(copy.kind === 'attach' && copy.status === 'completed')
   }
 }
 
@@ -248,8 +261,45 @@ export function toSessionView(ctx: HubContext, session: HubSession): SessionView
     summary: current.summary || undefined,
     lastMessage: current.lastMessage || undefined,
     canResume: Boolean(current.canResume),
-    inboxIds: current.inboxIds
+    inboxIds: current.inboxIds,
+    attachCompletion: current.attachCompletion ? { ...current.attachCompletion } : undefined
   }
+}
+
+function sameAttachCompletionIdentity(
+  left: AttachCompletionProof,
+  right: AttachCompletionProof
+): boolean {
+  return left.targetId === right.targetId
+    && left.pathKey === right.pathKey
+    && left.materializationId === right.materializationId
+}
+
+export function completeAttachSession(
+  ctx: HubContext,
+  input: AttachCompletionRequest
+): AttachCompletionOutcome {
+  const session = findSession(ctx, input.sessionId)
+  if (!session) return { status: 'not-authorized', reason: 'not-found' }
+  if (session.kind !== 'attach') return { status: 'not-authorized', reason: 'not-attach' }
+  const target = toSessionTarget(ctx, session)
+  if (target.kind !== 'worktree' || target.id !== input.proof.targetId) {
+    return { status: 'not-authorized', reason: 'target-mismatch' }
+  }
+  if (session.status === 'completed') {
+    if (!session.attachCompletion
+      || !sameAttachCompletionIdentity(session.attachCompletion, input.proof)) {
+      return { status: 'proof-conflict' }
+    }
+    return { status: 'already-completed', session: toSessionView(ctx, session) }
+  }
+  if (session.status !== 'waiting') return { status: 'not-authorized', reason: 'not-waiting' }
+  if (session.exitCode !== 0) return { status: 'not-authorized', reason: 'exit-not-zero' }
+  session.status = 'completed'
+  session.attachCompletion = { ...input.proof }
+  session.canResume = false
+  saveSession(ctx, session)
+  return { status: 'completed', session: toSessionView(ctx, session) }
 }
 
 export function toSessionViews(ctx: HubContext, sessions: readonly HubSession[]): SessionView[] {

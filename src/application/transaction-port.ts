@@ -1,4 +1,5 @@
 import type { Sha256Identifier, WriteCommandKind } from '../contracts/index.js'
+import type { MaybePromise } from './ports.js'
 
 declare const transactionSavepointBrand: unique symbol
 declare const transactionDecisionBrand: unique symbol
@@ -32,6 +33,10 @@ export const APPLICATION_TRANSACTION_ERROR_CODES = [
   'LOCK_NOT_OWNED',
   'STATE_CORRUPT',
   'SNAPSHOT_INVALID',
+  'RUNTIME_ASSET_INVALID',
+  'MATERIALIZATION_MARKER_INVALID',
+  'LEGACY_PLAN_STALE',
+  'UNSUPPORTED_LAYOUT',
   'PORT_FAILURE'
 ] as const
 
@@ -90,13 +95,43 @@ export type ApplicationTransactionDecision<T> =
   }
 
 /**
+ * The transaction adapter keeps every participant under the same lease as the
+ * durable documents. Participants receive only an owner revalidation hook;
+ * they never receive a host path, lock token, or persistence primitive.
+ */
+export type ApplicationTransactionParticipantContext = Readonly<{
+  revalidateLease(): MaybePromise<void>
+}>
+
+/**
+ * One-shot external publication enlisted by a write transaction. The opaque
+ * participant id is diagnostic/identity data only and must be portable (it is
+ * never interpreted as a filesystem path). Implementations must leave their
+ * own recovery journal intact when publication is uncertain.
+ */
+export interface ApplicationTransactionParticipant {
+  readonly participantId: string
+  publish(context: ApplicationTransactionParticipantContext): MaybePromise<void>
+  rollback(context: ApplicationTransactionParticipantContext): MaybePromise<void>
+  /** Cleanup only; lease loss must leave the recovery journal intact. */
+  finalize(context: ApplicationTransactionParticipantContext): MaybePromise<void>
+}
+
+/**
  * Transaction control deliberately does not expose a persistence or process
  * primitive. Local composition supplies one AsyncLocal transaction-aware
  * PersistPort to every existing adapter captured by the Application.
  */
 export interface ApplicationWriteTransaction {
+  /**
+   * Revalidate every lease owned by this transaction. External recovery code
+   * must call this immediately before and after each filesystem mutation so a
+   * paused process cannot keep modifying a worktree after its lease expires.
+   */
+  revalidateLease(): MaybePromise<void>
   savepoint(): ApplicationTransactionSavepoint
   rollbackTo(savepoint: ApplicationTransactionSavepoint): void
+  enlist(participant: ApplicationTransactionParticipant): void
   commit<T>(value: T): ApplicationTransactionDecision<T>
   abort(error: unknown): ApplicationTransactionDecision<never>
 }

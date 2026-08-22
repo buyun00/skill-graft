@@ -27,6 +27,7 @@ skill-review/application-ledger.json
 skill-review/application-audit.json
 skill-review/library/
 skill-review/locks/
+skill-review/materializations/
 skill-review/.*.skill-graft.bak
 skill-review/.*.skill-graft-*.tmp
 skill-review/history/

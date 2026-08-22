@@ -32,6 +32,17 @@ import {
 } from '../dist/core/policies.js'
 import { planLegacyAttach } from '../dist/core/legacy-attach.js'
 import { createLibrarySnapshotManifest } from '../dist/core/snapshot.js'
+import {
+  buildDesiredMaterialization,
+  createGitMaterializationConfigurationFact,
+  createGitMaterializationSiblingProof,
+  createGitVisibilityFact,
+  createRuntimeAssetManifest,
+  createVisibilityOwnershipState,
+  gitMaterializationConfigurationValueId,
+  materializationSourceArtifactId,
+  visibilityOwnershipTargetBaselineDigest
+} from '../dist/core/index.js'
 
 const posix = path.posix
 const FIXED_NOW = '2030-01-02T03:04:05.000Z'
@@ -61,13 +72,22 @@ function memorySnapshot(seed, createdAt = FIXED_NOW) {
   const planned = createLibrarySnapshotManifest({
     source: { kind: 'library', id: 'memory-library', revision: `revision-${seed}` },
     createdAt,
-    files: [{
-      path: 'ozdqp-development/SKILL.md',
-      size: Buffer.byteLength(seed),
-      sha256: `sha256:${createHash('sha256').update(seed).digest('hex')}`,
-      mode: '100644',
-      isReparsePoint: false
-    }]
+    files: [
+      {
+        path: 'AGENTS.override.md',
+        size: Buffer.byteLength(`override-${seed}`),
+        sha256: `sha256:${createHash('sha256').update(`override-${seed}`).digest('hex')}`,
+        mode: '100644',
+        isReparsePoint: false
+      },
+      {
+        path: 'skills/ozdqp-development/SKILL.md',
+        size: Buffer.byteLength(seed),
+        sha256: `sha256:${createHash('sha256').update(seed).digest('hex')}`,
+        mode: '100644',
+        isReparsePoint: false
+      }
+    ]
   })
   assert.equal(planned.ok, true)
   return planned.manifest
@@ -141,6 +161,495 @@ function installCurrentMemoryState(context, p2, claimedWorktree) {
     items: legacy.items || [],
     lastIngest: legacy.lastIngest || null
   })
+}
+
+function sha256Identifier(value) {
+  return `sha256:${createHash('sha256').update(String(value)).digest('hex')}`
+}
+
+function createMemoryRuntimeAsset() {
+  const bytes = 'memory-overlay-v1'
+  const created = createRuntimeAssetManifest({
+    runtimeRevision: 'memory-runtime',
+    files: [{
+      path: 'HubLib.ps1',
+      size: Buffer.byteLength(bytes),
+      sha256: sha256Identifier(bytes),
+      mode: '100644',
+      isReparsePoint: false
+    }]
+  })
+  assert.equal(created.ok, true)
+  return created.manifest
+}
+
+const DEFAULT_MEMORY_RUNTIME_ASSET = createMemoryRuntimeAsset()
+
+function desiredMemoryMaterialization(snapshot, runtimeAsset, selectedSkills, visibilityStateId) {
+  const built = buildDesiredMaterialization({ snapshot, runtimeAsset, selectedSkills, visibilityStateId })
+  assert.equal(built.ok, true, JSON.stringify(built))
+  return built.desired
+}
+
+function memoryVisibilityBaseline(artifact, phase) {
+  return {
+    artifactId: artifact.artifactId,
+    owner: artifact.owner,
+    targetRelativePath: artifact.targetRelativePath,
+    baselineKind: 'missing',
+    trackedPaths: [],
+    ignoreOrigin: phase === 'legacy' ? 'legacyCommon' : 'none',
+    privateExcluded: false
+  }
+}
+
+function memoryVisibilityPrivateStateId(identity, restore = false) {
+  return sha256Identifier(`${restore ? 'restore-' : ''}memory-visibility-private:${identity.pathKey}`)
+}
+
+function memoryLegacyBackupPrivateStateId(identity) {
+  return sha256Identifier(`memory-legacy-backup-private:${identity.pathKey}`)
+}
+
+function memoryLegacyRestoreSources(record) {
+  return record.artifacts.map((artifact) => ({
+    artifactId: artifact.artifactId,
+    targetRelativePath: artifact.targetRelativePath,
+    legacyKind: artifact.legacyKind,
+    sourceArtifactId: artifact.sourceArtifactId,
+    sourceStateId: sha256Identifier(
+      `memory-legacy-restore-source:${record.backupPrivateStateId}:${artifact.targetRelativePath}`
+    ),
+    status: 'valid'
+  }))
+}
+
+function memoryDesiredBundle(model, input, options = {}) {
+  const provisional = desiredMemoryMaterialization(
+    input.snapshot,
+    input.runtimeAsset,
+    input.selectedSkills,
+    sha256Identifier('memory-provisional-visibility-state')
+  )
+  const currentTargets = new Map((model.currentVisibilityState?.targets ?? []).map((target) => [
+    target.targetRelativePath,
+    target
+  ]))
+  const ownership = createVisibilityOwnershipState({
+    privateStateId: options.restore
+      ? memoryVisibilityPrivateStateId(input.identity, true)
+      : model.currentVisibilityState?.privateStateId
+        ?? memoryVisibilityPrivateStateId(input.identity),
+    pathKey: input.identity.pathKey,
+    worktreeId: input.identity.worktreeId,
+    baseExclude: model.currentVisibilityState?.baseExclude ?? {
+      scope: 'global',
+      valueId: gitMaterializationConfigurationValueId('memory-base-exclude'),
+      contentDigest: sha256Identifier('memory-base-exclude-content')
+    },
+    targets: options.restore
+      ? []
+      : provisional.artifacts.map((artifact) => (
+          currentTargets.get(artifact.targetRelativePath)
+            ?? memoryVisibilityBaseline(artifact, model.phase === 'legacy' ? 'legacy' : 'fresh')
+        ))
+  })
+  assert.equal(ownership.ok, true, JSON.stringify(ownership))
+  const desired = desiredMemoryMaterialization(
+    input.snapshot,
+    input.runtimeAsset,
+    input.selectedSkills,
+    options.restore && model.currentVisibilityState
+      ? model.currentVisibilityState.visibilityStateId
+      : ownership.state.visibilityStateId
+  )
+  return { desired, desiredVisibilityState: ownership.state }
+}
+
+function memoryGitProofs(desired, desiredVisibilityState, phase, currentVisibilityState = null) {
+  const managed = phase === 'managed'
+  const legacy = phase === 'legacy'
+  const currentTargets = new Map((currentVisibilityState?.targets ?? []).map((target) => [
+    target.targetRelativePath,
+    target
+  ]))
+  const desiredTargets = new Map(desiredVisibilityState.targets.map((target) => [
+    target.targetRelativePath,
+    target
+  ]))
+  const gitFacts = desired.artifacts.map((artifact) => {
+    const baseline = currentTargets.get(artifact.targetRelativePath)
+      ?? desiredTargets.get(artifact.targetRelativePath)
+      ?? memoryVisibilityBaseline(artifact, legacy ? 'legacy' : 'fresh')
+    const baselineDigest = visibilityOwnershipTargetBaselineDigest(baseline)
+    const unmanaged = createGitVisibilityFact({
+      targetRelativePath: artifact.targetRelativePath,
+      trackedPaths: baseline.trackedPaths,
+      ignored: baseline.ignoreOrigin !== 'none',
+      ignoreOrigin: baseline.ignoreOrigin,
+      privateExcluded: baseline.privateExcluded,
+      ownership: 'unmanaged',
+      ownershipStateId: null,
+      baselineDigest,
+      restoreDigest: null,
+      restoreSafe: true
+    })
+    assert.equal(unmanaged.ok, true)
+    const created = createGitVisibilityFact({
+      targetRelativePath: artifact.targetRelativePath,
+      trackedPaths: managed
+        ? baseline.trackedPaths.map((entry) => ({ ...entry, skipWorktree: true }))
+        : baseline.trackedPaths,
+      ignored: managed || baseline.ignoreOrigin !== 'none',
+      ignoreOrigin: managed ? 'private' : baseline.ignoreOrigin,
+      privateExcluded: managed || baseline.privateExcluded,
+      ownership: managed ? 'managed' : 'unmanaged',
+      ownershipStateId: managed ? currentVisibilityState?.visibilityStateId ?? null : null,
+      baselineDigest,
+      restoreDigest: managed ? unmanaged.fact.factDigest : null,
+      restoreSafe: true
+    })
+    assert.equal(created.ok, true)
+    return created.fact
+  })
+  const siblingProof = createGitMaterializationSiblingProof([])
+  assert.equal(siblingProof.ok, true)
+  const desiredHooks = gitMaterializationConfigurationValueId('memory-desired-hooks')
+  const desiredOverlay = gitMaterializationConfigurationValueId('memory-desired-overlay')
+  const desiredWatchWorkspace = gitMaterializationConfigurationValueId('memory-desired-watch-workspace')
+  const desiredExcludes = gitMaterializationConfigurationValueId('memory-desired-excludes')
+  const baseExcludeValueId = gitMaterializationConfigurationValueId('memory-base-exclude')
+  const baseExcludeContentDigest = sha256Identifier('memory-base-exclude-content')
+  const basePrivateExclude = sha256Identifier('memory-private-exclude-base')
+  const desiredPrivateExclude = sha256Identifier('memory-private-exclude-projection')
+  const cleanCommon = sha256Identifier('memory-common-info-clean')
+  const gitConfiguration = createGitMaterializationConfigurationFact({
+    isLinkedWorktree: true,
+    supportsWorktreeConfig: true,
+    worktreeConfigEnabled: true,
+    hooksPathValueId: managed ? desiredHooks : null,
+    desiredHooksPathValueId: desiredHooks,
+    overlaySourceValueId: managed ? desiredOverlay : null,
+    desiredOverlaySourceValueId: desiredOverlay,
+    watchWorkspaceValueId: managed ? desiredWatchWorkspace : null,
+    desiredWatchWorkspaceValueId: desiredWatchWorkspace,
+    excludesFileValueId: managed ? desiredExcludes : null,
+    desiredExcludesFileValueId: desiredExcludes,
+    baseExcludeSafe: true,
+    baseExcludeValueId,
+    baseExcludeContentDigest,
+    privateExcludeContentDigest: managed ? desiredPrivateExclude : basePrivateExclude,
+    desiredPrivateExcludeContentDigest: desiredPrivateExclude,
+    commonInfoExcludeDigest: legacy ? sha256Identifier('memory-common-info-legacy') : cleanCommon,
+    cleanCommonInfoExcludeDigest: cleanCommon,
+    legacyCommonSiblingSafety: siblingProof.proof.legacyCommonSiblingSafety,
+    siblingFactsDigest: siblingProof.proof.siblingFactsDigest
+  })
+  return { gitFacts, gitConfiguration }
+}
+
+function memoryLegacyArtifacts(desired, phase) {
+  const linked = phase === 'legacy'
+  return desired.artifacts.map((artifact) => {
+    const sourceArtifactId = linked
+      ? materializationSourceArtifactId({ digest: artifact.digest, source: artifact.source })
+      : null
+    return {
+      artifactId: artifact.artifactId,
+      owner: artifact.owner,
+      targetRelativePath: artifact.targetRelativePath,
+      kind: artifact.kind,
+      observedKind: linked ? artifact.kind === 'file' ? 'hardlink' : 'junction' : artifact.kind,
+      digest: artifact.digest,
+      isReparsePoint: linked && artifact.kind === 'directory',
+      legacyKind: linked ? artifact.kind === 'file' ? 'fileHardlink' : 'directoryLink' : null,
+      sourceArtifactId,
+      pathEscaped: false,
+      protected: false
+    }
+  })
+}
+
+function createMemoryP3Ports(p2, options = {}) {
+  const runtimeAsset = clone(options.runtimeAsset || DEFAULT_MEMORY_RUNTIME_ASSET)
+  const model = {
+    phase: options.phase || 'fresh',
+    externalMarker: null,
+    currentRecord: null,
+    currentVisibilityState: null,
+    legacyBackupPrivateStateId: null,
+    legacyRecords: {}
+  }
+  const calls = {
+    stateWrite: 0,
+    prepare: 0,
+    prepareLegacyMigration: 0,
+    prepareLegacyRollback: 0,
+    publish: 0,
+    recordWrite: 0,
+    migrationWrite: 0
+  }
+  let participantSequence = 0
+
+  if (options.resetMaterialized !== false) {
+    const state = p2.state.readDocument()
+    if (state?.schemaVersion === 2) {
+      p2.state.writeV2({
+        ...state,
+        worktrees: Object.fromEntries(Object.entries(state.worktrees).map(([pathKey, pin]) => [
+          pathKey,
+          { ...pin, materializedSnapshot: null }
+        ]))
+      })
+    }
+  }
+  const writeV2 = p2.state.writeV2.bind(p2.state)
+  p2.state.writeV2 = (state) => {
+    calls.stateWrite += 1
+    return writeV2(state)
+  }
+
+  function desired(input) {
+    return memoryDesiredBundle(model, input)
+  }
+
+  function markerFor(plan, origin) {
+    const built = memoryDesiredBundle(model, {
+      snapshot: p2.snapshots.read(plan.requested.snapshotId),
+      runtimeAsset,
+      selectedSkills: plan.requested.selectedSkills,
+      identity: { pathKey: plan.pathKey, worktreeId: plan.worktreeId }
+    })
+    assert.equal(built.desiredVisibilityState.visibilityStateId, plan.requested.visibilityStateId)
+    return {
+      marker: {
+        schemaVersion: 1,
+        materializationId: plan.requested.materializationId,
+        planHash: plan.planHash,
+        pathKey: plan.pathKey,
+        worktreeId: plan.worktreeId,
+        snapshotId: plan.requested.snapshotId,
+        selectedSkills: [...plan.requested.selectedSkills],
+        runtimeRevision: plan.requested.runtimeRevision,
+        runtimeAssetId: plan.requested.runtimeAssetId,
+        visibilityStateId: plan.requested.visibilityStateId,
+        origin,
+        artifacts: built.desired.artifacts.map(({ source: _source, files: _files, ...artifact }) => artifact)
+      },
+      visibilityState: built.desiredVisibilityState
+    }
+  }
+
+  function participant(phase, marker = null, visibilityState = null, backupPrivateStateId = null) {
+    const participantId = `memory-p3-${phase}-${++participantSequence}`
+    return {
+      participantId,
+      publish() {
+        calls.publish += 1
+        if (phase === 'rollback') {
+          model.phase = 'legacy'
+          model.externalMarker = null
+          model.currentVisibilityState = null
+        } else {
+          model.phase = 'managed'
+          model.externalMarker = clone(marker)
+          model.currentVisibilityState = clone(visibilityState)
+          if (backupPrivateStateId !== null) {
+            model.legacyBackupPrivateStateId = backupPrivateStateId
+          }
+        }
+      },
+      rollback() {},
+      finalize(context) {
+        assert.equal(typeof context?.revalidateLease, 'function')
+        return context.revalidateLease()
+      }
+    }
+  }
+
+  const ports = {
+    runtimeAssets: {
+      observe: () => clone(runtimeAsset),
+      readVerifiedFile() {
+        throw new Error('memory runtime bytes are not required by the materialization contract fixture')
+      }
+    },
+    records: {
+      readCurrent: () => clone(model.currentRecord),
+      writeCurrent(record) {
+        calls.recordWrite += 1
+        model.currentRecord = clone(record)
+      },
+      readLegacyMigration(migrationId) {
+        return clone(model.legacyRecords[migrationId] || null)
+      },
+      writeLegacyMigration(record) {
+        calls.migrationWrite += 1
+        model.legacyRecords[record.migrationId] = clone(record)
+      }
+    },
+    materialize: {
+      inspect(input) {
+        const bundle = desired(input)
+        const requested = bundle.desired
+        const current = new Map((model.externalMarker?.artifacts || []).map((artifact) => [
+          artifact.targetRelativePath,
+          artifact
+        ]))
+        const observations = requested.artifacts.map((artifact) => {
+          if (model.phase === 'legacy') {
+            return {
+              targetRelativePath: artifact.targetRelativePath,
+              kind: artifact.kind === 'file' ? 'hardlink' : 'junction',
+              digest: artifact.digest,
+              isReparsePoint: artifact.kind === 'directory',
+              linkClassification: 'legacy'
+            }
+          }
+          const existing = current.get(artifact.targetRelativePath)
+          return existing
+            ? {
+                targetRelativePath: artifact.targetRelativePath,
+                kind: artifact.kind,
+                digest: existing.digest,
+                isReparsePoint: false
+              }
+            : { targetRelativePath: artifact.targetRelativePath, kind: 'missing', isReparsePoint: false }
+        })
+        return {
+          observedMarker: clone(model.externalMarker),
+          currentVisibilityState: clone(model.currentVisibilityState),
+          desiredVisibilityState: clone(bundle.desiredVisibilityState),
+          observations,
+          ...memoryGitProofs(
+            requested,
+            bundle.desiredVisibilityState,
+            model.phase,
+            model.currentVisibilityState
+          )
+        }
+      },
+      inspectLegacy(input) {
+        const bundle = desired(input)
+        const requested = bundle.desired
+        return {
+          observedMarker: clone(model.externalMarker),
+          currentVisibilityState: clone(model.currentVisibilityState),
+          desiredVisibilityState: clone(bundle.desiredVisibilityState),
+          backupPrivateStateId: model.legacyBackupPrivateStateId
+            ?? memoryLegacyBackupPrivateStateId(input.identity),
+          artifacts: memoryLegacyArtifacts(requested, model.phase),
+          ...memoryGitProofs(
+            requested,
+            bundle.desiredVisibilityState,
+            model.phase,
+            model.currentVisibilityState
+          )
+        }
+      },
+      inspectLegacyRollback(input) {
+        assert.deepEqual(input.migration, model.legacyRecords[input.migration.migrationId])
+        const bundle = memoryDesiredBundle(model, input, { restore: true })
+        const requested = bundle.desired
+        const retained = model.currentVisibilityState ?? desired(input).desiredVisibilityState
+        const restore = memoryGitProofs(requested, retained, 'legacy')
+        return {
+          observedMarker: clone(model.externalMarker),
+          currentVisibilityState: clone(model.currentVisibilityState),
+          desiredVisibilityState: clone(bundle.desiredVisibilityState),
+          backupPrivateStateId: input.migration.backupPrivateStateId,
+          restoreSources: memoryLegacyRestoreSources(input.migration),
+          artifacts: memoryLegacyArtifacts(requested, model.phase),
+          ...memoryGitProofs(requested, retained, model.phase, model.currentVisibilityState),
+          restoreGitFacts: restore.gitFacts,
+          restoreGitConfiguration: restore.gitConfiguration
+        }
+      },
+      async prepare({ guard, plan }) {
+        calls.prepare += 1
+        assert.equal(typeof guard?.revalidateLease, 'function')
+        await guard.revalidateLease()
+        const prepared = markerFor(plan, { kind: 'sync' })
+        return {
+          marker: prepared.marker,
+          report: { preparedOperations: plan.operations.length, preparedBytes: 64 },
+          participant: participant('sync', prepared.marker, prepared.visibilityState)
+        }
+      },
+      async recover({ guard }) {
+        await guard.revalidateLease()
+        return { status: 'clean', recoveredTransactions: 0 }
+      },
+      async prepareLegacyMigration({ guard, plan }) {
+        calls.prepareLegacyMigration += 1
+        assert.equal(typeof guard?.revalidateLease, 'function')
+        await guard.revalidateLease()
+        const prepared = markerFor(plan, { kind: 'legacyMigration', migrationId: plan.migrationId })
+        const record = {
+          schemaVersion: 1,
+          migrationId: plan.migrationId,
+          planHash: plan.planHash,
+          pathKey: plan.pathKey,
+          worktreeId: plan.worktreeId,
+          status: 'committed',
+          snapshotId: plan.requested.snapshotId,
+          materializationId: plan.requested.materializationId,
+          visibilityStateId: plan.requested.visibilityStateId,
+          backupManifestId: plan.backupManifestId,
+          backupPrivateStateId: plan.backupPrivateStateId,
+          artifacts: plan.operations
+            .filter((operation) => operation.action === 'replaceWithCopy')
+            .map((operation) => ({
+              artifactId: operation.artifactId,
+              owner: operation.owner,
+              targetRelativePath: operation.targetRelativePath,
+              kind: operation.kind,
+              legacyKind: operation.legacy.legacyKind,
+              sourceArtifactId: operation.legacy.sourceArtifactId,
+              beforeDigest: operation.before.digest,
+              afterDigest: operation.after.digest
+            })),
+          createdArtifacts: plan.operations
+            .filter((operation) => operation.action === 'create')
+            .map((operation) => ({
+              artifactId: operation.artifactId,
+              owner: operation.owner,
+              targetRelativePath: operation.targetRelativePath,
+              kind: operation.kind,
+              digest: operation.after.digest
+            })),
+          gitVisibilityDigest: plan.gitBeforeDigest
+        }
+        return {
+          marker: prepared.marker,
+          record,
+          report: { preparedOperations: plan.operations.length, preparedBytes: 96 },
+          participant: participant(
+            'migration',
+            prepared.marker,
+            prepared.visibilityState,
+            plan.backupPrivateStateId
+          )
+        }
+      },
+      async prepareLegacyRollback({ guard, plan, migration }) {
+        calls.prepareLegacyRollback += 1
+        assert.equal(typeof guard?.revalidateLease, 'function')
+        await guard.revalidateLease()
+        const current = model.legacyRecords[plan.migrationId]
+        assert.ok(current)
+        assert.deepEqual(migration, current)
+        assert.equal(migration.backupManifestId, plan.backupManifestId)
+        assert.equal(migration.backupPrivateStateId, plan.backupPrivateStateId)
+        return {
+          record: { ...clone(current), status: 'rolledBack', rollbackPlanHash: plan.planHash },
+          report: { preparedOperations: plan.operations.length, preparedBytes: 48 },
+          participant: participant('rollback')
+        }
+      }
+    }
+  }
+  return { ports, calls, model }
 }
 
 function memoryApplicationInfrastructure(context, options = {}) {
@@ -487,6 +996,7 @@ function createFixture(options = {}) {
   const legacyDetach = createMemoryLegacyDetachPort(fs, options.legacyDetach)
   const p2 = createMemoryP2Ports(context, options.p2)
   if (options.currentP2) installCurrentMemoryState(context, p2, options.claimedWorktree)
+  const p3 = options.p3 ? createMemoryP3Ports(p2, options.p3) : undefined
   const transactions = createMemoryApplicationTransactions()
   const app = createHubApplication({
     ...createLocalApplicationPorts(context),
@@ -495,10 +1005,11 @@ function createFixture(options = {}) {
     sessions,
     ledger,
     p2,
+    p3: p3?.ports,
     transactions,
     trace: options.trace
   })
-  return { app, context, fs, ledger, legacyAttach, legacyDetach, links, p2, sessions, transactions }
+  return { app, context, fs, ledger, legacyAttach, legacyDetach, links, p2, p3, sessions, transactions }
 }
 
 function createMemoryInvocationTrace(overrides = {}) {
@@ -519,6 +1030,7 @@ function createObservedFixture(options = {}) {
   const ports = createLocalApplicationPorts(context)
   const p2 = createMemoryP2Ports(context, options.p2)
   if (options.currentP2) installCurrentMemoryState(context, p2, options.claimedWorktree)
+  const p3 = options.p3 ? createMemoryP3Ports(p2, options.p3) : undefined
   const transactions = createMemoryApplicationTransactions()
   const calls = { artifactApply: 0, stateWrite: 0, historyAppend: 0 }
   const queries = { ...ports.queries }
@@ -543,7 +1055,7 @@ function createObservedFixture(options = {}) {
       }
     }
   }
-  options.configure?.({ calls, context, fs, ledger, legacyAttach, legacyDetach, p2, queries, sessions, transactions, useCases })
+  options.configure?.({ calls, context, fs, ledger, legacyAttach, legacyDetach, p2, p3, queries, sessions, transactions, useCases })
   const app = createHubApplication({
     ...ports,
     queries,
@@ -553,11 +1065,12 @@ function createObservedFixture(options = {}) {
     sessions,
     ledger,
     p2,
+    p3: p3?.ports,
     transactions
   })
   return {
     app, calls, context, fs, ledger, legacyAttach, legacyDetach, links,
-    p2, queries, sessions, transactions, useCases
+    p2, p3, queries, sessions, transactions, useCases
   }
 }
 
@@ -570,7 +1083,15 @@ function hostEffectSnapshot(fixture) {
     historyAppend: fixture.calls.historyAppend,
     sessionStart: fixture.sessions.calls.start,
     sessionResume: fixture.sessions.calls.resume,
-    sessionReap: fixture.sessions.calls.reap
+    sessionReap: fixture.sessions.calls.reap,
+    sessionComplete: fixture.sessions.calls.completeAttach,
+    p3StateWrite: fixture.p3?.calls.stateWrite || 0,
+    p3Prepare: fixture.p3?.calls.prepare || 0,
+    p3PrepareLegacyMigration: fixture.p3?.calls.prepareLegacyMigration || 0,
+    p3PrepareLegacyRollback: fixture.p3?.calls.prepareLegacyRollback || 0,
+    p3Publish: fixture.p3?.calls.publish || 0,
+    p3RecordWrite: fixture.p3?.calls.recordWrite || 0,
+    p3MigrationWrite: fixture.p3?.calls.migrationWrite || 0
   }
 }
 
@@ -584,7 +1105,25 @@ function expectedHostEffects(overrides) {
     sessionStart: 0,
     sessionResume: 0,
     sessionReap: 0,
+    sessionComplete: 0,
+    p3StateWrite: 0,
+    p3Prepare: 0,
+    p3PrepareLegacyMigration: 0,
+    p3PrepareLegacyRollback: 0,
+    p3Publish: 0,
+    p3RecordWrite: 0,
+    p3MigrationWrite: 0,
     ...overrides
+  }
+}
+
+function resetObservedEffects(fixture) {
+  fixture.ledger.entries.splice(0)
+  fixture.ledger.events.splice(0)
+  for (const key of Object.keys(fixture.ledger.calls)) fixture.ledger.calls[key] = 0
+  for (const key of Object.keys(fixture.calls)) fixture.calls[key] = 0
+  if (fixture.p3) {
+    for (const key of Object.keys(fixture.p3.calls)) fixture.p3.calls[key] = 0
   }
 }
 
@@ -666,7 +1205,8 @@ test('contracts publish one stable version, complete command corpora, audit type
     'inspectSchema',
     'listSnapshots',
     'getSnapshot',
-    'getPin'
+    'getPin',
+    'planSync'
   ])
   assert.deepEqual(WRITE_COMMAND_KINDS, [
     'repairLegacy',
@@ -683,9 +1223,13 @@ test('contracts publish one stable version, complete command corpora, audit type
     'reapSessions',
     'createSnapshot',
     'setPin',
-    'migrateState'
+    'migrateState',
+    'claimWorktree',
+    'sync',
+    'migrateLegacy',
+    'rollbackLegacyMigration'
   ])
-  assert.equal(new Set([...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_KINDS]).size, 26)
+  assert.equal(new Set([...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_KINDS]).size, 31)
   assert.deepEqual(HUB_ERROR_CODES, [
     'UNSUPPORTED_CONTRACT_VERSION',
     'INVALID_COMMAND_META',
@@ -715,7 +1259,18 @@ test('contracts publish one stable version, complete command corpora, audit type
     'RUNNER_UNAVAILABLE',
     'PORT_FAILURE',
     'UNSUPPORTED_COMMAND',
-    'INTERNAL_ERROR'
+    'INTERNAL_ERROR',
+    'WORKTREE_NOT_CLAIMED',
+    'MATERIALIZE_PLAN_STALE',
+    'MATERIALIZATION_MARKER_INVALID',
+    'RUNTIME_ASSET_NOT_FOUND',
+    'RUNTIME_ASSET_INVALID',
+    'LEGACY_MIGRATION_REQUIRED',
+    'LEGACY_PLAN_STALE',
+    'LEGACY_MIGRATION_NOT_FOUND',
+    'LEGACY_ROLLBACK_CONFLICT',
+    'CONFLICT_PATH',
+    'UNSUPPORTED_LAYOUT'
   ])
   assert.deepEqual(AUDIT_EVENT_TYPES, [
     'command.started',
@@ -727,7 +1282,11 @@ test('contracts publish one stable version, complete command corpora, audit type
     'inbox.transitioned',
     'session.requested',
     'session.reaped',
-    'state.changed'
+    'state.changed',
+    'worktree.claimed',
+    'worktree.materialized',
+    'worktree.legacy-migrated',
+    'worktree.legacy-rolled-back'
   ])
 })
 
@@ -1018,7 +1577,11 @@ test('legacy attach planner is pure, fail-closed, and emits only approved host e
 })
 
 test('all query commands execute through the shared Application against pure memory ports', async () => {
-  const { app, ledger, sessions } = createFixture({ currentP2: true })
+  const { app, ledger, sessions } = createFixture({
+    currentP2: true,
+    claimedWorktree: '/p3-tree',
+    p3: { phase: 'fresh' }
+  })
   const corpus = [
     ['status', {}],
     ['listSkills', {}],
@@ -1030,7 +1593,8 @@ test('all query commands execute through the shared Application against pure mem
     ['inspectSchema', {}],
     ['listSnapshots', {}],
     ['getSnapshot', { snapshotId: DEFAULT_MEMORY_SNAPSHOT.snapshotId }],
-    ['getPin', { worktree: '/game-tree' }]
+    ['getPin', { worktree: '/game-tree' }],
+    ['planSync', { worktree: '/p3-tree' }]
   ]
   assert.deepEqual(corpus.map(([kind]) => kind), QUERY_COMMAND_KINDS)
   for (const [index, [kind, input]] of corpus.entries()) {
@@ -1053,6 +1617,9 @@ test('all query commands execute through the shared Application against pure mem
     snapshotId: DEFAULT_MEMORY_SNAPSHOT.snapshotId
   }))).data.snapshot.snapshotId, DEFAULT_MEMORY_SNAPSHOT.snapshotId)
   assert.equal((await app.execute(command('getPin', 'query-pin', { worktree: '/game-tree' }))).data.pin, null)
+  assert.equal((await app.execute(command('planSync', 'query-plan-sync', {
+    worktree: '/p3-tree'
+  }))).data.status, 'planned')
   assert.equal(ledger.entries.length, 0)
   assert.equal(ledger.events.length, 0)
   assert.ok(sessions.calls.list > 0)
@@ -1210,12 +1777,18 @@ test('every query command has a deterministic pure-memory refusal or port error'
       kind: 'getPin',
       input: { worktree: '/game-tree' },
       code: 'MIGRATION_REQUIRED'
+    },
+    {
+      kind: 'planSync',
+      input: { worktree: '/game-tree' },
+      code: 'WORKTREE_NOT_CLAIMED',
+      fixture: { currentP2: true, p3: { phase: 'fresh' } }
     }
   ]
   assert.deepEqual(corpus.map(({ kind }) => kind), QUERY_COMMAND_KINDS)
 
   for (const [index, row] of corpus.entries()) {
-    const fixture = createObservedFixture({ configure: row.configure })
+    const fixture = createObservedFixture({ ...row.fixture, configure: row.configure })
     const result = await fixture.app.execute(command(row.kind, `query-refusal-${index}`, row.input))
     assertFailure(result, row.code, row.retryable || false)
     assert.deepEqual(result.events, [])
@@ -1243,9 +1816,23 @@ test('every write command executes once, replays once, and rejects a semantic re
     },
     {
       kind: 'applyLegacyAttach',
-      input: { worktree: '/game-tree', sessionId: 'running-1', sourcePolicy: 'preferLibrary' },
-      conflict: { worktree: '/game-tree', sessionId: 'running-1', sourcePolicy: 'requireMatch' },
-      effects: expectedHostEffects({ legacyApply: 1 })
+      input: { worktree: '/game-tree', sessionId: 'legacy-ready', sourcePolicy: 'preferLibrary' },
+      conflict: { worktree: '/game-tree', sessionId: 'legacy-ready', sourcePolicy: 'requireMatch' },
+      effects: expectedHostEffects({ legacyApply: 1 }),
+      fixture: {
+        sessions: [
+          ...sessionSeed(),
+          {
+            id: 'legacy-ready',
+            kind: 'attach',
+            status: 'waiting',
+            target: { kind: 'worktree', id: worktreeTargetId('/game-tree') },
+            startedAt: FIXED_NOW,
+            exitCode: 0,
+            canResume: true
+          }
+        ]
+      }
     },
     {
       kind: 'applyLegacyDetach',
@@ -1354,14 +1941,122 @@ test('every write command executes once, replays once, and rejects a semantic re
       input: { mode: 'dryRun' },
       conflict: { mode: 'commit', planHash: DEFAULT_MEMORY_SNAPSHOT.snapshotId },
       effects: expectedHostEffects()
+    },
+    {
+      kind: 'claimWorktree',
+      input: {
+        worktree: '/game-tree',
+        snapshotId: DEFAULT_MEMORY_SNAPSHOT.snapshotId,
+        selectedSkills: ['ozdqp-development'],
+        sessionId: 'p3-attach-success'
+      },
+      conflict: {
+        worktree: '/game-tree',
+        snapshotId: DEFAULT_MEMORY_SNAPSHOT.snapshotId,
+        selectedSkills: [],
+        sessionId: 'p3-attach-success'
+      },
+      events: 2,
+      effects: expectedHostEffects({ p3StateWrite: 1 }),
+      fixture: {
+        currentP2: true,
+        p3: { phase: 'fresh' },
+        sessions: [
+          ...sessionSeed(),
+          {
+            id: 'p3-attach-success',
+            kind: 'attach',
+            status: 'waiting',
+            target: { kind: 'worktree', id: worktreeTargetId('/game-tree') },
+            startedAt: FIXED_NOW,
+            endedAt: FIXED_NOW,
+            exitCode: 0,
+            canResume: true
+          }
+        ]
+      }
+    },
+    {
+      kind: 'sync',
+      events: 2,
+      effects: expectedHostEffects({
+        p3StateWrite: 1,
+        p3Prepare: 1,
+        p3Publish: 1,
+        p3RecordWrite: 1
+      }),
+      fixture: {
+        currentP2: true,
+        claimedWorktree: '/game-tree',
+        p3: { phase: 'fresh' }
+      },
+      async prepare(fixture) {
+        const planned = await fixture.app.execute(command('planSync', 'p3-sync-corpus-plan', {
+          worktree: '/game-tree'
+        }))
+        const plan = assertSuccess(planned, 'planSync').plan
+        return {
+          input: { worktree: '/game-tree', planHash: plan.planHash },
+          conflict: { worktree: '/game-tree', planHash: sha256Identifier('different-sync-plan') }
+        }
+      }
+    },
+    {
+      kind: 'migrateLegacy',
+      input: { worktree: '/game-tree', mode: 'dryRun' },
+      conflict: { worktree: '/other-tree', mode: 'dryRun' },
+      effects: expectedHostEffects(),
+      fixture: {
+        currentP2: true,
+        claimedWorktree: '/game-tree',
+        p3: { phase: 'legacy' }
+      }
+    },
+    {
+      kind: 'rollbackLegacyMigration',
+      effects: expectedHostEffects(),
+      fixture: {
+        currentP2: true,
+        claimedWorktree: '/game-tree',
+        p3: { phase: 'legacy' }
+      },
+      async prepare(fixture) {
+        const dryRun = await fixture.app.execute(command('migrateLegacy', 'p3-rollback-setup-plan', {
+          worktree: '/game-tree',
+          mode: 'dryRun'
+        }))
+        const plan = assertSuccess(dryRun, 'migrateLegacy').plan
+        const committed = await fixture.app.execute(command('migrateLegacy', 'p3-rollback-setup-commit', {
+          worktree: '/game-tree',
+          mode: 'commit',
+          planHash: plan.planHash
+        }))
+        const migration = assertSuccess(committed, 'migrateLegacy').migration
+        resetObservedEffects(fixture)
+        return {
+          input: {
+            worktree: '/game-tree',
+            migrationId: migration.migrationId,
+            mode: 'dryRun'
+          },
+          conflict: {
+            worktree: '/game-tree',
+            migrationId: sha256Identifier('different-legacy-migration'),
+            mode: 'dryRun'
+          }
+        }
+      }
     }
   ]
   assert.deepEqual(corpus.map(({ kind }) => kind), WRITE_COMMAND_KINDS)
 
   for (const [index, row] of corpus.entries()) {
     const fixture = createObservedFixture(row.fixture)
+    const prepared = await row.prepare?.(fixture)
+    const input = prepared?.input || row.input
+    const semanticConflict = prepared?.conflict || row.conflict
     const requestId = `write-gate-${index}`
-    const request = command(row.kind, requestId, row.input)
+    const request = command(row.kind, requestId, input)
     const first = await fixture.app.execute(request)
     assertSuccess(first, row.kind)
     assert.equal(first.meta.replayed, false)
@@ -1386,7 +2081,11 @@ test('every write command executes once, replays once, and rejects a semantic re
     assert.equal(fixture.ledger.entries.length, 1)
     assert.equal(fixture.ledger.events.length, eventCount)
 
-    const conflict = await fixture.app.execute(command(row.conflictKind || row.kind, requestId, row.conflict))
+    const conflict = await fixture.app.execute(command(
+      row.conflictKind || row.kind,
+      requestId,
+      semanticConflict
+    ))
     assertFailure(conflict, 'REQUEST_ID_CONFLICT')
     assert.deepEqual(conflict.events, [])
     assert.deepEqual(hostEffectSnapshot(fixture), row.effects)
@@ -1503,6 +2202,55 @@ test('every write command caches one deterministic refusal without replaying hos
       input: { mode: 'dryRun' },
       code: 'SNAPSHOT_NOT_FOUND',
       fixture: { p2: { snapshots: [] } }
+    },
+    {
+      kind: 'claimWorktree',
+      input: {
+        worktree: '/game-tree',
+        snapshotId: DEFAULT_MEMORY_SNAPSHOT.snapshotId,
+        selectedSkills: ['ozdqp-development'],
+        sessionId: 'missing-attach-session'
+      },
+      code: 'FIRST_ATTACH_SESSION_REQUIRED',
+      fixture: { currentP2: true, p3: { phase: 'fresh' } }
+    },
+    {
+      kind: 'sync',
+      input: { worktree: '/game-tree', planHash: sha256Identifier('stale-sync-plan') },
+      code: 'MATERIALIZE_PLAN_STALE',
+      fixture: {
+        currentP2: true,
+        claimedWorktree: '/game-tree',
+        p3: { phase: 'fresh' }
+      }
+    },
+    {
+      kind: 'migrateLegacy',
+      input: {
+        worktree: '/game-tree',
+        mode: 'commit',
+        planHash: sha256Identifier('stale-legacy-plan')
+      },
+      code: 'LEGACY_PLAN_STALE',
+      fixture: {
+        currentP2: true,
+        claimedWorktree: '/game-tree',
+        p3: { phase: 'legacy' }
+      }
+    },
+    {
+      kind: 'rollbackLegacyMigration',
+      input: {
+        worktree: '/game-tree',
+        migrationId: sha256Identifier('missing-legacy-migration'),
+        mode: 'dryRun'
+      },
+      code: 'LEGACY_MIGRATION_NOT_FOUND',
+      fixture: {
+        currentP2: true,
+        claimedWorktree: '/game-tree',
+        p3: { phase: 'fresh' }
+      }
     }
   ]
   assert.deepEqual(corpus.map(({ kind }) => kind), WRITE_COMMAND_KINDS)
@@ -1617,7 +2365,7 @@ test('a terminal same-action decision with a new requestId is a no-op with no se
   assert.deepEqual(calls, { inspect: 1, apply: 1, writeState: 1, appendHistory: 1 })
 })
 
-test('first legacy attach requires a matching live attach session and replays one approved effect', async () => {
+test('first legacy attach requires a matching successful waiting attach session and replays one approved effect', async () => {
   const { app, ledger, legacyAttach, sessions } = createFixture()
   sessions.sessions.push(
     {
@@ -1626,6 +2374,7 @@ test('first legacy attach requires a matching live attach session and replays on
       status: 'waiting',
       target: { kind: 'worktree', id: worktreeTargetId('/another-tree') },
       startedAt: FIXED_NOW,
+      exitCode: 0,
       canResume: true
     },
     {
@@ -1643,11 +2392,36 @@ test('first legacy attach requires a matching live attach session and replays on
       status: 'waiting',
       target: { kind: 'worktree', id: worktreeTargetId('\\game-tree\\') },
       startedAt: FIXED_NOW,
+      exitCode: 0,
+      canResume: true
+    },
+    {
+      id: 'running-attach',
+      kind: 'attach',
+      status: 'running',
+      target: { kind: 'worktree', id: worktreeTargetId('/game-tree') },
+      startedAt: FIXED_NOW,
+      canResume: false
+    },
+    {
+      id: 'waiting-nonzero',
+      kind: 'attach',
+      status: 'waiting',
+      target: { kind: 'worktree', id: worktreeTargetId('/game-tree') },
+      startedAt: FIXED_NOW,
+      exitCode: 9,
       canResume: true
     }
   )
 
-  for (const [index, sessionId] of [undefined, 'waiting-1', 'wrong-target', 'terminal-attach'].entries()) {
+  for (const [index, sessionId] of [
+    undefined,
+    'waiting-1',
+    'wrong-target',
+    'terminal-attach',
+    'running-attach',
+    'waiting-nonzero'
+  ].entries()) {
     const result = await app.execute(command('applyLegacyAttach', `attach-denied-${index}`, {
       worktree: '/game-tree',
       ...(sessionId ? { sessionId } : {}),
@@ -1671,8 +2445,8 @@ test('first legacy attach requires a matching live attach session and replays on
   assert.equal(replay.meta.replayed, true)
   assert.equal(first.data.claim, 'created')
   assert.equal(legacyAttach.calls.apply, 1)
-  assert.equal(ledger.entries.length, 5)
-  assert.equal(ledger.events.length, 5)
+  assert.equal(ledger.entries.length, 7)
+  assert.equal(ledger.events.length, 7)
 })
 
 test('an existing claim never authorizes applyLegacyAttach promotion or host effects without a matching session', async () => {
@@ -2046,18 +2820,31 @@ test('omitted HTTP runner defaults replay the explicit CLI defaults for one requ
 
 test('cross-transport write defaults replay for attach application and ingest instead of conflicting', async () => {
   {
-    const { app, legacyAttach } = createFixture()
+    const { app, legacyAttach } = createFixture({
+      sessions: [
+        ...sessionSeed(),
+        {
+          id: 'legacy-ready',
+          kind: 'attach',
+          status: 'waiting',
+          target: { kind: 'worktree', id: worktreeTargetId('/game-tree') },
+          startedAt: FIXED_NOW,
+          exitCode: 0,
+          canResume: true
+        }
+      ]
+    })
     const requestId = 'cross-transport-legacy-defaults'
     const explicit = command('applyLegacyAttach', requestId, {
       worktree: '/game-tree',
-      sessionId: 'running-1',
+      sessionId: 'legacy-ready',
       sourcePolicy: 'requireMatch',
       visibility: 'disable',
       configureGit: false
     }, { hostId: 'local-cli', transport: 'cli' })
     const omitted = command('applyLegacyAttach', requestId, {
       worktree: '/game-tree',
-      sessionId: 'running-1'
+      sessionId: 'legacy-ready'
     }, { hostId: 'local-http', transport: 'http' })
     const first = await app.execute(explicit)
     const replay = await app.execute(omitted)
@@ -2433,6 +3220,7 @@ test('every command kind rejects malformed runtime payloads before ports, handle
     ['listSnapshots', { unexpected: true }],
     ['getSnapshot', { snapshotId: 'not-a-snapshot' }],
     ['getPin', { worktree: '' }],
+    ['planSync', { worktree: '' }],
     ['repairLegacy', { worktree: null }],
     ['applyLegacyAttach', { worktree: '/game-tree', sourcePolicy: 'force' }],
     ['applyLegacyDetach', { worktree: '/game-tree', sessionId: [] }],
@@ -2447,7 +3235,19 @@ test('every command kind rejects malformed runtime payloads before ports, handle
     ['reapSessions', { sessionIds: ['running-1', 42] }],
     ['createSnapshot', { unexpected: true }],
     ['setPin', { worktree: '/game-tree', snapshotId: 'invalid' }],
-    ['migrateState', { mode: 'force' }]
+    ['migrateState', { mode: 'force' }],
+    ['claimWorktree', { worktree: '/game-tree' }],
+    ['sync', {
+      worktree: '/game-tree',
+      planHash: sha256Identifier('malformed-sync-session'),
+      sessionId: []
+    }],
+    ['migrateLegacy', { worktree: '/game-tree', mode: 'force' }],
+    ['rollbackLegacyMigration', {
+      worktree: '/game-tree',
+      migrationId: sha256Identifier('malformed-rollback'),
+      mode: 'commit'
+    }]
   ]
   assert.deepEqual(malformed.map(([kind]) => kind), [...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_KINDS])
 
@@ -2462,7 +3262,7 @@ test('every command kind rejects malformed runtime payloads before ports, handle
   assert.deepEqual(ledger.calls, { read: 0, begin: 0, complete: 0, listEvents: 0 })
   assert.equal(ledger.entries.length, 0)
   assert.equal(ledger.events.length, 0)
-  assert.deepEqual(sessions.calls, { list: 0, get: 0, start: 0, resume: 0, reap: 0 })
+  assert.deepEqual(sessions.calls, { list: 0, get: 0, start: 0, resume: 0, reap: 0, completeAttach: 0 })
 })
 
 test('Application invocation trace emits exact entry/result pairs for success, replay, conflict, and failure', async () => {

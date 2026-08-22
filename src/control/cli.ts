@@ -43,6 +43,16 @@ function usage(): string {
     '  pin show --worktree <path>     Show the claimed worktree pin without materializing it',
     '  pin set --worktree <path> --snapshot <sha256:id> [--skill <name> ... | --clear-skills]',
     '                                 Update only requestedSnapshot/selectedSkills; never copy files',
+    '  plan-sync --worktree <path>    Produce a zero-write copy/materialization plan',
+    '  claim --worktree <path> --snapshot <sha256:id> --session-id <id>',
+    '        [--skill <name> ... | --clear-skills]',
+    '                                 Claim only after a successful confirmed attach session',
+    '  sync --worktree <path> --plan-hash <sha256:id> [--session-id <id>]',
+    '                                 Execute only the freshly revalidated copy plan',
+    '  migrate-legacy --worktree <path> --dry-run',
+    '  migrate-legacy --worktree <path> --commit --plan-hash <sha256:id>',
+    '  rollback-legacy --worktree <path> --migration-id <sha256:id> --dry-run',
+    '  rollback-legacy --worktree <path> --migration-id <sha256:id> --commit --plan-hash <sha256:id>',
     '  migrate-state --dry-run        Produce and audit a deterministic V1 -> V2 migration plan',
     '  migrate-state --commit --plan-hash <sha256:id>',
     '                                 Commit only the exact current migration plan',
@@ -61,7 +71,8 @@ function usage(): string {
     'Sessions (background Codex; default model gpt-5.6-luna at max effort):',
     '  attach --worktree <path> [--intent <text>] [--model <id>] [--effort <level>] [--no-spawn] [--wait]',
     '                                 Enqueue and spawn a detached Codex attach conversation.',
-    '                                 Codex conversation does the first-time strip and link. --no-spawn only records the session.',
+    '                                 The conversation freezes a snapshot/selection handoff; after exit 0 use claim, plan-sync, then sync.',
+    '                                 --no-spawn only records the session and cannot authorize a claim.',
     '                                 --wait blocks until the conversation settles (default returns immediately).',
     '  detach --worktree <path> [--intent <text>] [--no-spawn] [--wait]',
     '  edit --path <rel> [--intent <text>] [--no-spawn] [--wait]',
@@ -333,6 +344,98 @@ async function main() {
       return
     }
     fail('pin requires show or set')
+  }
+  if (command === 'plan-sync') {
+    const worktree = takeFlag(argv, '--worktree')
+    if (!worktree) fail('plan-sync requires --worktree')
+    requireNoArguments(argv, 'plan-sync')
+    print(await execute({ kind: 'planSync', meta: commandMeta(), worktree }))
+    return
+  }
+  if (command === 'claim') {
+    const worktree = takeFlag(argv, '--worktree')
+    const snapshotId = takeFlag(argv, '--snapshot') as Sha256Identifier | undefined
+    const sessionId = takeFlag(argv, '--session-id')
+    const selectedSkills = takeRepeatedFlags(argv, '--skill').sort()
+    const clearSkills = takeSwitch(argv, '--clear-skills')
+    if (!worktree || !snapshotId || !sessionId) {
+      fail('claim requires --worktree, --snapshot, and --session-id')
+    }
+    if (clearSkills && selectedSkills.length > 0) {
+      fail('claim accepts either --skill or --clear-skills, not both')
+    }
+    if (!clearSkills && selectedSkills.length === 0) {
+      fail('claim requires at least one --skill or explicit --clear-skills')
+    }
+    requireNoArguments(argv, 'claim')
+    print(await execute({
+      kind: 'claimWorktree',
+      meta: commandMeta(),
+      worktree,
+      snapshotId,
+      selectedSkills: clearSkills ? [] : selectedSkills,
+      sessionId
+    }))
+    return
+  }
+  if (command === 'sync') {
+    const worktree = takeFlag(argv, '--worktree')
+    const planHash = takeFlag(argv, '--plan-hash') as Sha256Identifier | undefined
+    const sessionId = takeFlag(argv, '--session-id')
+    if (!worktree || !planHash) fail('sync requires --worktree and --plan-hash')
+    requireNoArguments(argv, 'sync')
+    print(await execute({ kind: 'sync', meta: commandMeta(), worktree, planHash, sessionId }))
+    return
+  }
+  if (command === 'migrate-legacy') {
+    const worktree = takeFlag(argv, '--worktree')
+    const dryRun = takeSwitch(argv, '--dry-run')
+    const commit = takeSwitch(argv, '--commit')
+    const planHash = takeFlag(argv, '--plan-hash') as Sha256Identifier | undefined
+    if (!worktree) fail('migrate-legacy requires --worktree')
+    if (dryRun === commit) fail('migrate-legacy requires exactly one of --dry-run or --commit')
+    if (dryRun && planHash) fail('migrate-legacy --dry-run does not accept --plan-hash')
+    if (commit && !planHash) fail('migrate-legacy --commit requires --plan-hash')
+    requireNoArguments(argv, 'migrate-legacy')
+    print(await execute(dryRun
+      ? { kind: 'migrateLegacy', meta: commandMeta(), worktree, mode: 'dryRun' }
+      : {
+          kind: 'migrateLegacy',
+          meta: commandMeta(),
+          worktree,
+          mode: 'commit',
+          planHash: planHash as Sha256Identifier
+        }))
+    return
+  }
+  if (command === 'rollback-legacy') {
+    const worktree = takeFlag(argv, '--worktree')
+    const migrationId = takeFlag(argv, '--migration-id') as Sha256Identifier | undefined
+    const dryRun = takeSwitch(argv, '--dry-run')
+    const commit = takeSwitch(argv, '--commit')
+    const planHash = takeFlag(argv, '--plan-hash') as Sha256Identifier | undefined
+    if (!worktree || !migrationId) fail('rollback-legacy requires --worktree and --migration-id')
+    if (dryRun === commit) fail('rollback-legacy requires exactly one of --dry-run or --commit')
+    if (dryRun && planHash) fail('rollback-legacy --dry-run does not accept --plan-hash')
+    if (commit && !planHash) fail('rollback-legacy --commit requires --plan-hash')
+    requireNoArguments(argv, 'rollback-legacy')
+    print(await execute(dryRun
+      ? {
+          kind: 'rollbackLegacyMigration',
+          meta: commandMeta(),
+          worktree,
+          migrationId,
+          mode: 'dryRun'
+        }
+      : {
+          kind: 'rollbackLegacyMigration',
+          meta: commandMeta(),
+          worktree,
+          migrationId,
+          mode: 'commit',
+          planHash: planHash as Sha256Identifier
+        }))
+    return
   }
   if (command === 'migrate-state') {
     const dryRun = takeSwitch(argv, '--dry-run')

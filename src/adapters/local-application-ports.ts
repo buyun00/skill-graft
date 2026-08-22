@@ -13,11 +13,19 @@ export type LocalApplicationPorts = {
   legacyDetach: LegacyDetachPort
 }
 
+export type LocalApplicationPortsOptions = {
+  /** Installed package root containing immutable overlay/runtime assets. */
+  packageRoot?: string
+}
+
 /**
  * Local composition only: the host supplies runtime, read models, and low-level
  * facts/effects; shared Application/Core own write-use-case behavior.
  */
-export function createLocalApplicationPorts(context: LocalHostContext): LocalApplicationPorts {
+export function createLocalApplicationPorts(
+  context: LocalHostContext,
+  options: LocalApplicationPortsOptions = {}
+): LocalApplicationPorts {
   const queries = createLocalQueryPort(context)
   return {
     runtime: {
@@ -27,7 +35,9 @@ export function createLocalApplicationPorts(context: LocalHostContext): LocalApp
     },
     queries,
     useCases: createLocalUseCasePorts(context),
-    legacyAttach: createLocalLegacyAttachPort(context, queries.inspectWorktree),
+    legacyAttach: createLocalLegacyAttachPort(context, queries.inspectWorktree, {
+      packageRoot: options.packageRoot
+    }),
     legacyDetach: createLocalLegacyDetachPort(context, queries.inspectWorktree)
   }
 }

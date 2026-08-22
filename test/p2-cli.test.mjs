@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -34,6 +35,16 @@ function createP2CliRoot(t) {
   const probe = path.join(root, 'probe')
   fs.mkdirSync(path.join(probe, 'baloot_client'), { recursive: true })
   fs.writeFileSync(path.join(probe, 'AGENTS.md'), '# probe\n', 'utf8')
+  const gitEnv = { ...process.env }
+  for (const key of Object.keys(gitEnv)) {
+    if (key.toUpperCase().startsWith('GIT_')) delete gitEnv[key]
+  }
+  const initialized = spawnSync('git', ['-C', probe, 'init', '-q'], {
+    env: gitEnv,
+    encoding: 'utf8',
+    windowsHide: true
+  })
+  assert.equal(initialized.status, 0, initialized.stderr || initialized.stdout)
   fs.writeFileSync(path.join(root, 'overlay', 'attached-worktrees.txt'), `${probe}\n`, 'utf8')
   return { root, probe }
 }
