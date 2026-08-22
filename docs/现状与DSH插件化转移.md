@@ -12,23 +12,23 @@
 
 ---
 
-## 1. 当前现状（2026-08-21）
+## 1. 当前现状（2026-08-22）
 
 本机中心仓：`E:\ozdqp-skill-hub`（公开运行时仓 `buyun00/skill-graft`）。  
 `skills/` 正文默认不入库、不上传。
 
 | 面 | 现在怎样 |
 |---|---|
-| 本地命令 | `sg` / `ozdqp-hub` → `dist/control/cli.js`；这是当前本地发行入口，不是未来唯一业务入口。 |
-| HTTP | 守护进程 `:18765`，只 `exec` CLI，禁止 `import src/core` |
+| 本地命令 | `sg` / `ozdqp-hub` → Local composition → `HubApplication.execute(command)`；CLI 是本地 transport，不持有业务规则。 |
+| HTTP | 守护进程默认 `:18765`；同进程调用 Local Host/Application，不 spawn CLI；typed 写入走 `POST /api/command`，旧入口保留 deprecated 兼容投影。 |
 | 网页 | `panel/` Next 14 + `graft-glass-ui`，开发 **3320**，静态导出到 `web/`，由 daemon 同域托管 |
 | 组件库 | `E:\graft-glass-ui`（库预览仍 **3310**）；panel 依赖 `file:../../graft-glass-ui` |
-| 挂接 | 第一次走 **Codex 后台对话**（默认 `gpt-5.6-luna` + max）；已挂树断链走 `repair-links` |
-| 探针 | 冒烟只用 `E:\ozdqp-cli-attach-probe`，禁止改活树 |
-| 测试 | `npm test` 须绿；前端不算挂接，`attached` / `overrideLinked` / `officialPresent` 以 API/CLI 为准 |
-| 未做 | 共享 Application 合同、per-tree pin / snapshot / `MaterializePort`、双宿主锁、两个 `SessionRunner`、完整 DSH bundle/Host/Client 发行 |
+| 挂接 | 第一次走 **Codex 后台对话**（默认 `gpt-5.6-luna` + max）；会话只能提交绑定的 typed apply 命令；已挂树断链走 `repair-links`。 |
+| 探针 | 自动真实验收使用 marker 所有的 run-id 隔离副本；`E:\ozdqp-cli-attach-probe` 只作固定只读基线，禁止改活树。 |
+| 测试 | P1 候选：`npm test` 293 项、292 通过、0 失败、1 intentional skip；安全套件 28/28；源码外安装真实 P1 1/1，并完成浏览器 reject 写路径。 |
+| 未做 | per-tree snapshot/pin 持久化、跨进程锁、`MaterializePort` copy 物化、完整 Local/DSH SessionRunner、DSH bundle/Host/Client/UI、双宿主并存与发布候选。 |
 
-开发清单 **1–9 已完成**（含玻璃控制台）。指针不要倒回去重做，除非冒烟证明坏了。
+P1 共享 Contracts/Core/Application 已于 2026-08-22 完成真实安装、进程 trace 与浏览器写路径验收，见 [P1 证据](../artifacts/verification/P1/README.md)；当前实施指针为 P2。开发清单 **1–9 已完成**（含玻璃控制台），不要倒回去重做，除非冒烟证明坏了。
 
 活数据典型形态：若干 worktree 已挂（链接完整），inbox 可能空，总览走「一切正常」；有事件路径由 `test/overview-mapping.test.mjs` 用夹具 JSON 覆盖。
 
@@ -125,12 +125,15 @@
 | 改 / 聊 / 剥 | `sg edit` / `chat` / `detach` / `resume` / `session` |
 | 安装与保活 | `sg setup` / `doctor` / `daemon` |
 
+当前 7 个查询命令和 12 个写命令共用版本化 command/result/error/event 合同。所有写命令携带 `requestId`，Application 负责幂等 replay/conflict、事务编排和审计；认树、claim、第一次 attach、pin 校验、冲突分类与 inbox 状态机位于纯 Core。第一次 attach/detach 的兼容流程由会话绑定的 `applyLegacyAttach` / `applyLegacyDetach` typed 命令进入同一 Application，旧 PowerShell 只保留机械 façade。
+
 会话：Windows 上 WMI 拉起 `codex exec`，避免 Job Object 把对话和 CLI 一起杀掉。`exec` 一轮一退是正常的；连续性靠 `codexSessionId` + `resume`。HTTP 返回信封是 `{ ok, action, session: { id, status, … } }`，前端必须拆 `.session`。
 
 ### 4.2 HTTP（`:18765`）
 
 `GET` health / state / daemon / worktrees / skill / history / codex sessions / session / SSE stream。  
-`POST` decide / analyze / codex start|resume / worktree attach|detach。  
+typed 写命令统一走 `POST /api/command`；旧 `POST` decide / analyze / codex start|resume / worktree attach|detach 仍兼容，并返回 `Deprecation: true` 与 `/api/command` successor `Link`。两类入口都在 server 进程内调用同一 Application，不产生 CLI 中间子进程。
+
 静态：`web/`（含 Next `[[...slug]]` 资源；`serveWeb` 要 decodeURI，且 `..` 按路径段判断，避免把 `[[...slug]]` 当成穿越）。
 
 ### 4.3 玻璃控制台（`panel/`）
@@ -165,7 +168,7 @@ Attach/detach 显示「已入队」，不把 POST 成功当成 `attached=true`�
 
 ---
 
-## 5. 下一步要做：同一核心，两个完整宿主发行
+## 5. 当前下一步：P2–P10 的两个完整宿主发行
 
 详细实现顺序和验收门禁以 `双宿主独立核心改造实施计划.md` 的 P0–P10 为准。本节只冻结架构边界。
 
@@ -197,7 +200,7 @@ DSH 可用 `ctx.skills.register()` 注册当前 workspace 的钉定 Skill，可�
 
 ### 5.4 实施与验收入口
 
-按 `双宿主独立核心改造实施计划.md` 依次完成：基线隔离、共享 Application、snapshot/pin/锁、物化、本地发行、Codex Runner、DSH bundle、DSH UI、DSH Runner、双宿主并存、最终打包。每一步都要真实构建安装环境并启动宿主验证，完成后更新进度、提交并推送；单测不能替代真实安装和真实会话证据。
+P0 基线隔离和 P1 共享 Application 已完成并封口，当前从 P2 开始依次完成 snapshot/pin/锁、物化、本地发行、Codex Runner、DSH bundle、DSH UI、DSH Runner、双宿主并存与最终打包。每一步都要真实构建安装环境并启动宿主验证，完成后更新进度、提交并推送；单测不能替代真实安装和真实会话证据。
 
 ---
 
