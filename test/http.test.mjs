@@ -260,6 +260,7 @@ function fakeHost(execute, options = {}) {
     hostId: options.hostId || 'http-fake-host',
     localSessions: {
       needsReap: () => false,
+      getLegacy: () => null,
       readLog: (id) => options.readLog?.(id) || ''
     },
     commandMeta(transport, requestId) {
@@ -274,6 +275,40 @@ function fakeHost(execute, options = {}) {
     application: { execute }
   }
 }
+
+test('P5 structured session GET routes omit raw runner logs', async (t) => {
+  const rawSecret = 'p5-raw-runner-secret-must-not-cross-http'
+  const session = {
+    id: 'p5-http-structured',
+    kind: 'chat',
+    status: 'completed',
+    revision: 3,
+    attemptId: 'attempt-p5-http-structured',
+    exitCode: 0,
+    cancelRequested: false,
+    steps: [{ id: 'respond', owner: 'runner', title: 'Respond', status: 'completed' }],
+    events: [{ sequence: 1, attemptId: 'attempt-p5-http-structured', type: 'runner.status', status: 'completed' }],
+    capabilities: { canResume: true, canCancel: false }
+  }
+  const host = fakeHost(async (command) => ({
+    contractVersion: 1,
+    requestId: command.meta.requestId,
+    commandKind: command.kind,
+    ok: true,
+    data: command.kind === 'listSessions' ? { sessions: [session] } : { session },
+    events: [],
+    meta: { replayed: false, handler: 'application.commandBus' }
+  }), { readLog: () => rawSecret })
+  const transport = createHttpServer({ host })
+  const base = await listenTransport(transport)
+  t.after(() => transport.close())
+
+  const list = await getJson(base, '/api/codex/sessions')
+  assert.equal(Object.hasOwn(list.sessions[0], 'logTail'), false)
+  const detail = await getJson(base, `/api/codex/session?id=${encodeURIComponent(session.id)}`)
+  assert.equal(Object.hasOwn(detail, 'log'), false)
+  assert.equal(JSON.stringify({ list, detail }).includes(rawSecret), false)
+})
 
 function fileFingerprint(file) {
   const body = fs.readFileSync(file)
@@ -997,6 +1032,8 @@ test('SSE emits an explicit terminal event and stops polling after client abort'
           id: command.sessionId,
           kind: 'chat',
           status,
+          revision: 1,
+          attemptId: 'attempt-http-v2',
           lastMessage: '',
           error: '',
           exitCode: status === 'completed' ? 0 : null,
@@ -1033,13 +1070,8 @@ test('SSE emits an explicit terminal event and stops polling after client abort'
   assert.match(terminalText, /"status":"completed"/)
   assert.match(terminalText, /event: end/)
   assert.match(terminalText, /"reason":"settled"/)
-  const logData = terminalText.match(/event: log\ndata: (\{[^\n]+\})/)
-  assert.ok(logData, 'bounded log event')
-  const boundedLog = JSON.parse(logData[1])
-  assert.equal(Buffer.byteLength(boundedLog.text), 8192)
-  assert.equal(boundedLog.offset, 11808)
-  assert.equal(boundedLog.totalBytes, 20000)
-  assert.equal(boundedLog.truncated, true)
+  assert.doesNotMatch(terminalText, /event: log/)
+  assert.doesNotMatch(terminalText, new RegExp(longLog.slice(0, 32)))
 
   status = 'running'
   calls = 0
@@ -1070,6 +1102,10 @@ test('real isolated HTTP server uses Application without CLI child and keeps ses
   runtime = await startCliBlockedServer(temporaryHub.root)
 
   const sessionsBefore = fileFingerprint(fixture.sessionsFile)
+  const requestLedger = path.join(temporaryHub.root, 'skill-review', 'application-ledger.json')
+  const auditLog = path.join(temporaryHub.root, 'skill-review', 'application-audit.json')
+  const requestLedgerBefore = fs.existsSync(requestLedger) ? fileFingerprint(requestLedger) : null
+  const auditLogBefore = fs.existsSync(auditLog) ? fileFingerprint(auditLog) : null
   const sessions = await getJson(runtime.base, '/api/codex/sessions')
   const hydrated = sessions.sessions.find((item) => item.id === fixture.sessionId)
   assert.ok(hydrated, 'seeded session missing from list')
@@ -1102,10 +1138,8 @@ test('real isolated HTTP server uses Application without CLI child and keeps ses
   assert.match(legacyEvents, /"codexSessionId":"11111111-2222-3333-4444-555555555555"/)
   assert.match(legacyEvents, /event: end/)
   assert.match(legacyEvents, /"reason":"settled"/)
-  const requestLedger = path.join(temporaryHub.root, 'skill-review', 'application-ledger.json')
-  const auditLog = path.join(temporaryHub.root, 'skill-review', 'application-audit.json')
-  assert.equal(fs.existsSync(requestLedger), false)
-  assert.equal(fs.existsSync(auditLog), false)
+  assert.deepEqual(fs.existsSync(requestLedger) ? fileFingerprint(requestLedger) : null, requestLedgerBefore)
+  assert.deepEqual(fs.existsSync(auditLog) ? fileFingerprint(auditLog) : null, auditLogBefore)
 
   const state = await getJson(runtime.base, '/api/state')
   assert.ok(Array.isArray(state.resident))
@@ -1121,8 +1155,16 @@ test('real isolated HTTP server uses Application without CLI child and keeps ses
 
   const history = await getJson(runtime.base, '/api/history')
   assert.ok(history.records.some((record) => record.type === 'decide' && record.id === 'http-fixture'))
-  assert.equal(fs.existsSync(requestLedger), false, 'read-only HTTP routes must not create a request ledger')
-  assert.equal(fs.existsSync(auditLog), false, 'read-only HTTP routes must not create audit events')
+  assert.deepEqual(
+    fs.existsSync(requestLedger) ? fileFingerprint(requestLedger) : null,
+    requestLedgerBefore,
+    'read-only HTTP routes must not change the startup recovery ledger'
+  )
+  assert.deepEqual(
+    fs.existsSync(auditLog) ? fileFingerprint(auditLog) : null,
+    auditLogBefore,
+    'read-only HTTP routes must not change startup recovery audit events'
+  )
 
   const analyzed = await postJson(runtime.base, '/api/analyze', {
     id: fixture.inboxId,
@@ -1166,14 +1208,14 @@ test('real isolated HTTP server uses Application without CLI child and keeps ses
 
   const completedState = await getJson(runtime.base, '/api/state')
   const completedItem = completedState.items.find((item) => item.id === fixture.inboxId)
-  assert.equal(completedItem.status, 'proposed')
-  assert.equal(completedItem.suggestion.action, 'reject')
+  assert.equal(completedItem.status, 'queued')
+  assert.equal(completedItem.suggestion.action, '')
   const completionAudit = JSON.parse(fs.readFileSync(auditLog, 'utf8')).events
-  assert.ok(completionAudit.some((event) => (
+  assert.equal(completionAudit.some((event) => (
     event.type === 'inbox.transitioned'
       && event.commandKind === 'reapSessions'
       && event.details?.source === 'analyze-completion'
-  )), 'analyze completion must transition through Core/Application')
+  )), false, 'legacy last-message text must not transition a P5 structured session')
   const completionLedger = JSON.parse(fs.readFileSync(requestLedger, 'utf8')).entries
   assert.ok(completionLedger.some((entry) => entry.commandKind === 'reapSessions' && entry.status === 'completed'))
 

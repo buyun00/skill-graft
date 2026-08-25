@@ -22,22 +22,19 @@ type Session = {
 
 type SessionStep = {
   id?: string;
-  kind?: string;
-  label?: string;
+  title?: string;
+  owner?: string;
   status?: string;
-  detail?: string;
-  message?: string;
-  updatedAt?: string;
+  at?: string;
 };
 
 type SessionEvent = {
-  id?: string;
+  sequence?: number;
   type?: string;
   at?: string;
   stepId?: string;
   status?: string;
-  message?: string;
-  detail?: string;
+  code?: string;
 };
 
 export function CodexView({
@@ -155,7 +152,7 @@ export function CodexView({
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[13px] font-[550] text-ink truncate">{session.kind || "session"}</span>
                 <StatusPill
-                  status={session.status === "running" ? "warn" : session.status === "failed" ? "off" : "ok"}
+                  status={session.status === "running" || session.status === "awaiting" ? "warn" : session.status === "failed" ? "off" : "ok"}
                   label={session.status || "unknown"}
                 />
               </div>
@@ -167,7 +164,7 @@ export function CodexView({
       <section className="glass p-5 rounded-[22px]">
         <SectionHeader
           title={selected ? `${selected.kind || "session"} ${selected.id}` : "Codex 日志"}
-          description="SSE session/log/status/end；步骤与事件来自 typed SessionView"
+          description="SSE session/status/end；步骤与事件来自 typed SessionView"
         />
         {selected ? (
           <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -206,13 +203,13 @@ export function CodexView({
               <p className="text-[12px] font-[600] text-ink/65 mb-2">真实步骤</p>
               <div className="space-y-2">
                 {(selected.steps || []).map((step, index) => (
-                  <div key={step.id || `${step.kind || "step"}-${index}`} className="text-[12px] text-ink/70">
+                  <div key={step.id || `step-${index}`} className="text-[12px] text-ink/70">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono break-all">{step.label || step.id || step.kind || `step ${index + 1}`}</span>
+                      <span className="font-mono break-all">{step.title || step.id || `step ${index + 1}`}</span>
                       <span className="text-ink/45">{step.status || "unknown"}</span>
                     </div>
-                    {step.message || step.detail ? (
-                      <p className="text-ink/45 break-words">{step.message || step.detail}</p>
+                    {step.owner || step.at ? (
+                      <p className="text-ink/45 break-words">{[step.owner, step.at].filter(Boolean).join(" · ")}</p>
                     ) : null}
                   </div>
                 ))}
@@ -225,13 +222,13 @@ export function CodexView({
               <p className="text-[12px] font-[600] text-ink/65 mb-2">会话事件</p>
               <div className="space-y-2 max-h-48 overflow-auto">
                 {(selected.events || []).map((event, index) => (
-                  <div key={event.id || `${event.type || "event"}-${event.at || index}`} className="text-[12px] text-ink/70">
+                  <div key={event.sequence || `${event.type || "event"}-${event.at || index}`} className="text-[12px] text-ink/70">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-mono break-all">{event.type || event.stepId || `event ${index + 1}`}</span>
                       <span className="text-ink/40">{event.at || event.status || ""}</span>
                     </div>
-                    {event.message || event.detail ? (
-                      <p className="text-ink/45 break-words">{event.message || event.detail}</p>
+                    {event.code ? (
+                      <p className="text-ink/45 break-words">{event.code}</p>
                     ) : null}
                   </div>
                 ))}

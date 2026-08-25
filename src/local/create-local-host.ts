@@ -224,7 +224,10 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
       await recoverDurable()
     }
   }
-  const localSessions = options.sessions ? undefined : createLocalSessionPort(context, options.localSessionOptions)
+  const localSessions = options.sessions ? undefined : createLocalSessionPort(context, {
+    ...options.localSessionOptions,
+    packageRoot: options.packageRoot
+  })
   const sessions = options.sessions || localSessions as LocalSessionPort
   const ledger = options.ledger || createPersistentRequestLedger(context)
   const applicationPorts = createLocalApplicationPorts(context, { packageRoot: options.packageRoot })
@@ -238,6 +241,35 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
     transactions,
     trace
   })
+  let sessionRecoveryCompleted = false
+  let sessionRecoveryInFlight: Promise<void> | undefined
+  const ensureSessionsRecovered = async () => {
+    await ensureReady()
+    if (!localSessions || sessionRecoveryCompleted) return
+    if (sessionRecoveryInFlight) return sessionRecoveryInFlight
+    const operation = application.execute({
+      kind: 'reapSessions',
+      meta: {
+        contractVersion: CONTRACT_VERSION,
+        requestId: context.ids.next('request-session-recovery'),
+        hostId,
+        transport: 'startup-recovery'
+      }
+    }).then((result) => {
+      if (!result.ok) throw new Error(`startup session recovery failed (${result.error.code})`)
+    })
+    sessionRecoveryInFlight = operation.then(
+      () => {
+        sessionRecoveryCompleted = true
+        sessionRecoveryInFlight = undefined
+      },
+      (error: unknown) => {
+        sessionRecoveryInFlight = undefined
+        throw error
+      }
+    )
+    return sessionRecoveryInFlight
+  }
   return {
     packageRoot: options.packageRoot,
     dataRoot: context.hubRoot,
@@ -247,7 +279,7 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
     localSessions,
     ledger,
     application,
-    ready: ensureReady,
+    ready: ensureSessionsRecovered,
     commandMeta(transport, requestId) {
       return {
         contractVersion: CONTRACT_VERSION,

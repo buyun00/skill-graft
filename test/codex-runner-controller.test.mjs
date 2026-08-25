@@ -32,7 +32,7 @@ async function waitFor(read, timeoutMs = 15000) {
 
 function makeRequest(root, mode) {
   const artifacts = Object.fromEntries([
-    'prompt', 'stdout', 'stderr', 'events', 'last', 'cancel', 'status', 'receipt', 'grandchild'
+    'prompt', 'stdout', 'stderr', 'events', 'last', 'cancel', 'status', 'receipt', 'grandchild', 'environment'
   ].map((name) => [name, path.join(root, name)]))
   fs.writeFileSync(artifacts.prompt, 'controller prompt\n', 'utf8')
   return {
@@ -41,7 +41,19 @@ function makeRequest(root, mode) {
       sessionId: `controller-${mode}`,
       attemptId: 'attempt-1',
       executable: process.execPath,
-      arguments: [emitter, mode, artifacts.grandchild, artifacts.last],
+      arguments: [emitter, mode, artifacts.grandchild, artifacts.last, artifacts.environment],
+      environment: {
+        CODEX_HOME: root,
+        HOME: root,
+        USERPROFILE: root,
+        APPDATA: path.join(root, 'appdata'),
+        LOCALAPPDATA: path.join(root, 'localappdata'),
+        XDG_CONFIG_HOME: path.join(root, 'config'),
+        TEMP: path.join(root, 'temp'),
+        TMP: path.join(root, 'temp'),
+        SKILL_GRAFT_HOME: root,
+        HUB_ROOT: root
+      },
       workingDirectory: root,
       promptPath: artifacts.prompt,
       stdoutPath: artifacts.stdout,
@@ -67,7 +79,12 @@ test('Codex controller records structured completion and bounded UTF-8 streams',
 
   const result = spawnSync('powershell.exe', [
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', controller, '-RequestPath', requestPath
-  ], { encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  ], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30000,
+    env: { ...process.env, OPENAI_API_KEY: 'controller-secret-must-not-reach-child' }
+  })
   assert.equal(result.status, 0, result.stderr || result.stdout)
 
   const receipt = JSON.parse(fs.readFileSync(request.artifacts.receipt, 'utf8'))
@@ -79,6 +96,12 @@ test('Codex controller records structured completion and bounded UTF-8 streams',
   assert.match(fs.readFileSync(request.artifacts.stderr, 'utf8'), /结构化运行器/)
   assert.match(fs.readFileSync(request.artifacts.stdout, 'utf8'), /thread\.started/)
   assert.equal(fs.readFileSync(request.artifacts.last, 'utf8'), '真实最后消息\n')
+  const environment = JSON.parse(fs.readFileSync(request.artifacts.environment, 'utf8'))
+  assert.equal(environment.providerSecretInherited, false)
+  assert.equal(environment.home, root)
+  assert.equal(environment.appData, path.join(root, 'appdata'))
+  assert.equal(environment.temp, path.join(root, 'temp'))
+  assert.equal(environment.pathPresent, true)
 
   const events = fs.readFileSync(request.artifacts.events, 'utf8').trim().split(/\r?\n/).map(JSON.parse)
   assert.equal(events.some((event) => event.type === 'thread.started'), true)
@@ -88,6 +111,7 @@ test('Codex controller records structured completion and bounded UTF-8 streams',
     itemType: 'command_execution',
     itemId: 'item-1'
   })
+  assert.equal(events.some((event) => Object.hasOwn(event, 'message')), false)
   assert.equal(JSON.stringify(item).includes('must not enter normalized events'), false)
 })
 

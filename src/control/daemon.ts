@@ -8,7 +8,6 @@ import { createHub } from '../adapters/create-hub.js'
 import { API_PORT } from '../local/lifecycle/install-domain.js'
 import { createLocalHost, type LocalHost } from '../local/create-local-host.js'
 import { resolveLocalDataRoot } from '../local/data-root.js'
-import { createCodexSessionRunner } from '../local/session/codex-session-runner.js'
 import { createInstallHost, type InstallHost } from '../adapters/install-host.js'
 import {
   createDaemonProcessHost,
@@ -1085,13 +1084,16 @@ export async function runDaemon(opts: DaemonRunOptions) {
     const serverPath = join(packageRoot, 'server', 'index.mjs')
     revalidateStartup()
     const context = createHub(dataRoot)
-    const runner = createCodexSessionRunner(context)
     const local = createLocalHost({
       packageRoot,
       dataRoot,
       hostId: 'local-daemon',
       context,
-      localSessionOptions: { runner: { ...runner, pidAlive: (pid) => host.pidAlive(pid) } }
+      localSessionOptions: {
+        packageRoot,
+        environment: process.env,
+        runnerOptions: { processAlive: (pid) => host.pidAlive(pid) }
+      }
     })
     await local.ready()
     revalidateStartup()

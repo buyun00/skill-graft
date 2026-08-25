@@ -1529,7 +1529,7 @@ async function authorizeClaimSession(
     || session.exitCode !== 0) {
     throw new ApplicationFault(
       'FIRST_ATTACH_SESSION_REQUIRED',
-      'claim requires a successful waiting attach session for this worktree'
+      'claim requires a successful awaiting attach session for this worktree'
     )
   }
 }
@@ -1730,7 +1730,7 @@ async function planAttachCompletion(
   if (!isAwaitingSession(session) || session.exitCode !== 0) {
     throw new ApplicationFault(
       'FIRST_ATTACH_SESSION_REQUIRED',
-      'sync completion requires a successful waiting attach session'
+      'sync completion requires a successful awaiting attach session'
     )
   }
   return { sessionId, proof: expected }

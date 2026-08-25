@@ -29,7 +29,17 @@ const QUERY_COMMAND_KINDS = new Set([
   'getPin',
   'planSync'
 ])
-const TERMINAL_SESSION_STATUSES = new Set(['waiting', 'completed', 'failed', 'cancelled'])
+// `waiting` remains readable only for pre-P5 durable rows. New runner writes
+// use `awaiting`, and both settle the transport stream without creating two
+// independent state machines.
+const TERMINAL_SESSION_STATUSES = new Set(['awaiting', 'waiting', 'completed', 'failed', 'cancelled'])
+
+function isStructuredSessionView(session) {
+  return Number.isSafeInteger(session?.revision)
+    && typeof session?.attemptId === 'string'
+    && Array.isArray(session?.events)
+}
+
 const DEPRECATED_WRITE_ROUTES = new Set([
   '/api/decide',
   '/api/analyze',
@@ -504,7 +514,9 @@ function createApplicationBridge(host, packageRoot, dataRoot, getDiagnostics, ge
       const data = await executeLegacy(req, body, 'listSessions')
       const sessions = (data.sessions || []).map((session) => ({
         ...session,
-        logTail: host.localSessions?.readLog(session.id).slice(-8000) || ''
+        ...(isStructuredSessionView(session)
+          ? {}
+          : { logTail: host.localSessions?.readLog(session.id).slice(-8000) || '' })
       }))
       return { sessions }
     }
@@ -518,7 +530,9 @@ function createApplicationBridge(host, packageRoot, dataRoot, getDiagnostics, ge
       const projected = projectLegacyResult(result, host)
       return {
         session: projected.session,
-        log: host.localSessions?.readLog(id || '') || ''
+        ...(isStructuredSessionView(projected.session)
+          ? {}
+          : { log: host.localSessions?.readLog(id || '') || '' })
       }
     }
 
@@ -712,11 +726,16 @@ export function createHttpServer(options = {}) {
           lastSession = serializedSession
           writeEvent('session', session)
         }
-        const log = utf8Tail(host.localSessions?.readLog(id) || '', streamLogTailBytes)
-        if (log.totalBytes !== lastLogBytes || log.text !== lastLogText) {
-          lastLogBytes = log.totalBytes
-          lastLogText = log.text
-          writeEvent('log', log)
+        // P5 sessions carry normalized bounded events. Never mirror their raw
+        // Codex JSONL/text stream through SSE; legacy rows without events keep
+        // the deprecated log projection for read compatibility only.
+        if (!isStructuredSessionView(session)) {
+          const log = utf8Tail(host.localSessions?.readLog(id) || '', streamLogTailBytes)
+          if (log.totalBytes !== lastLogBytes || log.text !== lastLogText) {
+            lastLogBytes = log.totalBytes
+            lastLogText = log.text
+            writeEvent('log', log)
+          }
         }
         if (session.status !== lastStatus) {
           lastStatus = session.status
