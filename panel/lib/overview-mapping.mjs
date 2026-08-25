@@ -12,20 +12,9 @@ export const HUB_PATHS = {
 
 export const API_PATHS = {
   health: '/api/health',
-  state: '/api/state',
-  daemon: '/api/daemon',
-  worktrees: '/api/worktrees',
-  skill: '/api/skill',
-  history: '/api/history',
-  sessions: '/api/codex/sessions',
-  session: '/api/codex/session',
+  diagnostics: '/api/host/diagnostics',
+  command: '/api/command',
   stream: '/api/codex/session/stream',
-  decide: '/api/decide',
-  analyze: '/api/analyze',
-  start: '/api/codex/start',
-  resume: '/api/codex/resume',
-  attach: '/api/worktree/attach',
-  detach: '/api/worktree/detach'
 }
 
 export function shortHash(value) {
@@ -112,9 +101,10 @@ export function overviewPrimary(attention) {
 
 export function sessionFromEnvelope(payload) {
   if (!payload || typeof payload !== 'object') return null
-  const nested = payload.session
+  const body = payload.data && typeof payload.data === 'object' ? payload.data : payload
+  const nested = body.session
   if (nested && typeof nested === 'object') return nested
-  if (payload.id || payload.status) return payload
+  if (body.id || body.status) return body
   return null
 }
 

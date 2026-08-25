@@ -1,15 +1,12 @@
-你在中心仓 {{HUB}} 工作，目标游戏 worktree 是 {{WORKTREE}}（已通过 --add-dir 可写）。
-用户从 CLI（`sg detach`）确认了「拆掉本地 Skill 挂接、Restore 官方树」。用户意图：{{INTENT}}
-不要把入队当成完成。不要再问一次确认。
-固定步骤：
-1. 侦察：该树是否在 overlay/attached-worktrees.txt、3 个常驻 Skill / AGENTS.override.md / overlay 是否指向 hub、官方树是否已不在磁盘、游戏仓是否有未提交业务改动。
-2. 把侦察结论写进日志，然后立刻执行（不要改游戏仓业务代码）：
-   拆掉指向 hub 的 3 Skill Junction、AGENTS.override.md 链接、`.codex/local-overlay` Junction（只拆链接，不删 hub 目标内容）。
-   overlay/manage-skill-visibility.ps1 -Workspace '{{WORKTREE}}' -Mode Restore
-   从 overlay/attached-worktrees.txt 去掉该路径。
-3. 验收：官方 Skill 树回到磁盘；3 Skill 不再指向 hub；list 意义上 attached=false；未提交的业务改动还在。
-4. 写入 skill-review/history，只在中心仓提交这些记录（不要提交游戏仓）。
-停手条件（只有这些）：Restore 脚本失败；拆链接会删掉用户未提交的业务文件；目标树不是当前这条 worktree。
-不是停手：游戏仓有未提交的业务改动（保留它们）；官方树与 hub 3 Skill 内容不同（Restore 就是为了把官方树放回来）。
-禁止：-Force；-PromoteFromWorktree；改游戏仓业务代码；处理其他 worktree。
-最后写一行「验收摘要：」并列出 attached / overrideLinked / officialPresent 的预期值。
+你在 Skill Graft 数据根 {{HUB}} 工作，目标游戏 worktree 是 {{WORKTREE}}（已通过 --add-dir 可写）。
+用户已从 CLI 或管理面板确认「拆掉本地 Skill 挂接并恢复官方树」。detach 会话 ID 是 {{SESSION_ID}}。用户意图：{{INTENT}}
+不要再询问确认，也不要自行判断认树、claim、链接归属、恢复范围或写盘顺序；这些判断只由共享 Core 与 Application 完成。
+
+唯一写入口：
+sg apply-legacy-detach --worktree "{{WORKTREE}}" --session-id "{{SESSION_ID}}" --request-id "detach-apply-{{SESSION_ID}}" --contract-v1
+
+若命令失败，原样报告稳定 error code 并停手，不要用文件命令、Git 命令或旧 PowerShell 脚本绕过，绝不能强制覆盖普通文件或外部链接。
+命令成功后只读验收：
+1. 运行 `sg list-worktrees --contract-v1`，确认该树 attached=false、overrideLinked=false、officialPresent=true。
+2. 只读检查游戏仓原有业务改动仍在，三个常驻 Skill、AGENTS.override.md 与 local-overlay 均不再指向当前 Skill Graft 数据根。
+3. 输出简短「验收摘要：」；Application 已负责 claim、request ledger 和审计，不要手写记录、提交中心仓或修改业务代码。

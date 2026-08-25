@@ -1,9 +1,30 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { createTemporaryTestHub } from './support/test-hub.mjs'
 
 export const hubRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 export const cliPath = path.join(hubRoot, 'dist', 'control', 'cli.js')
+const temporaryHub = createTemporaryTestHub(hubRoot)
+export const testHubRoot = temporaryHub.root
+const testProfileRoot = path.dirname(testHubRoot)
+const testHome = path.join(testProfileRoot, 'home')
+const testAppData = path.join(testProfileRoot, 'appdata')
+const testLocalAppData = path.join(testProfileRoot, 'localappdata')
+const testDshHome = path.join(testProfileRoot, 'dsh-home')
+for (const directory of [testHome, testAppData, testLocalAppData, testDshHome]) {
+  fs.mkdirSync(directory, { recursive: true })
+}
+process.env.HOME = testHome
+process.env.USERPROFILE = testHome
+process.env.APPDATA = testAppData
+process.env.LOCALAPPDATA = testLocalAppData
+process.env.DSH_HOME = testDshHome
+process.env.HUB_ROOT = testHubRoot
+process.env.SKILL_GRAFT_HOME = testHubRoot
+process.env.HUB_SPAWN_CODEX = '0'
+process.once('exit', () => temporaryHub.cleanup())
 
 export function makeFs(files) {
   const resolveKey = (target) => path.resolve(target)
@@ -42,10 +63,18 @@ export function makeFs(files) {
 }
 
 export function spawnHub(args, options = {}) {
-  return spawnSync(process.execPath, [cliPath, ...args], {
+  const requested = options.env || {}
+  const requestedRoot = requested.SKILL_GRAFT_HOME || requested.HUB_ROOT || testHubRoot
+  return spawnSync(process.execPath, [options.cliPath || cliPath, ...args], {
     encoding: 'utf8',
     cwd: hubRoot,
-    env: { ...process.env, ...(options.env || {}) },
+    env: {
+      ...process.env,
+      SKILL_GRAFT_HOME: requestedRoot,
+      HUB_ROOT: requestedRoot,
+      ...requested,
+      HUB_SPAWN_CODEX: '0'
+    },
     input: options.input
   })
 }

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
 import test from 'node:test'
 import {
   codexSessionHref,
@@ -8,7 +11,7 @@ import {
   sessionFromEnvelope,
   versionParts
 } from '../panel/lib/overview-mapping.mjs'
-import { spawnHub } from './helpers.mjs'
+import { spawnHub, testHubRoot } from './helpers.mjs'
 
 const busyState = {
   hubRoot: 'E:\\hub',
@@ -202,11 +205,17 @@ test('queuedSessionView unwraps the real CLI {ok,action,session} envelope', () =
   assert.equal(codexSessionHref({ ok: true, action: 'chat', session: { id: 'abc', status: 'running' } }), '/codex?id=abc')
 })
 
-test('queuedSessionView reads a real CLI attach --no-spawn envelope', () => {
+test('queuedSessionView reads a real CLI attach --no-spawn envelope', (t) => {
+  const fakeWorktree = fs.mkdtempSync(path.join(testHubRoot, 'recognized-worktree-overview-'))
+  t.after(() => fs.rmSync(fakeWorktree, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(fakeWorktree, 'baloot_client'))
+  fs.writeFileSync(path.join(fakeWorktree, 'AGENTS.md'), '# temporary recognized checkout\n')
+  const initialized = spawnSync('git', ['-C', fakeWorktree, 'init'], { encoding: 'utf8', windowsHide: true })
+  assert.equal(initialized.status, 0, initialized.stderr || initialized.stdout)
   const cli = spawnHub([
     'attach',
     '--worktree',
-    'E:\\ozdqp-cli-attach-probe',
+    fakeWorktree,
     '--intent',
     'unwrap-session-envelope',
     '--no-spawn'
@@ -214,12 +223,14 @@ test('queuedSessionView reads a real CLI attach --no-spawn envelope', () => {
   assert.equal(cli.status, 0, cli.stderr)
   const payload = JSON.parse(cli.stdout)
   assert.equal(payload.ok, true)
-  assert.equal(payload.action, 'attach')
-  assert.ok(payload.session && payload.session.id, 'CLI session.id')
-  assert.equal(sessionFromEnvelope(payload).id, payload.session.id)
+  assert.equal(payload.contractVersion, 1)
+  assert.equal(payload.commandKind, 'attach')
+  assert.equal(payload.data.action, 'attach')
+  assert.ok(payload.data.session && payload.data.session.id, 'CLI data.session.id')
+  assert.equal(sessionFromEnvelope(payload).id, payload.data.session.id)
   const view = queuedSessionView(payload)
   assert.equal(view.label, '已入队')
-  assert.equal(view.id, payload.session.id)
+  assert.equal(view.id, payload.data.session.id)
   assert.equal(view.attachedUnchanged, true)
-  assert.equal(codexSessionHref(payload), `/codex?id=${encodeURIComponent(payload.session.id)}`)
+  assert.equal(codexSessionHref(payload), `/codex?id=${encodeURIComponent(payload.data.session.id)}`)
 })

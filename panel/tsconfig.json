@@ -14,7 +14,7 @@
     "incremental": true,
     "plugins": [{ "name": "next" }],
     "paths": {
-      "@/*": ["../../graft-glass-ui/src/*"]
+      "@/*": ["./vendor/graft-glass-ui/src/*"]
     }
   },
   "include": ["next-env.d.ts", "src/**/*.ts", "src/**/*.tsx", "lib/**/*.mjs", ".next/types/**/*.ts"],

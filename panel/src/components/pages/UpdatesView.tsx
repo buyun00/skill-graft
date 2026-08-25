@@ -36,7 +36,7 @@ export function UpdatesView({
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
       <section className="glass p-5 md:p-6 rounded-[22px]">
-        <SectionHeader title="更新中心" description="state.items · POST /api/analyze · POST /api/decide" />
+        <SectionHeader title="更新中心" description="typed status.items · analyze / decide Application commands" />
         <div className="mb-4">
           <Button size="sm" variant="accent" loading={busy} onClick={onAnalyze}>
             分析排队更新

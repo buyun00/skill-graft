@@ -7,7 +7,7 @@ const config: Config = {
     "./src/**/*.{js,ts,jsx,tsx,mdx}",
     "./lib/**/*.{js,mjs}",
     "./node_modules/graft-glass-ui/src/**/*.{js,ts,jsx,tsx,mdx}",
-    "../../graft-glass-ui/src/**/*.{js,ts,jsx,tsx,mdx}",
+    "./vendor/graft-glass-ui/src/**/*.{js,ts,jsx,tsx,mdx}",
   ],
   theme: {
     extend: {

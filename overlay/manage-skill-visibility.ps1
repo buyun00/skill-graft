@@ -3,15 +3,19 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Workspace,
     [ValidateSet('Disable', 'Restore')]
-    [string]$Mode = 'Disable'
+    [string]$Mode = 'Disable',
+    [Alias('HostRoot')]
+    [string]$PackageRoot,
+    [string]$DataRoot
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HubLib.ps1')
 
-$workspace = Get-NormalizedPath $Workspace
-$hubRoot = Get-HubRoot
+$workspace = Get-GameRepoRoot $Workspace
+$packageRoot = Get-SkillGraftPackageRoot -Worktree $workspace -PackageRoot $PackageRoot
+$hubRoot = Get-SkillGraftDataRoot -DataRoot $DataRoot -FallbackPackageRoot $packageRoot
 $agentSkillsRoot = Join-Path $workspace '.agents\skills'
 $keptAgentSkillNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 @(

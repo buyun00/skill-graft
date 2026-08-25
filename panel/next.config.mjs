@@ -1,16 +1,53 @@
+import crypto from 'node:crypto'
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createRequire } from 'node:module'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const require = createRequire(import.meta.url)
+const vendoredGlassRoot = path.resolve(__dirname, 'vendor/graft-glass-ui')
 
 function glassSrcDir() {
-  try {
-    return path.join(path.dirname(require.resolve('graft-glass-ui/package.json')), 'src')
-  } catch {
-    return path.resolve(__dirname, '../../graft-glass-ui/src')
+  return path.join(vendoredGlassRoot, 'src')
+}
+
+const PANEL_BUILD_INPUTS = [
+  'lib',
+  'src',
+  'vendor',
+  'next.config.mjs',
+  'package-lock.json',
+  'package.json',
+  'postcss.config.mjs',
+  'tailwind.config.ts',
+  'tsconfig.json'
+]
+
+function buildInputFiles(relative, files) {
+  const absolute = path.join(__dirname, relative)
+  const stat = fs.lstatSync(absolute)
+  if (stat.isSymbolicLink()) throw new Error(`panel build input must not be a symbolic link: ${relative}`)
+  if (stat.isFile()) {
+    files.push(relative.replaceAll(path.sep, '/'))
+    return
   }
+  if (!stat.isDirectory()) throw new Error(`unsupported panel build input: ${relative}`)
+  for (const name of fs.readdirSync(absolute).sort()) {
+    buildInputFiles(path.join(relative, name), files)
+  }
+}
+
+export function panelBuildId() {
+  const files = []
+  for (const input of PANEL_BUILD_INPUTS) buildInputFiles(input, files)
+  files.sort()
+  const digest = crypto.createHash('sha256')
+  for (const relative of files) {
+    digest.update(relative, 'utf8')
+    digest.update('\0')
+    digest.update(fs.readFileSync(path.join(__dirname, relative)))
+    digest.update('\0')
+  }
+  return `p4-${digest.digest('hex').slice(0, 32)}`
 }
 
 const isDev = process.env.NODE_ENV !== 'production'
@@ -21,9 +58,11 @@ const nextConfig = {
   trailingSlash: false,
   images: { unoptimized: true },
   transpilePackages: ['graft-glass-ui'],
+  generateBuildId: async () => panelBuildId(),
   webpack: (config) => {
     config.resolve.alias = {
       ...config.resolve.alias,
+      'graft-glass-ui': vendoredGlassRoot,
       '@': glassSrcDir()
     }
     return config

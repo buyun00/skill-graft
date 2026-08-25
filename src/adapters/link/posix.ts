@@ -1,4 +1,4 @@
-import type { FsPort, LinkPort, PathPort } from '../../core/ports.js'
+import type { FsPort, LinkPort, PathPort } from '../host-context.js'
 import { createSharedLinkPort } from './shared.js'
 
 export function createPosixLinkPort(fs: FsPort, pathApi: PathPort, options?: { foldCase?: boolean }): LinkPort {

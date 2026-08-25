@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "types": [],
+    "lib": ["ES2022"]
+  },
+  "include": [
+    "src/contracts/**/*.ts",
+    "src/core/**/*.ts",
+    "src/application/**/*.ts"
+  ]
+}

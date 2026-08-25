@@ -1,4 +1,4 @@
-import type { FsPort, LinkPort, PathPort } from '../../core/ports.js'
+import type { FsPort, LinkPort, PathPort } from '../host-context.js'
 import { createPosixLinkPort } from './posix.js'
 import { createWinLinkPort } from './win.js'
 

@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { DirEntry, FileId, FsPort } from '../core/ports.js'
+import type { DirEntry, FileId, FsPort } from './host-context.js'
 
 export function createNodeFs(): FsPort {
   return {
@@ -17,6 +17,13 @@ export function createNodeFs(): FsPort {
     isFile(target) {
       try {
         return fs.statSync(target).isFile()
+      } catch {
+        return false
+      }
+    },
+    isSymbolicLink(target) {
+      try {
+        return fs.lstatSync(target).isSymbolicLink()
       } catch {
         return false
       }

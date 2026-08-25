@@ -1,6 +1,7 @@
 "use client";
 
 import { Button, SectionHeader, StatusPill } from "graft-glass-ui/src/components";
+import { WorkspaceOperations } from "./WorkspaceOperations";
 
 type Workspace = {
   id: string;
@@ -33,8 +34,9 @@ export function WorkspacesView({
   onDetach: (path: string) => void;
 }) {
   return (
+    <div>
     <section className="glass p-5 md:p-6 rounded-[22px]">
-      <SectionHeader title="工作区" description="GET /api/worktrees · attach/detach 是会话，返回后显示已入队" />
+      <SectionHeader title="工作区" description="typed listWorktrees · attach/detach 是 Application 会话" />
       <div className="space-y-2">
         {items.length === 0 ? <p className="text-[13.5px] text-ink/45">没有工作树。</p> : null}
         {items.map((item) => {
@@ -78,5 +80,7 @@ export function WorkspacesView({
         })}
       </div>
     </section>
+    {selectedPath ? <WorkspaceOperations worktree={selectedPath} /> : null}
+    </div>
   );
 }
