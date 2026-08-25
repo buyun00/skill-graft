@@ -5,6 +5,7 @@ export {
   createHubApplication,
   createMemoryRequestLedger,
   createMemorySessions,
+  createSessionTask,
   isApplicationSuccess
 } from './application/index.js'
 export type {
@@ -18,6 +19,7 @@ export type {
   RequestLedgerEntry,
   RequestLedgerPort,
   SessionPort,
+  SessionCancelRequest,
   SessionRunnerCancelRequest,
   SessionRunnerEventsRequest,
   SessionRunnerPort,

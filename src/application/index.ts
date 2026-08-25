@@ -1,4 +1,5 @@
 export { createHubApplication, isApplicationSuccess } from './hub-application.js'
+export { createSessionTask } from './session-task.js'
 export {
   createMemoryApplicationTransactions,
   createMemoryRequestLedger,
@@ -27,6 +28,7 @@ export type {
   AttachCompletionOutcome,
   AttachCompletionRequest,
   SessionPort,
+  SessionCancelRequest,
   SessionRunnerCancelRequest,
   SessionRunnerEventsRequest,
   SessionRunnerPort,
@@ -41,6 +43,7 @@ export type {
   WorktreeInspection,
   SnapshotContentPort
 } from './ports.js'
+export type { CreateSessionTaskInput } from './session-task.js'
 export type {
   MaterializationRecordPort,
   MaterializationRecoveryReport,

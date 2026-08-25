@@ -196,6 +196,8 @@ export interface LegacyDetachPort {
 }
 
 export type SessionStartRequest = {
+  /** Application-owned, locator-free business task. */
+  task: SessionTask
   kind: SessionKind
   /** Host locator used only to launch the session; it must not be exposed as target.id. */
   locator?: {
@@ -210,8 +212,15 @@ export type SessionStartRequest = {
 
 export type SessionResumeRequest = {
   sessionId: string
+  /** Updated Application-owned task for this continuation attempt. */
+  task: SessionTask
   message: string
   options?: SessionRequestOptions
+}
+
+export type SessionCancelRequest = {
+  sessionId: string
+  reason?: string
 }
 
 export type SessionRunnerStartRequest = {
@@ -280,6 +289,7 @@ export interface SessionPort {
   get(sessionId: string): MaybePromise<SessionView | null>
   start(input: SessionStartRequest): MaybePromise<SessionView>
   resume(input: SessionResumeRequest): MaybePromise<SessionView>
+  cancel(input: SessionCancelRequest): MaybePromise<SessionView>
   reap(sessionIds?: readonly string[]): MaybePromise<readonly SessionView[]>
   /**
    * Conditionally persists an attach completion in the active Hub write transaction.

@@ -103,6 +103,7 @@ import type {
 } from './ports.js'
 import type { HubStateRepositoryPort } from './use-case-ports.js'
 import type { P3ApplicationPorts } from './materialize-port.js'
+import { createSessionTask } from './session-task.js'
 import {
   APPLICATION_TRANSACTION_ERROR_CODES,
   isApplicationTransactionError,
@@ -301,7 +302,7 @@ function failureEnvelope(
 
 type RuntimeRecord = Record<string, unknown>
 
-const SESSION_STATUSES = new Set(['queued', 'running', 'waiting', 'completed', 'failed', 'cancelled'])
+const SESSION_STATUSES = new Set(['queued', 'running', 'awaiting', 'waiting', 'completed', 'failed', 'cancelled'])
 const DECISION_ACTIONS = new Set(['adopt', 'merge', 'reject'])
 const LEGACY_SOURCE_POLICIES = new Set(['requireMatch', 'preferLibrary', 'promoteFromWorktree'])
 const LEGACY_VISIBILITY_MODES = new Set(['disable', 'preserve'])
@@ -522,6 +523,11 @@ function validatePayload(command: HubCommand) {
       requireString(value, 'message')
       validateRunner(value.runner)
       return
+    case 'cancelSession':
+      assertAllowedFields(value, ['sessionId', 'reason'])
+      requireIdentifier(value, 'sessionId')
+      optionalString(value, 'reason')
+      return
     case 'reapSessions':
       assertAllowedFields(value, ['sessionIds'])
       if (value.sessionIds !== undefined && (!Array.isArray(value.sessionIds) || value.sessionIds.some((item) => !validIdentifier(item)))) {
@@ -650,7 +656,7 @@ function analyzeCompletionFact(session: SessionView): AnalyzeCompletionFact | nu
   let outcome: AnalyzeCompletionFact['outcome'] = 'pending'
   if (session.status === 'cancelled') outcome = 'cancelled'
   else if (session.status === 'failed' || session.exitCode != null && session.exitCode !== 0) outcome = 'failed'
-  else if ((session.status === 'waiting' || session.status === 'completed') && session.exitCode === 0) outcome = 'succeeded'
+  else if ((isAwaitingSession(session) || session.status === 'completed') && session.exitCode === 0) outcome = 'succeeded'
   return {
     sessionId: session.id,
     outcome,
@@ -707,17 +713,37 @@ function sessionLocator(kind: SessionKind, command: HubCommand): SessionStartReq
   return undefined
 }
 
+function isAwaitingSession(session: Pick<SessionView, 'status'>): boolean {
+  return session.status === 'awaiting' || session.status === 'waiting'
+}
+
+function taskTarget(kind: SessionKind, command: HubCommand, target?: SessionTarget): SessionTarget {
+  if (target) return target
+  if (kind === 'edit') return { kind: 'skill', id: 'selected-skill' }
+  return sessionTarget(kind, command)
+}
+
 async function startSession(
+  runtime: ApplicationRuntimePort,
   sessions: SessionPort,
   kind: SessionKind,
   command: HubCommand,
   inboxIds?: readonly string[],
   target?: SessionTarget
 ) {
+  const resolvedTarget = taskTarget(kind, command, target)
+  const task = createSessionTask({
+    id: runtime.nextId('session'),
+    kind,
+    target: resolvedTarget,
+    intent: 'intent' in command ? command.intent : undefined,
+    inboxIds
+  })
   const request: SessionStartRequest = {
+    task,
     kind,
     locator: sessionLocator(kind, command),
-    target: target || (sessionLocator(kind, command) ? undefined : sessionTarget(kind, command)),
+    target: resolvedTarget,
     intent: 'intent' in command ? command.intent : undefined,
     inboxIds,
     options: 'runner' in command ? command.runner : undefined
@@ -781,7 +807,7 @@ async function authorizeFirstAttach(
     || session.kind !== 'attach'
     || session.target?.kind !== 'worktree'
     || session.target.id !== targetId
-    || session.status !== 'waiting'
+    || !isAwaitingSession(session)
     || session.exitCode !== 0) {
     return false
   }
@@ -1499,7 +1525,7 @@ async function authorizeClaimSession(
     || session.kind !== 'attach'
     || session.target?.kind !== 'worktree'
     || session.target.id !== identity.worktreeId
-    || session.status !== 'waiting'
+    || !isAwaitingSession(session)
     || session.exitCode !== 0) {
     throw new ApplicationFault(
       'FIRST_ATTACH_SESSION_REQUIRED',
@@ -1701,7 +1727,7 @@ async function planAttachCompletion(
       proof: { ...expected, completedAt: session.attachCompletion.completedAt }
     }
   }
-  if (session.status !== 'waiting' || session.exitCode !== 0) {
+  if (!isAwaitingSession(session) || session.exitCode !== 0) {
     throw new ApplicationFault(
       'FIRST_ATTACH_SESSION_REQUIRED',
       'sync completion requires a successful waiting attach session'
@@ -2416,7 +2442,9 @@ async function executeHandler(
   }
   switch (command.kind) {
     case 'status': {
-      const sessionViews = (await sessions.list()).filter((item) => item.status === 'queued' || item.status === 'running')
+      const sessionViews = (await sessions.list()).filter((item) => item.status === 'queued'
+        || item.status === 'running'
+        || isAwaitingSession(item))
       const facts = await queries.readStatusFacts()
       const skills = projectSkillInventory(await queries.listSkillFacts())
       return projectHubStatus({ facts, skills, sessions: sessionViews })
@@ -2588,9 +2616,17 @@ async function executeHandler(
       const ingested = await executeIngestUseCase(runtime, inboxUseCases, command)
       let session: SessionView | undefined
       if (!command.dryRun && command.dispatch && ingested.created > 0) {
+        const target = { kind: 'hub' as const, id: 'hub' }
         session = await sessions.start({
+          task: createSessionTask({
+            id: runtime.nextId('session'),
+            kind: 'analyze',
+            target,
+            intent: 'Analyze queued inbox skill updates',
+            inboxIds: ingested.items.map((item) => item.id)
+          }),
           kind: 'analyze',
-          target: { kind: 'hub', id: 'hub' },
+          target,
           intent: 'Analyze queued inbox skill updates',
           inboxIds: ingested.items.map((item) => item.id),
           options: { start: false }
@@ -2620,6 +2656,7 @@ async function executeHandler(
     case 'attach': {
       const worktree = await validateAttach(legacyAttach, command.worktree)
       const session = await startSession(
+        runtime,
         sessions,
         'attach',
         { ...command, worktree: worktree.resolvedPath },
@@ -2631,6 +2668,7 @@ async function executeHandler(
     case 'detach': {
       const worktree = await validateDetach(legacyDetach, command.worktree)
       const session = await startSession(
+        runtime,
         sessions,
         'detach',
         { ...command, worktree: worktree.resolvedPath },
@@ -2640,11 +2678,11 @@ async function executeHandler(
       return { action: 'detach', session: commandSessionOutcome(session), applied: null }
     }
     case 'edit': {
-      const session = await startSession(sessions, 'edit', command)
+      const session = await startSession(runtime, sessions, 'edit', command)
       return { action: 'edit', session: commandSessionOutcome(session), applied: null }
     }
     case 'chat': {
-      const session = await startSession(sessions, 'chat', command)
+      const session = await startSession(runtime, sessions, 'chat', command)
       return { action: 'chat', session: commandSessionOutcome(session), applied: null }
     }
     case 'analyze': {
@@ -2655,16 +2693,39 @@ async function executeHandler(
       if (command.inboxId && !state.items.some((item) => item.id === command.inboxId)) {
         throw new ApplicationFault('NOT_FOUND', 'inbox item not found')
       }
-      const session = await startSession(sessions, 'analyze', command, inboxIds)
+      const session = await startSession(runtime, sessions, 'analyze', command, inboxIds)
       businessEvents.push(...await applyAnalyzeCompletion(runtime, inboxUseCases, command, session))
       return { action: 'analyze', session: commandSessionOutcome(session), applied: null }
     }
     case 'resumeSession': {
       if (!command.message?.trim()) throw new ApplicationFault('INVALID_ARGUMENT', 'message is required')
-      if (!await sessions.get(command.sessionId)) throw new ApplicationFault('NOT_FOUND', 'session not found')
-      const session = await sessions.resume({ sessionId: command.sessionId, message: command.message, options: command.runner })
+      const existing = await sessions.get(command.sessionId)
+      if (!existing) throw new ApplicationFault('NOT_FOUND', 'session not found')
+      const session = await sessions.resume({
+        sessionId: command.sessionId,
+        task: createSessionTask({
+          id: existing.id,
+          kind: existing.kind,
+          target: existing.target || { kind: 'hub', id: 'hub' },
+          intent: command.message,
+          inboxIds: existing.inboxIds
+        }),
+        message: command.message,
+        options: command.runner
+      })
       businessEvents.push(...await applyAnalyzeCompletion(runtime, inboxUseCases, command, session))
       return { action: 'resumeSession', session: commandSessionOutcome(session), applied: null }
+    }
+    case 'cancelSession': {
+      const existing = await sessions.get(command.sessionId)
+      if (!existing) throw new ApplicationFault('NOT_FOUND', 'session not found')
+      const terminal = existing.status === 'completed'
+        || existing.status === 'failed'
+        || existing.status === 'cancelled'
+      const session = terminal
+        ? existing
+        : await sessions.cancel({ sessionId: command.sessionId, reason: command.reason?.trim() || undefined })
+      return { action: 'cancelSession', session: commandSessionOutcome(session) }
     }
     case 'reapSessions': {
       const reaped = await sessions.reap(command.sessionIds)
