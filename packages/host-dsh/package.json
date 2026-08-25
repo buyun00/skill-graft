@@ -1,0 +1,40 @@
+{
+  "name": "@ozdqp/skill-graft-dsh",
+  "description": "Independent DeepSeek Harness host and browser client for Skill Graft",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "build-manifest.json",
+    "cordis.patch.yml",
+    "lib/index.js",
+    "lib/client.js",
+    "overlay/README.md",
+    "overlay/hooks/.keep"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection"
+      ],
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "license": "UNLICENSED"
+}

@@ -1,0 +1,1 @@
+DSH checkout hooks are intentionally empty; sync is an explicit Application command.
