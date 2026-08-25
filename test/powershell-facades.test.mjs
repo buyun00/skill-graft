@@ -131,8 +131,8 @@ function gitAvailable() {
   return spawnSync('git', ['--version'], { encoding: 'utf8', windowsHide: true }).status === 0
 }
 
-function runGit(cwd, args) {
-  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true })
+function runGit(cwd, args, env = process.env) {
+  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true, env })
   assert.equal(result.status, 0, result.stderr)
   return result.stdout.trim()
 }
@@ -295,7 +295,8 @@ test('every shipped PowerShell entry keeps review decisions behind typed sg comm
   ].map((file) => fs.readFileSync(file, 'utf8')).join('\n')
   assert.doesNotMatch(liveEntrySources, /(?:analyze-remote-skill-update|dispatch-hub-codex|promote-inbox|start-codex-session|manage-skill-visibility)\.ps1/i)
   assert.match(liveEntrySources, /application\.execute/)
-  assert.match(liveEntrySources, /node "\$cli" ingest/)
+  assert.match(liveEntrySources, /node "\$cli" "\$@" --contract-v1 --request-id "\$request_id"/)
+  assert.match(liveEntrySources, /run_hook_command "\$request_id" ingest --game-repo "\$game" --dispatch/)
 
   const attachPrompt = fs.readFileSync(path.join(overlayRoot, 'prompts', 'attach.txt'), 'utf8')
   const detachPrompt = fs.readFileSync(path.join(overlayRoot, 'prompts', 'detach.txt'), 'utf8')
@@ -499,7 +500,9 @@ test('live Git hooks launch package CLI without rebinding the independent data r
   fs.writeFileSync(cli, [
     "const fs = require('node:fs')",
     "const stdin = fs.readFileSync(0, 'utf8')",
-    "fs.appendFileSync(process.env.HOOK_FAKE_LOG, JSON.stringify({ args: process.argv.slice(2), stdin, packageEntry: __filename, skillGraftHome: process.env.SKILL_GRAFT_HOME || null, hubRoot: process.env.HUB_ROOT || null }) + '\\n')",
+    "const args = process.argv.slice(2)",
+    "fs.appendFileSync(process.env.HOOK_FAKE_LOG, JSON.stringify({ args, stdin, packageEntry: __filename, skillGraftHome: process.env.SKILL_GRAFT_HOME || null, hubRoot: process.env.HUB_ROOT || null }) + '\\n')",
+    "if (process.env.HOOK_FAKE_FAIL_BUSINESS === '1') process.exit(args[0] === 'hook-diagnostic' ? 91 : 17)",
     ''
   ].join('\n'))
 
@@ -533,8 +536,12 @@ test('live Git hooks launch package CLI without rebinding the independent data r
   const repair = calls.find((call) => call.args[0] === 'repair-links')
   const ingest = calls.find((call) => call.args[0] === 'ingest'
     && call.stdin.includes('refs/heads/transaction-probe'))
-  assert.deepEqual(repair.args, ['repair-links', '--worktree', canonicalWorktree])
-  assert.deepEqual(ingest.args, ['ingest', '--game-repo', canonicalWorktree, '--dispatch'])
+  assert.deepEqual(repair.args.slice(0, 3), ['repair-links', '--worktree', canonicalWorktree])
+  assert.deepEqual(repair.args.slice(3, 5), ['--contract-v1', '--request-id'])
+  assert.match(repair.args[5], /^hook-post-checkout-repair-[0-9]+-[0-9]+$/)
+  assert.deepEqual(ingest.args.slice(0, 4), ['ingest', '--game-repo', canonicalWorktree, '--dispatch'])
+  assert.deepEqual(ingest.args.slice(4, 6), ['--contract-v1', '--request-id'])
+  assert.match(ingest.args[6], /^hook-reference-transaction-[0-9]+-[0-9]+$/)
   assert.match(ingest.stdin, /refs\/heads\/transaction-probe/)
   for (const call of [repair, ingest]) {
     assert.equal(path.resolve(call.packageEntry), path.resolve(cli))
@@ -563,6 +570,11 @@ test('live Git hooks launch package CLI without rebinding the independent data r
     assert.equal(path.resolve(call.hubRoot), path.resolve(dataRoot))
   }
 
+  const diagnosticsRoot = path.resolve(runGit(worktree, [
+    'rev-parse', '--path-format=absolute', '--git-path', 'skill-graft/hook-diagnostics-v1'
+  ]))
+  assert.equal(fs.existsSync(diagnosticsRoot), false, 'successful hook commands must not create diagnostics')
+
   fs.rmSync(log, { force: true })
   const conflictEnv = {
     ...configuredEnv,
@@ -574,4 +586,84 @@ test('live Git hooks launch package CLI without rebinding the independent data r
   })
   assert.equal(conflictCheckout.status, 0, conflictCheckout.stderr)
   assert.equal(fs.existsSync(log), false, 'conflicting data-root aliases must make hooks fail closed before CLI launch')
+
+  const readDiagnostics = () => {
+    if (!fs.existsSync(diagnosticsRoot)) return []
+    return fs.readdirSync(diagnosticsRoot)
+      .filter((name) => /^diag-[0-9]{13}-[a-f0-9]{16}\.json$/.test(name))
+      .sort()
+      .map((name) => ({ name, raw: fs.readFileSync(path.join(diagnosticsRoot, name), 'utf8') }))
+  }
+  const assertDiagnostic = (entry, expectedCode) => {
+    const value = JSON.parse(entry.raw)
+    assert.deepEqual(Object.keys(value), [
+      'schema', 'schemaVersion', 'at', 'hook', 'phase', 'code', 'exitCode', 'requestIdHash'
+    ])
+    assert.equal(value.schema, 'skill-graft.hook-diagnostic.v1')
+    assert.equal(value.schemaVersion, 1)
+    assert.ok(value.hook === 'post-checkout' || value.hook === 'reference-transaction')
+    assert.ok(value.phase === 'launch' || value.phase === 'command')
+    assert.equal(value.code, expectedCode)
+    assert.equal(value.requestIdHash, null)
+    assert.equal(entry.raw.includes(root), false)
+    assert.equal(entry.raw.includes(canonicalWorktree), false)
+    assert.equal(entry.raw.includes('refs/heads/'), false)
+  }
+
+  fs.rmSync(log, { force: true })
+  const failureEnv = { ...env, HOOK_FAKE_FAIL_BUSINESS: '1' }
+  const failedCheckout = spawnSync('git', ['-C', worktree, 'checkout', '--quiet', '-b', 'hook-command-failure'], {
+    encoding: 'utf8', env: failureEnv, windowsHide: true
+  })
+  assert.equal(failedCheckout.status, 0, failedCheckout.stderr)
+  assert.equal(failedCheckout.stdout, '')
+  const failedUpdate = spawnSync('git', [
+    '-C', worktree, 'update-ref', 'refs/heads/hook-command-failure-transaction', 'HEAD'
+  ], { encoding: 'utf8', env: failureEnv, windowsHide: true })
+  assert.equal(failedUpdate.status, 0, failedUpdate.stderr)
+  assert.equal(failedUpdate.stdout, '')
+  const failureCalls = fs.readFileSync(log, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line))
+  assert.ok(failureCalls.some((call) => call.args[0] === 'hook-diagnostic'))
+  const commandFailures = readDiagnostics().filter((entry) => JSON.parse(entry.raw).code === 'COMMAND_FAILED')
+  assert.ok(commandFailures.length >= 2, 'both hook kinds must persist command failures')
+  for (const entry of commandFailures) {
+    assertDiagnostic(entry, 'COMMAND_FAILED')
+    assert.equal(JSON.parse(entry.raw).exitCode, 17)
+  }
+
+  fs.renameSync(cli, `${cli}.missing`)
+  const missingCliCheckout = spawnSync('git', ['-C', worktree, 'checkout', '--quiet', '-b', 'hook-cli-missing'], {
+    encoding: 'utf8', env, windowsHide: true
+  })
+  assert.equal(missingCliCheckout.status, 0, missingCliCheckout.stderr)
+  const cliMissing = readDiagnostics().filter((entry) => JSON.parse(entry.raw).code === 'CLI_MISSING')
+  assert.ok(cliMissing.length >= 1)
+  for (const entry of cliMissing) assertDiagnostic(entry, 'CLI_MISSING')
+  fs.renameSync(`${cli}.missing`, cli)
+
+  if (process.platform === 'win32') {
+    const gitExecutable = spawnSync('where.exe', ['git'], { encoding: 'utf8', windowsHide: true }).stdout
+      .split(/\r?\n/).find(Boolean)
+    assert.ok(gitExecutable)
+    const gitRoot = path.resolve(path.dirname(gitExecutable), '..')
+    const noNodePath = [
+      path.dirname(gitExecutable),
+      path.join(gitRoot, 'mingw64', 'bin'),
+      path.join(gitRoot, 'usr', 'bin'),
+      path.join(process.env.SystemRoot || 'C:\\Windows', 'System32')
+    ].join(path.delimiter)
+    const noNodeEnv = Object.fromEntries(Object.entries(env).filter(([name]) => name.toUpperCase() !== 'PATH'))
+    noNodeEnv.PATH = noNodePath
+    const noNodeCheckout = spawnSync(gitExecutable, [
+      '-C', worktree, 'checkout', '--quiet', '-b', 'hook-node-unavailable'
+    ], { encoding: 'utf8', env: noNodeEnv, windowsHide: true })
+    assert.equal(noNodeCheckout.status, 0, noNodeCheckout.stderr)
+    const nodeUnavailable = readDiagnostics().filter((entry) => JSON.parse(entry.raw).code === 'NODE_UNAVAILABLE')
+    assert.ok(nodeUnavailable.length >= 1)
+    for (const entry of nodeUnavailable) assertDiagnostic(entry, 'NODE_UNAVAILABLE')
+  }
+
+  const finalDiagnostics = readDiagnostics()
+  assert.ok(finalDiagnostics.length <= 32)
+  assert.ok(finalDiagnostics.reduce((total, entry) => total + Buffer.byteLength(entry.raw), 0) <= 64 * 1024)
 })

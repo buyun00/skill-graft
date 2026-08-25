@@ -52,6 +52,7 @@ export function HubApp() {
   const [state, setState] = useState<Record<string, unknown> | null>(null);
   const [worktrees, setWorktrees] = useState<Record<string, unknown> | null>(null);
   const [daemon, setDaemon] = useState<Record<string, unknown> | null>(null);
+  const [diagnostics, setDiagnostics] = useState<Record<string, unknown> | null>(null);
   const [sessionsPayload, setSessionsPayload] = useState<{ sessions?: unknown[] } | null>(null);
   const [sessionsReachable, setSessionsReachable] = useState(false);
 
@@ -74,16 +75,21 @@ export function HubApp() {
     setLoading(true);
     setError("");
     try {
-      const [healthValue, stateValue, worktreesValue, daemonValue] = await Promise.all([
+      const [healthValue, stateValue, worktreesValue, diagnosticsValue] = await Promise.all([
         api.getHealth().catch(() => ({ ok: false })),
         api.getState(),
         api.getWorktrees(),
-        api.getDaemon().catch(() => ({ ok: false })),
+        api.getDiagnostics().catch(() => ({ ok: false })),
       ]);
       setHealth(healthValue);
       setState(stateValue);
       setWorktrees(worktreesValue);
-      setDaemon(daemonValue);
+      setDiagnostics(diagnosticsValue);
+      setDaemon(
+        diagnosticsValue && typeof diagnosticsValue.daemon === "object"
+          ? diagnosticsValue.daemon as Record<string, unknown>
+          : { ok: false },
+      );
       try {
         const sessionsValue = await api.getSessions();
         setSessionsPayload(sessionsValue);
@@ -268,7 +274,7 @@ export function HubApp() {
 
   const inner = (() => {
     if (loading && !state) {
-      return <div className="glass rounded-[22px] p-8 text-ink/45">正在读取 /api/state…</div>;
+      return <div className="glass rounded-[22px] p-8 text-ink/45">正在执行 typed status…</div>;
     }
     if (error && !state) {
       return <div className="glass rounded-[22px] p-8 text-orange-600">{error}</div>;
@@ -353,6 +359,7 @@ export function HubApp() {
           hubRoot={overview.hubRoot}
           gameRepo={overview.gameRepo}
           daemon={daemon}
+          diagnostics={diagnostics}
         />
       );
     }

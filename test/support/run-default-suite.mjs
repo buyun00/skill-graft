@@ -345,7 +345,11 @@ const files = requested.length > 0
     .map((name) => path.join('test', name))
 let tests = { status: 1, stdout: '', stderr: '' }
 if (build.status === 0) {
-  tests = runNode(['--test', ...files], env)
+  // P4 lifecycle and daemon suites deliberately share the one machine-level
+  // lifecycle mutex. Running separate test files concurrently turns that
+  // production exclusion boundary into fixture EADDRINUSE noise, so the
+  // repository default gate must serialize files just like installed-real.
+  tests = runNode(['--test', '--test-concurrency=1', ...files], env)
   writeResult(tests)
 }
 

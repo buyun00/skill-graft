@@ -451,8 +451,9 @@ test('repairLegacy restores a broken resident skill junction on an attached fixt
 })
 
 test('Application applies a reaped analyze completion without Local mutating inbox state', async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-analyze-'))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-analyze-'))
+  const dir = path.join(parent, 'data')
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
   fs.mkdirSync(path.join(dir, 'skill-review', 'history'), { recursive: true })
   fs.mkdirSync(path.join(dir, 'skills', 'inbox', 'smoke-analyze'), { recursive: true })
   fs.writeFileSync(path.join(dir, 'skills', 'inbox', 'smoke-analyze', 'SKILL.md'), '# smoke\n')
@@ -496,8 +497,9 @@ test('Application applies a reaped analyze completion without Local mutating inb
 })
 
 test('ingest empty payload is a no-op and does not need a game repo', async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-ingest-empty-'))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-ingest-empty-'))
+  const dir = path.join(parent, 'data')
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
   const result = await applicationFor(createHub(dir)).execute(command('ingest', { payload: '' }))
   assert.equal(result.ok, true, JSON.stringify(result))
   assert.equal(result.data.created, 0)
@@ -582,10 +584,11 @@ test('merge and reject do not create game-tree skill links', async (t) => {
 
 test('ingest copies official skill files into an isolated hub inbox', async (t) => {
   const game = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-game-core-ingest-'))
-  const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-core-ingest-'))
+  const hubParent = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-core-ingest-'))
+  const hubDir = path.join(hubParent, 'data')
   t.after(() => {
     fs.rmSync(game, { recursive: true, force: true })
-    fs.rmSync(hubDir, { recursive: true, force: true })
+    fs.rmSync(hubParent, { recursive: true, force: true })
   })
   const run = (args) => spawnSync('git', ['-C', game, ...args], { encoding: 'utf8', windowsHide: true })
   run(['init'])

@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { onRequest } from '../server/index.mjs'
+import { probeDaemonApiHealth } from '../dist/control/daemon.js'
+import { openLocalHost } from '../dist/local/create-local-host.js'
+import { createHttpCapability, createHttpServer, startApiListeners } from '../server/index.mjs'
 import { hubRoot, spawnHub } from './helpers.mjs'
 import { createTemporaryTestHub } from './support/test-hub.mjs'
 
@@ -32,13 +35,19 @@ function samePath(left, right) {
 }
 
 async function listenQueryServer() {
-  const server = http.createServer(onRequest)
+  const host = await openLocalHost({
+    packageRoot: hubRoot,
+    dataRoot: process.env.SKILL_GRAFT_HOME || process.env.HUB_ROOT || hubRoot,
+    hostId: 'http-query-test'
+  })
+  const transport = createHttpServer({ host })
+  const { server } = transport
   await new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', resolve)
   })
   const address = server.address()
-  return { server, base: `http://127.0.0.1:${address.port}` }
+  return { server, transport, base: `http://127.0.0.1:${address.port}` }
 }
 
 async function getJson(base, route) {
@@ -47,6 +56,129 @@ async function getJson(base, route) {
   assert.equal(res.ok, true, `${route} ${res.status} ${text}`)
   assert.ok(text.length > 0, `${route} empty body`)
   return JSON.parse(text)
+}
+
+test('daemon HTTP health binds the caller-provided startup epoch', async (t) => {
+  const daemonEpoch = '11111111-1111-4111-8111-111111111111'
+  const host = await openLocalHost({
+    packageRoot: hubRoot,
+    dataRoot: process.env.SKILL_GRAFT_HOME || process.env.HUB_ROOT || hubRoot,
+    hostId: 'http-daemon-epoch-test'
+  })
+  const transport = createHttpServer({ host, daemonEpoch })
+  t.after(async () => {
+    await transport.close()
+  })
+  await new Promise((resolve, reject) => {
+    transport.server.once('error', reject)
+    transport.server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = transport.server.address()
+  assert.ok(address && typeof address === 'object')
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/health`)
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('x-skill-graft-daemon-epoch'), daemonEpoch)
+
+  assert.deepEqual(await probeDaemonApiHealth(address.port), {
+    state: 'exact',
+    epochId: daemonEpoch,
+    packageRoot: path.resolve(host.packageRoot),
+    dataRoot: path.resolve(host.dataRoot)
+  })
+})
+
+test('daemon API health probe classifies explicit response defects as foreign', async (t) => {
+  const daemonEpoch = '22222222-2222-4222-8222-222222222222'
+  const packageRoot = path.resolve(hubRoot)
+  const dataRoot = path.resolve(process.env.SKILL_GRAFT_HOME || process.env.HUB_ROOT || hubRoot)
+  const authorityHeaders = {
+    'Content-Type': 'application/json',
+    'X-Skill-Graft-Daemon-Epoch': daemonEpoch,
+    'X-Skill-Graft-Package-Root': encodeURIComponent(packageRoot),
+    'X-Skill-Graft-Data-Root': encodeURIComponent(dataRoot)
+  }
+  let reply = { status: 200, headers: authorityHeaders, body: JSON.stringify({ ok: true }) }
+  let lastConnection = ''
+  const server = http.createServer((request, response) => {
+    lastConnection = request.headers.connection || ''
+    response.writeHead(reply.status, reply.headers)
+    response.end(reply.body)
+  })
+  t.after(() => new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve())
+  }))
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  assert.ok(address && typeof address === 'object')
+
+  const cases = [
+    {
+      name: 'non-success HTTP status',
+      value: { status: 503, headers: authorityHeaders, body: JSON.stringify({ ok: true }) }
+    },
+    {
+      name: 'malformed JSON body',
+      value: { status: 200, headers: authorityHeaders, body: '{' }
+    },
+    {
+      name: 'non-healthy body',
+      value: { status: 200, headers: authorityHeaders, body: JSON.stringify({ ok: false }) }
+    },
+    {
+      name: 'missing authority header',
+      value: {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ok: true })
+      }
+    },
+    {
+      name: 'invalid daemon epoch',
+      value: {
+        status: 200,
+        headers: { ...authorityHeaders, 'X-Skill-Graft-Daemon-Epoch': 'not-an-epoch' },
+        body: JSON.stringify({ ok: true })
+      }
+    },
+    {
+      name: 'relative package root',
+      value: {
+        status: 200,
+        headers: { ...authorityHeaders, 'X-Skill-Graft-Package-Root': encodeURIComponent('relative/package') },
+        body: JSON.stringify({ ok: true })
+      }
+    },
+    {
+      name: 'malformed data root encoding',
+      value: {
+        status: 200,
+        headers: { ...authorityHeaders, 'X-Skill-Graft-Data-Root': '%ZZ' },
+        body: JSON.stringify({ ok: true })
+      }
+    }
+  ]
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      reply = entry.value
+      assert.deepEqual(await probeDaemonApiHealth(address.port), { state: 'foreign' })
+      assert.equal(lastConnection, 'close')
+    })
+  }
+})
+
+test('daemon API health probe keeps an unreachable connection unknown', async () => {
+  const port = await reserveLoopbackPort()
+  assert.deepEqual(await probeDaemonApiHealth(port, 250), { state: 'unknown' })
+})
+
+function commandData(payload) {
+  return payload?.contractVersion === 1 && Object.hasOwn(payload, 'data')
+    ? payload.data
+    : payload
 }
 
 async function postJson(base, route, body, headers = {}) {
@@ -59,6 +191,88 @@ async function postJson(base, route, body, headers = {}) {
   assert.equal(res.ok, true, `${route} ${res.status} ${text}`)
   assert.ok(text.length > 0, `${route} empty body`)
   return JSON.parse(text)
+}
+
+async function requestHttp(base, options = {}) {
+  const target = new URL(base)
+  const body = options.body == null ? null : String(options.body)
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: target.hostname,
+      port: target.port,
+      method: options.method || 'GET',
+      path: options.path || '/',
+      headers: {
+        ...(body == null ? {} : { 'Content-Length': Buffer.byteLength(body) }),
+        ...(options.headers || {})
+      }
+    }, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => resolve({
+        status: res.statusCode,
+        headers: res.headers,
+        body: Buffer.concat(chunks).toString('utf8')
+      }))
+    })
+    req.once('error', reject)
+    if (body != null) req.write(body)
+    req.end()
+  })
+}
+
+async function listenTransport(transport) {
+  await listenTransportAt(transport, 0, '127.0.0.1')
+  const address = transport.server.address()
+  return `http://127.0.0.1:${address.port}`
+}
+
+async function listenTransportAt(transport, port, bindHost) {
+  await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      transport.server.off('error', onError)
+      transport.server.off('listening', onListening)
+    }
+    const onError = (error) => {
+      cleanup()
+      reject(error)
+    }
+    const onListening = () => {
+      cleanup()
+      resolve()
+    }
+    transport.server.once('error', onError)
+    transport.server.once('listening', onListening)
+    try {
+      transport.server.listen(port, bindHost)
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
+  })
+}
+
+function fakeHost(execute, options = {}) {
+  let sequence = 0
+  return {
+    packageRoot: options.packageRoot || hubRoot,
+    dataRoot: options.dataRoot || hubRoot,
+    hostId: options.hostId || 'http-fake-host',
+    localSessions: {
+      needsReap: () => false,
+      readLog: (id) => options.readLog?.(id) || ''
+    },
+    commandMeta(transport, requestId) {
+      sequence += 1
+      return {
+        contractVersion: 1,
+        requestId: requestId || `fake-http-${sequence}`,
+        hostId: this.hostId,
+        transport
+      }
+    },
+    application: { execute }
+  }
 }
 
 function fileFingerprint(file) {
@@ -176,9 +390,18 @@ syncBuiltinESMExports()
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
 
+  const panel = await fetch(`${base}/`)
+  const capabilityCookie = String(panel.headers.get('set-cookie') || '').split(';', 1)[0]
+  if (!panel.ok || !capabilityCookie) {
+    await stopOwnedChild(child)
+    fs.rmSync(spyRoot, { recursive: true, force: true })
+    throw new Error(`HTTP server did not issue the panel capability cookie\n${stdout.join('')}\n${stderr.join('')}`)
+  }
+
   return {
     base,
     child,
+    capabilityCookie,
     marker,
     output: () => `${stdout.join('')}\n${stderr.join('')}`,
     async stop() {
@@ -253,7 +476,8 @@ test('HTTP business handlers use one in-process Application and never the CLI in
   assert.doesNotMatch(source, /\brunHub\b/)
   assert.doesNotMatch(source, /\bcliPath\b/)
   assert.doesNotMatch(source, /dist[\\/]control[\\/]cli\.js/)
-  assert.match(source, /createLocalHost/)
+  assert.match(source, /openLocalHost/)
+  assert.match(source, /export function createHttpServer/)
   assert.match(source, /host\.application\.execute\(command\)/)
   assert.match(source, /localSessions\?\.needsReap/)
   assert.match(source, /const result = await executeTyped\(typedCommand/)
@@ -264,8 +488,13 @@ test('HTTP business handlers use one in-process Application and never the CLI in
   assert.doesNotMatch(source, /attach-library\.ps1/)
   assert.doesNotMatch(source, /analyze-remote-skill-update\.ps1/)
 
-  const start = source.indexOf('export async function handleApi')
-  const end = source.indexOf('\nfunction send(', start)
+  const factoryStart = source.indexOf('export function createHttpServer')
+  const factoryEnd = source.indexOf('\nfunction isMainModule', factoryStart)
+  assert.ok(factoryStart >= 0 && factoryEnd > factoryStart, 'createHttpServer is present')
+  assert.doesNotMatch(source.slice(factoryStart, factoryEnd), /openLocalHost|createLocalHost/)
+
+  const start = source.indexOf('async function handleApi')
+  const end = source.indexOf('\n  async function findSession', start)
   assert.ok(start >= 0 && end > start, 'handleApi is present')
   const handleApi = source.slice(start, end)
   const state = extractPathnameBranch(handleApi, '/api/state')
@@ -294,6 +523,536 @@ test('HTTP business handlers use one in-process Application and never the CLI in
   }
 })
 
+test('standalone listener startup rejects atomically when IPv4 is occupied and never starts IPv6', async (t) => {
+  const occupied = net.createServer()
+  await new Promise((resolve, reject) => {
+    occupied.once('error', reject)
+    occupied.listen(0, '127.0.0.1', resolve)
+  })
+  t.after(() => new Promise((resolve) => occupied.close(resolve)))
+  const occupiedAddress = occupied.address()
+  const port = occupiedAddress.port
+  const listenCalls = []
+  const signals = new EventEmitter()
+  const host = fakeHost(async () => {
+    throw new Error('Application must not run during listener startup')
+  })
+
+  await assert.rejects(
+    startApiListeners({
+      host,
+      packageRoot: hubRoot,
+      dataRoot: hubRoot,
+      port,
+      signalTarget: signals,
+      listenTransport: async (transport, requestedPort, bindHost) => {
+        listenCalls.push({ bindHost, port: requestedPort })
+        await listenTransportAt(transport, requestedPort, bindHost)
+      },
+      log: () => {},
+      warn: () => {},
+      logError: () => {}
+    }),
+    (error) => error?.code === 'EADDRINUSE'
+  )
+
+  assert.deepEqual(listenCalls, [{ bindHost: '127.0.0.1', port }])
+  assert.equal(signals.listenerCount('SIGTERM'), 0)
+  assert.equal(signals.listenerCount('SIGINT'), 0)
+})
+
+test('standalone listener degrades unsupported IPv6 and closes IPv4 and signal handlers idempotently', async (t) => {
+  const signals = new EventEmitter()
+  const listenCalls = []
+  const warnings = []
+  const shutdownErrors = []
+  const host = fakeHost(async () => {
+    throw new Error('Application must not run for the health probe')
+  })
+  let runtime
+  t.after(async () => {
+    await runtime?.close()
+  })
+
+  runtime = await startApiListeners({
+    host,
+    packageRoot: hubRoot,
+    dataRoot: hubRoot,
+    port: 0,
+    signalTarget: signals,
+    listenTransport: async (transport, requestedPort, bindHost) => {
+      listenCalls.push({ bindHost, port: requestedPort })
+      if (bindHost === '::1') {
+        throw Object.assign(new Error('IPv6 is unavailable in this focused fixture'), {
+          code: 'EAFNOSUPPORT'
+        })
+      }
+      await listenTransportAt(transport, requestedPort, bindHost)
+    },
+    log: () => {},
+    warn: (message) => warnings.push(message),
+    logError: (...args) => shutdownErrors.push(args)
+  })
+
+  assert.equal(runtime.transports.length, 1)
+  const address = runtime.transports[0].server.address()
+  assert.equal(address.address, '127.0.0.1')
+  assert.ok(address.port > 0)
+  assert.deepEqual(listenCalls, [
+    { bindHost: '127.0.0.1', port: 0 },
+    { bindHost: '::1', port: address.port }
+  ])
+  assert.deepEqual(warnings, [
+    'skill-graft IPv6 API unavailable (EAFNOSUPPORT); continuing on IPv4'
+  ])
+  assert.equal(signals.listenerCount('SIGTERM'), 1)
+  assert.equal(signals.listenerCount('SIGINT'), 1)
+
+  const health = await fetch(`http://127.0.0.1:${address.port}/api/health`)
+  assert.equal(health.status, 200)
+  assert.deepEqual(await health.json(), { ok: true })
+
+  assert.equal(signals.emit('SIGTERM'), true)
+  const firstClose = runtime.close()
+  const secondClose = runtime.close()
+  assert.strictEqual(firstClose, secondClose)
+  assert.equal(signals.emit('SIGTERM'), false)
+  assert.equal(signals.emit('SIGINT'), false)
+  await firstClose
+  assert.deepEqual(shutdownErrors, [])
+  assert.equal(signals.listenerCount('SIGTERM'), 0)
+  assert.equal(signals.listenerCount('SIGINT'), 0)
+
+  const rebound = net.createServer()
+  await new Promise((resolve, reject) => {
+    rebound.once('error', reject)
+    rebound.listen(address.port, '127.0.0.1', resolve)
+  })
+  await new Promise((resolve) => rebound.close(resolve))
+})
+
+test('standalone listener rejects unexpected IPv6 errors and releases the started IPv4 port', async () => {
+  const signals = new EventEmitter()
+  const host = fakeHost(async () => {
+    throw new Error('Application must not run during listener startup')
+  })
+  let ipv4Port = 0
+
+  await assert.rejects(
+    startApiListeners({
+      host,
+      packageRoot: hubRoot,
+      dataRoot: hubRoot,
+      port: 0,
+      signalTarget: signals,
+      listenTransport: async (transport, requestedPort, bindHost) => {
+        if (bindHost === '::1') {
+          throw Object.assign(new Error('unexpected IPv6 permission failure'), { code: 'EACCES' })
+        }
+        await listenTransportAt(transport, requestedPort, bindHost)
+        ipv4Port = transport.server.address().port
+      },
+      log: () => {},
+      warn: () => {},
+      logError: () => {}
+    }),
+    (error) => error?.code === 'EACCES'
+  )
+
+  assert.ok(ipv4Port > 0)
+  assert.equal(signals.listenerCount('SIGTERM'), 0)
+  assert.equal(signals.listenerCount('SIGINT'), 0)
+  const rebound = net.createServer()
+  await new Promise((resolve, reject) => {
+    rebound.once('error', reject)
+    rebound.listen(ipv4Port, '127.0.0.1', resolve)
+  })
+  await new Promise((resolve) => rebound.close(resolve))
+})
+
+test('standalone listener uses the install data-root resolver while an explicit dataRoot wins', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-standalone-data-root-'))
+  const packageRoot = path.join(root, 'package')
+  const resolvedDataRoot = path.join(root, 'resolved-data')
+  const explicitDataRoot = path.join(root, 'explicit-data')
+  fs.mkdirSync(packageRoot, { recursive: true })
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const host = fakeHost(async () => {
+    throw new Error('Application must not run for the health probe')
+  }, { packageRoot, dataRoot: resolvedDataRoot })
+  const runtimes = []
+  t.after(async () => {
+    await Promise.all(runtimes.map((runtime) => runtime.close()))
+  })
+  const common = {
+    host,
+    packageRoot,
+    port: 0,
+    listenTransport: async (transport, requestedPort, bindHost) => {
+      if (bindHost === '::1') {
+        throw Object.assign(new Error('fixture has no IPv6'), { code: 'EAFNOSUPPORT' })
+      }
+      await listenTransportAt(transport, requestedPort, bindHost)
+    },
+    log: () => {},
+    warn: () => {},
+    logError: () => {}
+  }
+
+  const resolverCalls = []
+  const resolved = await startApiListeners({
+    ...common,
+    signalTarget: new EventEmitter(),
+    resolveDataRoot(candidatePackageRoot) {
+      resolverCalls.push(candidatePackageRoot)
+      return resolvedDataRoot
+    }
+  })
+  runtimes.push(resolved)
+  assert.deepEqual(resolverCalls, [path.resolve(packageRoot)])
+  assert.equal(samePath(resolvedDataRoot, packageRoot), false)
+  const resolvedAddress = resolved.transports[0].server.address()
+  const resolvedHealth = await fetch(`http://127.0.0.1:${resolvedAddress.port}/api/health`)
+  assert.equal(
+    samePath(decodeURIComponent(resolvedHealth.headers.get('x-skill-graft-data-root') || ''), resolvedDataRoot),
+    true
+  )
+  await resolved.close()
+
+  let explicitResolverCalls = 0
+  const explicit = await startApiListeners({
+    ...common,
+    dataRoot: explicitDataRoot,
+    signalTarget: new EventEmitter(),
+    resolveDataRoot() {
+      explicitResolverCalls += 1
+      return resolvedDataRoot
+    }
+  })
+  runtimes.push(explicit)
+  assert.equal(explicitResolverCalls, 0)
+  const explicitAddress = explicit.transports[0].server.address()
+  const explicitHealth = await fetch(`http://127.0.0.1:${explicitAddress.port}/api/health`)
+  assert.equal(
+    samePath(decodeURIComponent(explicitHealth.headers.get('x-skill-graft-data-root') || ''), explicitDataRoot),
+    true
+  )
+})
+
+test('HTTP transport rejects foreign authorities and gates writes with an HttpOnly panel capability', async (t) => {
+  const webRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-http-web-'))
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-http-outside-'))
+  const outsideBytes = `outside-static-secret-${crypto.randomBytes(12).toString('hex')}`
+  const outsideFile = path.join(outsideRoot, 'secret.txt')
+  fs.writeFileSync(path.join(webRoot, 'index.html'), '<!doctype html><title>isolated panel</title>', 'utf8')
+  fs.writeFileSync(outsideFile, outsideBytes, 'utf8')
+  let fileSymlinkCreated = false
+  let directoryLinkCreated = false
+  try {
+    fs.symlinkSync(outsideFile, path.join(webRoot, 'linked-secret.txt'), 'file')
+    fileSymlinkCreated = true
+  } catch (error) {
+    t.diagnostic(`file symlink fixture unavailable: ${error.code || error.message}`)
+  }
+  try {
+    fs.symlinkSync(outsideRoot, path.join(webRoot, 'outside-link'), process.platform === 'win32' ? 'junction' : 'dir')
+    directoryLinkCreated = true
+  } catch (error) {
+    t.diagnostic(`directory link fixture unavailable: ${error.code || error.message}`)
+  }
+  const calls = []
+  const host = fakeHost(async (command) => {
+    calls.push(command)
+    const base = {
+      contractVersion: 1,
+      requestId: command.meta.requestId,
+      commandKind: command.kind,
+      events: [],
+      meta: { replayed: false, handler: 'application.commandBus' }
+    }
+    if (command.kind === 'planSync') {
+      return { ...base, ok: false, error: { code: 'CONFLICT', message: 'application conflict' } }
+    }
+    return { ...base, ok: true, data: { accepted: command.kind } }
+  }, { packageRoot: webRoot, dataRoot: webRoot })
+  const transport = createHttpServer({
+    host,
+    webRoot,
+    bodyLimitBytes: 128,
+    getDiagnostics: async () => ({ ok: true }),
+    getDaemonStatus: async () => ({ ok: true })
+  })
+  const base = await listenTransport(transport)
+  const port = new URL(base).port
+  t.after(async () => {
+    await transport.close()
+    fs.rmSync(webRoot, { recursive: true, force: true })
+    fs.rmSync(outsideRoot, { recursive: true, force: true })
+  })
+
+  const foreignHost = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { Host: `attacker.invalid:${port}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'status' })
+  })
+  assert.equal(foreignHost.status, 403)
+  assert.equal(JSON.parse(foreignHost.body).error.code, 'HTTP_FORBIDDEN_HOST')
+
+  const foreignOrigin = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/command',
+    headers: {
+      Host: `127.0.0.1:${port}`,
+      Origin: 'http://attacker.invalid',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ kind: 'status' })
+  })
+  assert.equal(foreignOrigin.status, 403)
+  assert.equal(JSON.parse(foreignOrigin.body).error.code, 'HTTP_FORBIDDEN_ORIGIN')
+  assert.equal(calls.length, 0, 'foreign Host/Origin must not reach Application')
+
+  const wrongMethod = await requestHttp(base, { path: '/api/command' })
+  assert.equal(wrongMethod.status, 405)
+  assert.equal(wrongMethod.headers.allow, 'POST')
+  assert.equal(JSON.parse(wrongMethod.body).error.code, 'HTTP_METHOD_NOT_ALLOWED')
+
+  const wrongType = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify({ kind: 'status' })
+  })
+  assert.equal(wrongType.status, 415)
+  assert.equal(JSON.parse(wrongType.body).error.code, 'HTTP_UNSUPPORTED_MEDIA_TYPE')
+
+  const malformed = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{'
+  })
+  assert.equal(malformed.status, 400)
+  assert.equal(JSON.parse(malformed.body).error.code, 'HTTP_INVALID_JSON')
+
+  const nonObject = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { 'Content-Type': 'application/json' },
+    body: '[]'
+  })
+  assert.equal(nonObject.status, 400)
+  assert.equal(JSON.parse(nonObject.body).error.code, 'HTTP_INVALID_JSON')
+
+  const oversized = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'status', padding: 'x'.repeat(200) })
+  })
+  assert.equal(oversized.status, 413)
+  assert.equal(JSON.parse(oversized.body).error.code, 'HTTP_PAYLOAD_TOO_LARGE')
+
+  const unauthenticatedSse = await requestHttp(base, {
+    path: '/api/codex/session/stream?id=secret-session'
+  })
+  assert.equal(unauthenticatedSse.status, 403)
+  assert.equal(JSON.parse(unauthenticatedSse.body).error.code, 'HTTP_CAPABILITY_REQUIRED')
+  assert.equal(calls.length, 0, 'unauthenticated SSE must not query Application or session logs')
+
+  const applicationFailure = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'planSync', worktree: 'C:\\isolated' })
+  })
+  assert.equal(applicationFailure.status, 200, 'valid Application failures stay HTTP 200')
+  assert.equal(JSON.parse(applicationFailure.body).error.code, 'CONFLICT')
+
+  const deniedWrite = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'chat', intent: 'must be denied' })
+  })
+  assert.equal(deniedWrite.status, 403)
+  assert.equal(JSON.parse(deniedWrite.body).error.code, 'HTTP_CAPABILITY_REQUIRED')
+  assert.equal(calls.length, 1, 'denied write must not reach Application')
+
+  const panel = await requestHttp(base)
+  assert.equal(panel.status, 200)
+  const setCookie = String(panel.headers['set-cookie'] || '')
+  assert.match(setCookie, /^skill_graft_capability=/)
+  assert.match(setCookie, /; HttpOnly;/)
+  assert.match(setCookie, /; SameSite=Strict$/)
+  const cookie = setCookie.split(';', 1)[0]
+
+  const forbiddenStaticPaths = [
+    ...(fileSymlinkCreated ? ['/linked-secret.txt'] : []),
+    ...(directoryLinkCreated ? ['/outside-link/secret.txt'] : []),
+    `/%252e%252e/${encodeURIComponent(path.basename(outsideRoot))}/secret.txt`,
+    `/%2e%2e%5c${encodeURIComponent(path.basename(outsideRoot))}%5csecret.txt`
+  ]
+  for (const forbiddenPath of forbiddenStaticPaths) {
+    const response = await requestHttp(base, { path: forbiddenPath })
+    assert.equal(response.status, 404, forbiddenPath)
+    assert.doesNotMatch(response.body, new RegExp(outsideBytes), forbiddenPath)
+  }
+
+  const health = await requestHttp(base, { path: '/api/health' })
+  assert.equal(health.status, 200)
+  assert.equal(health.headers['set-cookie'], undefined)
+  assert.doesNotMatch(health.body, new RegExp(cookie.split('=', 2)[1]))
+
+  const acceptedWrite = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ kind: 'chat', intent: 'capability accepted' })
+  })
+  assert.equal(acceptedWrite.status, 200)
+  assert.equal(JSON.parse(acceptedWrite.body).data.accepted, 'chat')
+  assert.equal(calls.length, 2)
+
+  const deniedDeprecatedWrite = await requestHttp(base, {
+    method: 'POST',
+    path: '/api/decide',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'probe', action: 'reject' })
+  })
+  assert.equal(deniedDeprecatedWrite.status, 403)
+  assert.equal(calls.length, 2)
+})
+
+test('one opaque capability authorizes sibling loopback transports but not another logical instance', async (t) => {
+  const webRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-http-shared-capability-'))
+  fs.writeFileSync(path.join(webRoot, 'index.html'), '<!doctype html><title>shared capability</title>', 'utf8')
+  let effects = 0
+  const host = fakeHost(async (command) => {
+    effects += 1
+    return {
+      contractVersion: 1,
+      requestId: command.meta.requestId,
+      commandKind: command.kind,
+      ok: true,
+      data: { accepted: command.kind },
+      events: [],
+      meta: { replayed: false, handler: 'application.commandBus' }
+    }
+  }, { packageRoot: webRoot, dataRoot: webRoot })
+  const capability = createHttpCapability()
+  assert.deepEqual(Object.keys(capability), [], 'opaque handle must not expose secret material')
+  const sharedA = createHttpServer({ host, webRoot, capability })
+  const sharedB = createHttpServer({ host, webRoot, capability })
+  const isolated = createHttpServer({ host, webRoot })
+  const [baseA, baseB, baseIsolated] = await Promise.all([
+    listenTransport(sharedA),
+    listenTransport(sharedB),
+    listenTransport(isolated)
+  ])
+  t.after(async () => {
+    await Promise.all([sharedA.close(), sharedB.close(), isolated.close()])
+    fs.rmSync(webRoot, { recursive: true, force: true })
+  })
+
+  const panel = await requestHttp(baseA)
+  const cookie = String(panel.headers['set-cookie'] || '').split(';', 1)[0]
+  assert.match(cookie, /^skill_graft_capability=/)
+  assert.equal(Object.hasOwn(sharedA, 'capability'), false)
+
+  const siblingWrite = await requestHttp(baseB, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ kind: 'chat', intent: 'shared logical instance' })
+  })
+  assert.equal(siblingWrite.status, 200)
+  assert.equal(effects, 1)
+
+  const isolatedWrite = await requestHttp(baseIsolated, {
+    method: 'POST',
+    path: '/api/command',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ kind: 'chat', intent: 'different logical instance' })
+  })
+  assert.equal(isolatedWrite.status, 403)
+  assert.equal(JSON.parse(isolatedWrite.body).error.code, 'HTTP_CAPABILITY_REQUIRED')
+  assert.equal(effects, 1, 'different logical capability must be rejected before Application')
+})
+
+test('SSE emits an explicit terminal event and stops polling after client abort', async (t) => {
+  let status = 'completed'
+  let calls = 0
+  const longLog = 'x'.repeat(20000)
+  const host = fakeHost(async (command) => {
+    calls += 1
+    return {
+      contractVersion: 1,
+      requestId: command.meta.requestId,
+      commandKind: command.kind,
+      ok: true,
+      data: {
+        session: {
+          id: command.sessionId,
+          kind: 'chat',
+          status,
+          lastMessage: '',
+          error: '',
+          exitCode: status === 'completed' ? 0 : null,
+          continuationToken: ''
+        }
+      },
+      events: [],
+      meta: { replayed: false, handler: 'application.commandBus' }
+    }
+  }, { readLog: () => longLog })
+  const transport = createHttpServer({
+    host,
+    streamPollMs: 10,
+    streamHeartbeatMs: 100,
+    getDiagnostics: async () => ({ ok: true }),
+    getDaemonStatus: async () => ({ ok: true })
+  })
+  const base = await listenTransport(transport)
+  t.after(() => transport.close())
+  const panel = await requestHttp(base)
+  const cookie = String(panel.headers['set-cookie'] || '').split(';', 1)[0]
+
+  const terminal = await fetch(`${base}/api/codex/session/stream?id=terminal`, {
+    headers: { Cookie: cookie }
+  })
+  const terminalText = await terminal.text()
+  assert.match(terminalText, /event: status/)
+  assert.match(terminalText, /"status":"completed"/)
+  assert.match(terminalText, /event: end/)
+  assert.match(terminalText, /"reason":"settled"/)
+  const logData = terminalText.match(/event: log\ndata: (\{[^\n]+\})/)
+  assert.ok(logData, 'bounded log event')
+  const boundedLog = JSON.parse(logData[1])
+  assert.equal(Buffer.byteLength(boundedLog.text), 8192)
+  assert.equal(boundedLog.offset, 11808)
+  assert.equal(boundedLog.totalBytes, 20000)
+  assert.equal(boundedLog.truncated, true)
+
+  status = 'running'
+  calls = 0
+  const controller = new AbortController()
+  const running = await fetch(`${base}/api/codex/session/stream?id=running`, {
+    signal: controller.signal,
+    headers: { Cookie: cookie }
+  })
+  const reader = running.body.getReader()
+  await reader.read()
+  await new Promise((resolve) => setTimeout(resolve, 35))
+  controller.abort()
+  try { await reader.cancel() } catch { /* abort owns this exact stream */ }
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const afterAbort = calls
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(calls, afterAbort, 'aborted SSE stream must not reconnect or keep polling')
+})
+
 test('real isolated HTTP server uses Application without CLI child and keeps session queries read-only', { timeout: 30000 }, async (t) => {
   const temporaryHub = createTemporaryTestHub(hubRoot)
   let runtime
@@ -319,18 +1078,24 @@ test('real isolated HTTP server uses Application without CLI child and keeps ses
   assert.deepEqual(fileFingerprint(fixture.sessionsFile), sessionsBefore, 'session GET routes must not persist hydration')
 
   const missingSse = await fetch(`${runtime.base}/api/codex/session/stream?id=missing-http-session`, {
+    headers: { Cookie: runtime.capabilityCookie },
     signal: AbortSignal.timeout(3000)
   })
   const missingEvents = await missingSse.text()
   assert.equal(missingSse.ok, true, missingEvents)
   assert.match(missingEvents, /event: status/)
   assert.match(missingEvents, /"status":"missing"/)
+  assert.match(missingEvents, /event: end/)
+  assert.match(missingEvents, /"reason":"missing"/)
   const legacySse = await fetch(`${runtime.base}/api/codex/session/stream?id=${encodeURIComponent(fixture.sessionId)}`, {
+    headers: { Cookie: runtime.capabilityCookie },
     signal: AbortSignal.timeout(3000)
   })
   const legacyEvents = await legacySse.text()
   assert.match(legacyEvents, /"continuationToken":"11111111-2222-3333-4444-555555555555"/)
   assert.match(legacyEvents, /"codexSessionId":"11111111-2222-3333-4444-555555555555"/)
+  assert.match(legacyEvents, /event: end/)
+  assert.match(legacyEvents, /"reason":"settled"/)
   const requestLedger = path.join(temporaryHub.root, 'skill-review', 'application-ledger.json')
   const auditLog = path.join(temporaryHub.root, 'skill-review', 'application-audit.json')
   assert.equal(fs.existsSync(requestLedger), false)
@@ -361,7 +1126,7 @@ test('real isolated HTTP server uses Application without CLI child and keeps ses
     start: false,
     wait: true,
     requestId: 'http-runtime-analyze'
-  })
+  }, { Cookie: runtime.capabilityCookie })
   assert.equal(analyzed.ok, true)
   assert.equal(analyzed.action, 'analyze')
   assert.equal(analyzed.session.kind, 'analyze')
@@ -410,7 +1175,7 @@ test('real isolated HTTP server uses Application without CLI child and keeps ses
     id: fixture.inboxId,
     action: 'reject',
     requestId: 'http-runtime-reject'
-  })
+  }, { Cookie: runtime.capabilityCookie })
   assert.equal(decision.ok, true)
   assert.equal(decision.action, 'reject')
   assert.equal(decision.item.status, 'rejected')
@@ -421,7 +1186,7 @@ test('real isolated HTTP server uses Application without CLI child and keeps ses
     intent: 'isolated no-start HTTP command',
     runner: { start: false },
     requestId: 'http-runtime-command-chat'
-  })
+  }, { Cookie: runtime.capabilityCookie })
   assert.equal(typedChat.ok, true)
   assert.equal(typedChat.commandKind, 'chat')
   assert.equal(typedChat.data.session.kind, 'chat')
@@ -450,9 +1215,7 @@ test('management page is static and does not import core or embed attach policy'
     ...walkWebText(path.join(hubRoot, 'panel', 'src')),
     ...walkWebText(path.join(hubRoot, 'panel', 'lib'))
   ].join('\n')
-  assert.match(page, /\/api\/state/)
-  assert.match(page, /\/api\/worktrees/)
-  assert.match(page, /\/api\/decide/)
+  assert.match(page, /\/api\/command/)
   assert.match(page, /EventSource/)
   assert.match(page, /\/api\/codex\/session\/stream/)
   assert.doesNotMatch(page, /src\/core/)
@@ -474,7 +1237,7 @@ test('GET / serves the management page and Application worktree JSON matches the
   const worktrees = await getJson(base, '/api/worktrees')
   const cli = spawnHub(['list-worktrees'])
   assert.equal(cli.status, 0, cli.stderr)
-  const fromCli = JSON.parse(cli.stdout)
+  const fromCli = commandData(JSON.parse(cli.stdout))
   const paths = (rows) => [...new Set(rows.map((item) => item.path))].sort((a, b) => a.localeCompare(b))
   assert.deepEqual(paths(worktrees.worktrees), paths(fromCli.worktrees))
 })
@@ -537,7 +1300,7 @@ test('GET /api/state matches hub status resident and counts.queued', { timeout: 
 
   const cli = spawnHub(['status'])
   assert.equal(cli.status, 0, cli.stderr)
-  const status = JSON.parse(cli.stdout)
+  const status = commandData(JSON.parse(cli.stdout))
   const state = await getJson(base, '/api/state')
   assert.ok(state.resident, 'state.resident missing')
   assert.ok(state.counts, 'state.counts missing')
@@ -551,7 +1314,7 @@ test('GET /api/worktrees matches hub list-worktrees scanRoots and worktree paths
 
   const cli = spawnHub(['list-worktrees'])
   assert.equal(cli.status, 0, cli.stderr)
-  const fromCli = JSON.parse(cli.stdout)
+  const fromCli = commandData(JSON.parse(cli.stdout))
   const payload = await getJson(base, '/api/worktrees')
   assert.ok(Array.isArray(payload.scanRoots), 'scanRoots')
   assert.ok(Array.isArray(payload.worktrees), 'worktrees')

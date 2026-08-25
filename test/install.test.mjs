@@ -127,7 +127,18 @@ test('evaluateDoctor treats missing node as an error and a down daemon as a warn
     daemonPid: 12,
     daemonAlive: true,
     apiHealthy: true,
-    apiPort: 18765
+    apiPort: 18765,
+    manifestExists: true,
+    manifestOwned: true,
+    lifecycleExpected: { path: true, task: true, daemon: true },
+    lifecycleLockHealthy: true,
+    lifecycleLockState: 'clear',
+    lifecycleWalPending: false,
+    dataMarkerOk: true,
+    packageVersion: '1.0.0',
+    installedVersion: '1.0.0',
+    versionMatch: true,
+    corpusEmpty: false
   })
   assert.equal(healthy.ok, true)
   assert.equal(healthy.issues.length, 0)

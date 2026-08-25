@@ -50,6 +50,9 @@ test('LocalSessionPort scoped reap inspects and updates only requested session I
   t.after(() => temporary.cleanup())
   const checkedPids = []
   const port = createLocalSessionPort(createHub(temporary.root), {
+    sleep: async () => {
+      throw new Error('queued --wait attempted to poll')
+    },
     runner: fakeRunner({
       pidAlive(pid) {
         checkedPids.push(pid)
@@ -61,7 +64,7 @@ test('LocalSessionPort scoped reap inspects and updates only requested session I
   const selected = await port.start({
     kind: 'chat',
     intent: 'selected scoped reap',
-    options: { start: false }
+    options: { start: false, wait: true }
   })
   const untouched = await port.start({
     kind: 'chat',

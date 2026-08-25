@@ -1,6 +1,12 @@
 import { createHub } from '../adapters/create-hub.js'
 import { createDurableTransactionHost } from '../adapters/durable-state.js'
-import { createLeaseLockManager } from '../adapters/lease-lock.js'
+import {
+  applicationLeaseRoot,
+  assertApplicationLeaseNamespaceSafe,
+  assertLegacyApplicationLeaseNamespaceClear,
+  createLeaseLockManager,
+  type LeaseProcessInspector
+} from '../adapters/lease-lock.js'
 import { createLocalApplicationPorts } from '../adapters/local-application-ports.js'
 import { createLocalDurableSchemaResolver } from '../adapters/local-durable-schema.js'
 import { createLocalInvocationTraceAdapter } from '../adapters/local-invocation-trace.js'
@@ -58,6 +64,7 @@ export type CreateLocalHostOptions = {
   runtimeRevision?: string
   leaseMs?: number
   renewalIntervalMs?: number
+  leaseProcessInspector?: LeaseProcessInspector
 }
 
 function runtimeRevisionOf(context: LocalHostContext, packageRoot: string, explicit?: string): string {
@@ -84,8 +91,11 @@ function runtimeRevisionOf(context: LocalHostContext, packageRoot: string, expli
 }
 
 export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
-  if (Boolean(options.p2) !== Boolean(options.transactions)) {
-    throw new Error('p2 and transactions must be supplied together')
+  const suppliedInfrastructure = [options.p2, options.p3, options.transactions]
+    .filter((value) => value !== undefined)
+    .length
+  if (suppliedInfrastructure !== 0 && suppliedInfrastructure !== 3) {
+    throw new Error('p2, p3, and transactions must be supplied together')
   }
   const trace = options.trace ?? createLocalInvocationTraceAdapter({
     packageRoot: options.packageRoot,
@@ -97,11 +107,23 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
   let p3 = options.p3
   let transactions = options.transactions
   let ensureReady = async () => {}
+  let recoverBeforeCommand = async () => {}
 
-  if (!p2 || !transactions) {
+  if (!p2 || !p3 || !transactions) {
+    assertLegacyApplicationLeaseNamespaceClear(context.hubRoot)
+    const leaseRoot = applicationLeaseRoot(context.hubRoot)
+    assertApplicationLeaseNamespaceSafe(leaseRoot)
     const lock = createLeaseLockManager({
-      root: context.path.join(context.hubRoot, 'skill-review', 'locks'),
-      leaseMs: options.leaseMs ?? 30_000
+      root: leaseRoot,
+      preflightRoot() {
+        const rebound = applicationLeaseRoot(context.hubRoot)
+        const same = process.platform === 'win32'
+          ? rebound.toLowerCase() === leaseRoot.toLowerCase()
+          : rebound === leaseRoot
+        if (!same) throw new Error('local host data root changed after lease namespace binding')
+      },
+      leaseMs: options.leaseMs ?? 30_000,
+      ...(options.leaseProcessInspector ? { processInspector: options.leaseProcessInspector } : {})
     })
     const durable = createDurableTransactionHost({
       root: context.hubRoot,
@@ -144,24 +166,62 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
       }
     }
     transactions = durable.transactions
-    let inFlightRecovery: Promise<void> | undefined
+    const recoveryIdentity = {
+      scope: 'hub-global',
+      key: 'hub-global',
+      hostId,
+      commandKind: 'migrateState',
+      requestId: 'startup-recovery'
+    } as const
+    // A WAL can appear after startup, so only concurrent durable recovery is
+    // shared; a settled attempt is always cleared and the next command checks
+    // the journal again.
+    let inFlightDurableRecovery: Promise<void> | undefined
+    const recoverDurable = (): Promise<void> => {
+      if (inFlightDurableRecovery) return inFlightDurableRecovery
+      const operation = durable.recover(recoveryIdentity).then(() => undefined)
+      inFlightDurableRecovery = operation.then(
+        () => { inFlightDurableRecovery = undefined },
+        (error: unknown) => {
+          inFlightDurableRecovery = undefined
+          throw error
+        }
+      )
+      return inFlightDurableRecovery
+    }
+    // Orphan lease reaping is a startup concern. Memoize only a successful
+    // sweep for this host instance; a failed attempt must remain retryable.
+    let startupReady = false
+    let inFlightStartup: Promise<void> | undefined
     ensureReady = () => {
-      if (inFlightRecovery) return inFlightRecovery
-      const attempt = durable.recover({
-        scope: 'hub-global',
-        key: 'hub-global',
-        hostId,
-        commandKind: 'migrateState',
-        requestId: 'startup-recovery'
-      }).then(() => undefined)
-      inFlightRecovery = attempt
-      const clear = () => {
-        if (inFlightRecovery === attempt) inFlightRecovery = undefined
-      }
-      // Use both settlement handlers instead of an ignored finally promise so
-      // a rejected recovery cannot create a secondary unhandled rejection.
-      void attempt.then(clear, clear)
-      return attempt
+      if (startupReady) return Promise.resolve()
+      if (inFlightStartup) return inFlightStartup
+      const operation = recoverDurable().then(async () => {
+        const acquired = await lock.acquire(recoveryIdentity)
+        if (acquired.status !== 'acquired') {
+          throw new Error(`startup lease recovery is busy (${acquired.reason})`)
+        }
+        try {
+          await lock.reapOrphanedWorktreeLeases(acquired.lease.ownerToken, async () => acquired.lease.renew())
+        } finally {
+          await acquired.lease.release()
+        }
+      })
+      inFlightStartup = operation.then(
+        () => {
+          startupReady = true
+          inFlightStartup = undefined
+        },
+        (error: unknown) => {
+          inFlightStartup = undefined
+          throw error
+        }
+      )
+      return inFlightStartup
+    }
+    recoverBeforeCommand = async () => {
+      await ensureReady()
+      await recoverDurable()
     }
   }
   const localSessions = options.sessions ? undefined : createLocalSessionPort(context, options.localSessionOptions)
@@ -170,7 +230,7 @@ export function createLocalHost(options: CreateLocalHostOptions): LocalHost {
   const applicationPorts = createLocalApplicationPorts(context, { packageRoot: options.packageRoot })
   const application = createHubApplication({
     ...applicationPorts,
-    recovery: { recover: ensureReady },
+    recovery: { recover: recoverBeforeCommand },
     sessions,
     ledger,
     p2,

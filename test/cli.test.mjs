@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import { createServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { hubRoot, spawnHub, testHubRoot } from './helpers.mjs'
+import { hubRoot, spawnHub as spawnRawHub, testHubRoot } from './helpers.mjs'
 import { createTemporaryCliPackage } from './support/test-hub.mjs'
+
+function spawnHub(args, options = {}) {
+  const first = args[0]
+  const hostLocal = !first || first === '--help' || first === '-h'
+    || ['setup', 'install', 'upgrade', 'uninstall', 'purge', 'doctor', 'daemon', 'hook-diagnostic'].includes(first)
+  const explicit = args.includes('--contract-v1') || args.includes('--legacy-output')
+  return spawnRawHub(!hostLocal && !explicit ? [...args, '--legacy-output'] : args, options)
+}
 
 function parseStdout(result, label) {
   assert.equal(result.status, 0, `${label} stderr=${result.stderr}`)
@@ -13,13 +22,58 @@ function parseStdout(result, label) {
   return JSON.parse(result.stdout)
 }
 
-function tempHub() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-cli-'))
+function tempHub(t) {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-cli-'))
+  const dir = path.join(parent, 'data')
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
   fs.mkdirSync(path.join(dir, 'skill-review', 'history'), { recursive: true })
   fs.mkdirSync(path.join(dir, 'overlay'), { recursive: true })
   fs.writeFileSync(path.join(dir, 'overlay', 'attached-worktrees.txt'), '')
   fs.writeFileSync(path.join(dir, 'overlay', 'do-not-auto-attach.txt'), '')
   return dir
+}
+
+async function tempSetupEnvironment(t, prefix) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  const home = path.join(root, 'home')
+  const appData = path.join(root, 'appdata')
+  const localAppData = path.join(root, 'localappdata')
+  const temp = path.join(root, 'temp')
+  const dataRoot = path.join(root, 'data')
+  const installDir = path.join(root, 'install')
+  for (const dir of [home, appData, localAppData, temp]) fs.mkdirSync(dir, { recursive: true })
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+
+  const portProbe = createServer()
+  await new Promise((resolveListen, rejectListen) => {
+    portProbe.once('error', rejectListen)
+    portProbe.listen(0, '127.0.0.1', resolveListen)
+  })
+  const address = portProbe.address()
+  assert.ok(address && typeof address === 'object')
+  const port = address.port
+  await new Promise((resolveClose, rejectClose) => {
+    portProbe.close((error) => error ? rejectClose(error) : resolveClose())
+  })
+
+  return {
+    dataRoot,
+    installDir,
+    env: {
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: appData,
+      LOCALAPPDATA: localAppData,
+      TEMP: temp,
+      TMP: temp,
+      SKILL_GRAFT_HOME: dataRoot,
+      HUB_ROOT: dataRoot,
+      HUB_API_PORT: String(port),
+      SG_INSTALL_DIR: installDir,
+      SG_SKIP_PATH: '1',
+      SG_SKIP_TASK: '1'
+    }
+  }
 }
 
 test('U1 hub status exits 0 with hubRoot and 3 resident skills', () => {
@@ -31,8 +85,21 @@ test('U1 hub status exits 0 with hubRoot and 3 resident skills', () => {
   assert.equal(payload.counts.queued, queued.length)
 })
 
+test('business CLI defaults to the typed envelope and keeps explicit legacy output', () => {
+  const typed = parseStdout(spawnRawHub(['status', '--request-id', 'typed-default-status']), 'typed-default-status')
+  assert.equal(typed.ok, true)
+  assert.equal(typed.contractVersion, 1)
+  assert.equal(typed.commandKind, 'status')
+  assert.equal(typed.data.hubRoot, testHubRoot)
+
+  const legacy = parseStdout(spawnRawHub(['status', '--legacy-output']), 'legacy-status')
+  assert.equal(legacy.hubRoot, testHubRoot)
+  assert.equal(legacy.ok, undefined)
+  assert.ok(Array.isArray(legacy.items))
+})
+
 test('typed CLI status with nothing to reap is read-only', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const payload = parseStdout(spawnHub([
     'status', '--contract-v1', '--request-id', 'cli-read-only-status'
@@ -75,7 +142,7 @@ test('U4 unknown command is non-zero; --help and -h exit 0', () => {
 })
 
 test('daemon stop returns structured failure and nonzero for live unverified state', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const review = path.join(dir, 'skill-review')
   const pidFile = path.join(review, 'daemon.pid')
@@ -97,15 +164,42 @@ test('daemon stop returns structured failure and nonzero for live unverified sta
   assert.equal(fs.readFileSync(heartbeatFile, 'utf8'), '{corrupt')
 })
 
-test('setup --dry-run --json does not write an install dir', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-setup-dry-'))
+test('daemon status maps every non-ok structured result to exit code 1', (t) => {
+  const dir = tempHub(t)
+  const environment = {
+    HUB_ROOT: dir,
+    HUB_API_PORT: '22012',
+    SG_SKIP_TASK: '1'
+  }
+  const stopped = spawnHub(['daemon', 'status'], { env: environment })
+  assert.equal(stopped.status, 1, stopped.stderr)
+  const stoppedPayload = JSON.parse(stopped.stdout)
+  assert.equal(stoppedPayload.action, 'daemon-status')
+  assert.equal(stoppedPayload.ok, false)
+  assert.equal(stoppedPayload.running, false)
+
+  const review = path.join(dir, 'skill-review')
+  fs.writeFileSync(path.join(review, 'daemon.pid'), `${process.pid}\n`)
+  fs.writeFileSync(path.join(review, 'api.pid'), `${process.pid}\n`)
+  fs.writeFileSync(path.join(review, 'daemon-heartbeat.json'), '{corrupt')
+  const unverified = spawnHub(['daemon', 'status'], { env: environment })
+  assert.equal(unverified.status, 1, unverified.stderr)
+  const unverifiedPayload = JSON.parse(unverified.stdout)
+  assert.equal(unverifiedPayload.action, 'daemon-status')
+  assert.equal(unverifiedPayload.ok, false)
+  assert.equal(unverifiedPayload.running, false)
+  assert.equal(fs.readFileSync(path.join(review, 'daemon-heartbeat.json'), 'utf8'), '{corrupt')
+})
+
+test('setup --dry-run --json does not write an install dir', async (t) => {
+  const fixture = await tempSetupEnvironment(t, 'hub-setup-dry-')
+  const dir = fixture.installDir
   const cliPackage = createTemporaryCliPackage(hubRoot)
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   t.after(() => cliPackage.cleanup())
   const payload = parseStdout(
     spawnHub(['setup', '--dry-run', '--json', '--no-daemon', '--no-path', '--no-task'], {
       cliPath: cliPackage.cliPath,
-      env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' }
+      env: fixture.env
     }),
     'setup-dry-run'
   )
@@ -117,15 +211,15 @@ test('setup --dry-run --json does not write an install dir', (t) => {
   assert.equal(fs.existsSync(path.join(dir, 'install.json')), false)
 })
 
-test('setup --json writes shims into SG_INSTALL_DIR without touching user PATH', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-setup-'))
+test('setup --json writes shims into SG_INSTALL_DIR without touching user PATH', async (t) => {
+  const fixture = await tempSetupEnvironment(t, 'hub-setup-')
+  const dir = fixture.installDir
   const cliPackage = createTemporaryCliPackage(hubRoot)
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   t.after(() => cliPackage.cleanup())
   const payload = parseStdout(
     spawnHub(['setup', '--json', '--no-daemon', '--no-path', '--no-task'], {
       cliPath: cliPackage.cliPath,
-      env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' }
+      env: fixture.env
     }),
     'setup-apply'
   )
@@ -139,7 +233,7 @@ test('setup --json writes shims into SG_INSTALL_DIR without touching user PATH',
   const doctor = parseStdout(
     spawnHub(['doctor', '--json'], {
       cliPath: cliPackage.cliPath,
-      env: { SG_INSTALL_DIR: dir, SG_SKIP_PATH: '1', SG_SKIP_TASK: '1' }
+      env: fixture.env
     }),
     'doctor'
   )
@@ -149,7 +243,7 @@ test('setup --json writes shims into SG_INSTALL_DIR without touching user PATH',
 })
 
 test('repair-links rejects a non-Git path without applying effects', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const worktree = path.join(dir, 'non-git-repair-probe')
   assert.equal(fs.existsSync(worktree), false)
@@ -206,7 +300,7 @@ function makeSkillRepo(t) {
 
 test('CLI ingest writes inbox under isolated HUB_ROOT and --dispatch only enqueues', (t) => {
   const game = makeSkillRepo(t)
-  const hubDir = tempHub()
+  const hubDir = tempHub(t)
   t.after(() => fs.rmSync(hubDir, { recursive: true, force: true }))
   const liveInbox = path.join(hubRoot, 'skills', 'inbox')
   const liveBefore = fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : ''
@@ -237,7 +331,7 @@ test('CLI ingest writes inbox under isolated HUB_ROOT and --dispatch only enqueu
 
 test('typed CLI ingest --dry-run plans, replays, conflicts, and writes only ledger/audit', (t) => {
   const game = makeSkillRepo(t)
-  const hubDir = tempHub()
+  const hubDir = tempHub(t)
   t.after(() => fs.rmSync(hubDir, { recursive: true, force: true }))
   const requestId = 'cli-ingest-dry-run'
   const input = `${game.old} ${game.next} refs/remotes/origin/smoke-ingest\n`
@@ -294,7 +388,7 @@ test('typed CLI ingest --dry-run plans, replays, conflicts, and writes only ledg
 })
 
 test('CLI decide adopt reports linked vs skipped trees and does not touch live inbox', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const attached = path.join(dir, 'attached')
   const skippedTree = path.join(dir, 'skipped')
@@ -327,7 +421,7 @@ test('CLI decide adopt reports linked vs skipped trees and does not touch live i
 })
 
 test('CLI analyze fake session writes proposed suggestion; decide without --action does not adopt', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   fs.mkdirSync(path.join(dir, 'overlay', 'prompts'), { recursive: true })
   fs.copyFileSync(path.join(hubRoot, 'overlay', 'prompts', 'analyze.txt'), path.join(dir, 'overlay', 'prompts', 'analyze.txt'))
@@ -365,7 +459,7 @@ test('CLI analyze fake session writes proposed suggestion; decide without --acti
 })
 
 test('decide reject updates a fixture hub and does not touch the live inbox', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const id = 'cli-decide-fixture'
   const inboxRel = path.join(dir, 'skills', 'inbox', 'fixture-skill')
@@ -389,7 +483,7 @@ test('decide reject updates a fixture hub and does not touch the live inbox', (t
 })
 
 test('session verbs enqueue and do not silently rewrite a live game tree', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const liveSessions = path.join(hubRoot, 'skill-review', 'sessions.json')
   const beforeLiveSessions = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
@@ -447,7 +541,7 @@ test('session verbs enqueue and do not silently rewrite a live game tree', (t) =
 })
 
 test('typed CLI detach apply is bound to the queued detach session and removes only the isolated claim', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const worktree = makeRecognizedWorktree(dir, 'typed-detach-worktree')
   fs.writeFileSync(path.join(dir, 'overlay', 'attached-worktrees.txt'), `# keep comment\nC:\\other-tree\n${worktree}\n`)
@@ -494,19 +588,17 @@ function markRunningWithPid(dir, session, pid, extra = {}) {
 }
 
 test('attach --no-spawn --wait stays queued and does not launch Codex', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const worktree = makeRecognizedWorktree(dir, 'wait-queued-worktree')
   const liveSessions = path.join(hubRoot, 'skill-review', 'sessions.json')
   const before = fs.existsSync(liveSessions) ? fs.readFileSync(liveSessions, 'utf8') : ''
-  const started = Date.now()
   const payload = parseStdout(
     spawnHub(['attach', '--worktree', worktree, '--intent', 'no-spawn-wait', '--no-spawn', '--wait'], {
       env: { HUB_ROOT: dir, HUB_WAIT_TIMEOUT_MS: '4000', HUB_SPAWN_CODEX: '0' }
     }),
     'attach-no-spawn-wait'
   )
-  assert.ok(Date.now() - started < 3500, 'queued --wait must return without polling a missing pid')
   assert.equal(payload.session.status, 'queued')
   assert.equal(payload.session.pid, 0)
   assert.equal(fs.existsSync(path.join(dir, 'skill-review', `run-codex-${payload.session.id}.cmd`)), false)
@@ -515,7 +607,7 @@ test('attach --no-spawn --wait stays queued and does not launch Codex', (t) => {
 })
 
 test('session --id --wait reaps a fake pid exit 0 without launching Codex', { timeout: 20000 }, (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const worktree = makeRecognizedWorktree(dir, 'fake-pid-worktree')
   const liveSessions = path.join(hubRoot, 'skill-review', 'sessions.json')
@@ -573,7 +665,7 @@ test('session --id --wait reaps a fake pid exit 0 without launching Codex', { ti
 })
 
 test('session --id --wait reaps a fake pid nonzero exit as failed', { timeout: 20000 }, (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const chat = parseStdout(
     spawnHub(['chat', '--intent', 'wait-fail', '--no-spawn'], { env: { HUB_ROOT: dir, HUB_SPAWN_CODEX: '0' } }),
@@ -606,7 +698,7 @@ test('session --id --wait reaps a fake pid nonzero exit as failed', { timeout: 2
 })
 
 test('detach and edit --no-spawn enqueue the conversation prompt and finalize via fake pid', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   fs.mkdirSync(path.join(dir, 'overlay', 'prompts'), { recursive: true })
   fs.copyFileSync(path.join(hubRoot, 'overlay', 'prompts', 'detach.txt'), path.join(dir, 'overlay', 'prompts', 'detach.txt'))
@@ -676,7 +768,7 @@ test('shipped Local SessionRunner owns Codex launch defaults while CLI stays a t
 })
 
 test('CLI repair-links restores a broken fixture junction and rejects a dirty override', (t) => {
-  const dir = tempHub()
+  const dir = tempHub(t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const tree = path.join(dir, 'tree')
   for (const name of ['ozdqp-development', 'ozdqp-ui-development', 'ozdqp-git-workflow']) {

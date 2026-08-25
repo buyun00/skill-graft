@@ -43,6 +43,7 @@ export function CodexView({
     }
     const url = panelApi.sessionStreamUrl(selectedId);
     const source = new EventSource(url);
+    let terminal = false;
     setLog("");
     setStreamStatus("connecting");
     source.addEventListener("log", (event) => {
@@ -61,8 +62,18 @@ export function CodexView({
         setStreamStatus((event as MessageEvent).data || "status");
       }
     });
+    source.addEventListener("end", (event) => {
+      terminal = true;
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        setStreamStatus(data.reason ? `ended: ${data.reason}` : "ended");
+      } catch {
+        setStreamStatus("ended");
+      }
+      source.close();
+    });
     source.onerror = () => {
-      setStreamStatus((prev) => prev || "error");
+      if (!terminal) setStreamStatus((prev) => prev || "error");
     };
     return () => source.close();
   }, [selectedId]);
@@ -114,7 +125,7 @@ export function CodexView({
       <section className="glass p-5 rounded-[22px]">
         <SectionHeader
           title={selected ? `${selected.kind || "session"} ${selected.id}` : "Codex 日志"}
-          description="EventSource /api/codex/session/stream?id="
+          description="SSE log/status/end；terminal end 后显式 close，不自动重连"
         />
         {selected ? (
           <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -142,7 +153,7 @@ export function CodexView({
           ref={preRef}
           className="text-[12px] leading-6 whitespace-pre-wrap break-all text-ink/80 font-mono bg-ink/[0.03] rounded-xl p-3 max-h-[55vh] overflow-auto"
         >
-          {log || (selectedId ? "等待 event: log / event: status…" : "")}
+          {log || (selectedId ? "等待 event: log / event: status / event: end…" : "")}
         </pre>
       </section>
     </div>

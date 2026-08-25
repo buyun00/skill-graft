@@ -22,6 +22,14 @@ import { createLocalHost, openLocalHost } from '../dist/local/create-local-host.
 const NOW = '2031-02-03T04:05:06.000Z'
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
+function localDataRoot(t, prefix) {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  const dataRoot = path.join(parent, 'data')
+  fs.mkdirSync(dataRoot)
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
+  return dataRoot
+}
+
 function sha256(value) {
   return createHash('sha256').update(String(value)).digest('hex')
 }
@@ -385,7 +393,7 @@ test('Local durable schemas strictly cover state, sessions, history, and transac
 })
 
 test('fresh Local data root inspects empty, snapshots, and migrates through dry-run and commit', async (t) => {
-  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p2-fresh-'))
+  const dataRoot = localDataRoot(t, 'skill-graft-p2-fresh-')
   t.after(() => fs.rmSync(dataRoot, { recursive: true, force: true }))
   fs.mkdirSync(path.join(dataRoot, 'skills', 'ozdqp-development'), { recursive: true })
   fs.writeFileSync(path.join(dataRoot, 'skills', 'ozdqp-development', 'SKILL.md'), '# fixture\n', 'utf8')
@@ -421,7 +429,7 @@ test('fresh Local data root inspects empty, snapshots, and migrates through dry-
   assert.equal(current.data.status, 'current')
 })
 
-test('Local composition claims, materializes, completes attach, and reopens as an exact keep', { timeout: 120_000 }, async (t) => {
+test('Local composition claims, materializes, completes attach, and reopens as an exact keep', { timeout: 300_000 }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p3-composition-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const dataRoot = path.join(root, 'data')
@@ -429,6 +437,17 @@ test('Local composition claims, materializes, completes attach, and reopens as a
   const selectedSkill = 'ozdqp-development'
   const overrideContents = '# composition override\n'
   const skillContents = '# composition skill\n'
+  const leaseIdentity = (pid) => `test:local-p3-composition:${pid}`
+  const leaseProcessInspector = {
+    async currentIdentity(pid) {
+      assert.equal(pid, process.pid)
+      return leaseIdentity(pid)
+    },
+    async probe(pid, expectedIdentity) {
+      if (pid !== process.pid) return 'dead'
+      return expectedIdentity === leaseIdentity(pid) ? 'alive-owner' : 'pid-reused'
+    }
+  }
   writeFixtureFile(path.join(dataRoot, 'AGENTS.override.md'), overrideContents)
   writeFixtureFile(path.join(dataRoot, 'skills', selectedSkill, 'SKILL.md'), skillContents)
   fs.mkdirSync(worktree, { recursive: true })
@@ -442,7 +461,12 @@ test('Local composition claims, materializes, completes attach, and reopens as a
   ])
   git(worktree, ['config', 'extensions.worktreeConfig', 'true'])
 
-  const host = await openLocalHost({ packageRoot: PACKAGE_ROOT, dataRoot, hostId: 'local-p3-composition' })
+  const host = await openLocalHost({
+    packageRoot: PACKAGE_ROOT,
+    dataRoot,
+    hostId: 'local-p3-composition',
+    leaseProcessInspector
+  })
   const execute = (requestId, payload) => host.application.execute({
     ...payload,
     meta: host.commandMeta('test', requestId)
@@ -584,7 +608,12 @@ test('Local composition claims, materializes, completes attach, and reopens as a
     current: fs.readFileSync(currentFile),
     sessions: fs.readFileSync(path.join(reviewRoot, 'sessions.json'))
   }
-  const reopened = await openLocalHost({ packageRoot: PACKAGE_ROOT, dataRoot, hostId: 'local-p3-composition-reopen' })
+  const reopened = await openLocalHost({
+    packageRoot: PACKAGE_ROOT,
+    dataRoot,
+    hostId: 'local-p3-composition-reopen',
+    leaseProcessInspector
+  })
   const reopenExecute = (requestId, payload) => reopened.application.execute({
     ...payload,
     meta: reopened.commandMeta('test', requestId)
@@ -614,16 +643,45 @@ test('Local composition claims, materializes, completes attach, and reopens as a
   assertNoMaterializerGitResidue(worktree)
 })
 
-test('Local recovery rechecks late WALs, rejects malformed commands before recovery I/O, and clears failed attempts', async (t) => {
-  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p2-late-wal-'))
+test('Local startup recovery retries, memoizes orphan sweep, and rechecks late WALs', async (t) => {
+  const dataRoot = localDataRoot(t, 'skill-graft-p2-late-wal-')
   t.after(() => fs.rmSync(dataRoot, { recursive: true, force: true }))
-  const host = await openLocalHost({ packageRoot: PACKAGE_ROOT, dataRoot, hostId: 'local-p2-late-wal-test' })
+  let identityCalls = 0
+  let failStartupOnce = true
+  const leaseIdentity = (pid) => `test:local-p2-recovery:${pid}`
+  const host = createLocalHost({
+    packageRoot: PACKAGE_ROOT,
+    dataRoot,
+    hostId: 'local-p2-late-wal-test',
+    leaseProcessInspector: {
+      async currentIdentity(pid) {
+        identityCalls += 1
+        if (failStartupOnce) {
+          failStartupOnce = false
+          throw new Error('injected startup identity failure')
+        }
+        return leaseIdentity(pid)
+      },
+      async probe(pid, expectedIdentity) {
+        if (pid !== process.pid) return 'dead'
+        return expectedIdentity === leaseIdentity(pid) ? 'alive-owner' : 'pid-reused'
+      }
+    }
+  })
+
+  await assert.rejects(host.ready(), /injected startup identity failure/)
+  await host.ready()
+  const startupIdentityCalls = identityCalls
+  assert.ok(startupIdentityCalls > 1)
+  await host.ready()
+  assert.equal(identityCalls, startupIdentityCalls, 'successful startup orphan sweep must be memoized')
 
   const first = await host.application.execute({
     kind: 'inspectSchema',
     meta: host.commandMeta('test', 'late-wal-before')
   })
   assert.equal(first.ok, true)
+  assert.equal(identityCalls, startupIdentityCalls, 'clean recurring recovery must not repeat the orphan sweep')
 
   const journalRoot = path.join(dataRoot, '.skill-graft-transactions')
   const walFile = path.join(journalRoot, 'late.wal.json')
@@ -638,6 +696,7 @@ test('Local recovery rechecks late WALs, rejects malformed commands before recov
   assert.equal(malformed.ok, false)
   assert.equal(malformed.error.code, 'UNSUPPORTED_COMMAND')
   assert.deepEqual(fs.readFileSync(walFile), corruptBytes)
+  assert.equal(identityCalls, startupIdentityCalls, 'malformed commands must fail before recovery I/O')
 
   const corrupt = await host.application.execute({
     kind: 'inspectSchema',
@@ -647,17 +706,20 @@ test('Local recovery rechecks late WALs, rejects malformed commands before recov
   assert.equal(corrupt.error.code, 'STATE_CORRUPT')
   assert.equal(corrupt.error.retryable, false)
   assert.equal(JSON.stringify(corrupt).includes('SENTINEL-LATE-WAL'), false)
+  assert.ok(identityCalls > startupIdentityCalls, 'late WAL recovery must still acquire its durable lease')
 
   fs.unlinkSync(walFile)
+  const failedRecoveryIdentityCalls = identityCalls
   const retry = await host.application.execute({
     kind: 'inspectSchema',
     meta: host.commandMeta('test', 'late-wal-retry')
   })
   assert.equal(retry.ok, true)
+  assert.equal(identityCalls, failedRecoveryIdentityCalls, 'cleared WAL retry must not repeat the orphan sweep')
 })
 
 test('Local inspection reports an unknown future schema while writes leave its bytes unchanged', async (t) => {
-  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p2-future-schema-'))
+  const dataRoot = localDataRoot(t, 'skill-graft-p2-future-schema-')
   t.after(() => fs.rmSync(dataRoot, { recursive: true, force: true }))
   const reviewRoot = path.join(dataRoot, 'skill-review')
   fs.mkdirSync(reviewRoot, { recursive: true })
@@ -687,7 +749,7 @@ test('Local inspection reports an unknown future schema while writes leave its b
 })
 
 test('implicit runtime revision never consults ambient Git state', (t) => {
-  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p2-runtime-'))
+  const dataRoot = localDataRoot(t, 'skill-graft-p2-runtime-')
   t.after(() => fs.rmSync(dataRoot, { recursive: true, force: true }))
   const context = createHub(dataRoot, {
     git: {

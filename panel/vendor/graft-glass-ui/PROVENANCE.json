@@ -1,0 +1,240 @@
+{
+  "schemaVersion": 1,
+  "package": "graft-glass-ui",
+  "sourceRevision": "bb7b76ce2e8c2edc9a14330e8bf794516b9ce000",
+  "sourceState": "reviewed working-tree snapshot; content hashes below are authoritative",
+  "files": [
+    {
+      "path": "src/components/blocks/AppShell.tsx",
+      "sha256": "1bcb0fd1c790e7b463a42cdd1b4c108d109f0c9e0d532ccf5d17deb20ed02c21"
+    },
+    {
+      "path": "src/components/blocks/CartDrawer.tsx",
+      "sha256": "05c6d135e1f373ca3a969de49aa8e361b57d525884ca8df5d34cd33db9024757"
+    },
+    {
+      "path": "src/components/blocks/CategoryCard.tsx",
+      "sha256": "ebc81600c00a8eed25ff266bb98e04760d5861db55438656ae8b05b56bc9c74d"
+    },
+    {
+      "path": "src/components/blocks/CollectionCard.tsx",
+      "sha256": "15ea7a205aceacfee0499d892827e5a9c5e71777b00081913d7ef270f743aaee"
+    },
+    {
+      "path": "src/components/blocks/HeroSearch.tsx",
+      "sha256": "dfa27058764ee576c2cbe46aea861d5184312d3937d5eef11e3fe705e2d26867"
+    },
+    {
+      "path": "src/components/blocks/MobileTabBar.tsx",
+      "sha256": "c3f28cd99020f47bd7d7ab63e200f4516c4b1551c22bbc770d585eeba24133e7"
+    },
+    {
+      "path": "src/components/blocks/PromoCard.tsx",
+      "sha256": "1887caeb4c43cceca8dde2d0f653cca626f6e5772bab7ba1bd302d2efb2fc1cb"
+    },
+    {
+      "path": "src/components/blocks/RankedPanel.tsx",
+      "sha256": "463cb409b931fd718ec3b8e42080f911f74ffade3864351c0ecd74e01d654d70"
+    },
+    {
+      "path": "src/components/blocks/Sidebar.tsx",
+      "sha256": "27f839b8a65ebd48c5123a22065ebac55057b0253e692cd6714b53445d2f55ee"
+    },
+    {
+      "path": "src/components/blocks/SkillCard.tsx",
+      "sha256": "a9de09cdcc432c45c37cb4dee2b98b9fac35b8f9c97ae7ce4ce1b91652888d64"
+    },
+    {
+      "path": "src/components/blocks/SkillCardSkeleton.tsx",
+      "sha256": "a972d4b5ee79c80c13ed2cf56bcfe735e5546e07b1cc3e7f103caf426f3e6ff9"
+    },
+    {
+      "path": "src/components/hub/AttentionList.tsx",
+      "sha256": "0239657ef0b20c5cf421b32d88ca22431fc64eb4575a96507a738005701e7ed1"
+    },
+    {
+      "path": "src/components/hub/Greeting.tsx",
+      "sha256": "a75a1c26cccfc22836900b234a8e11d4531283a9de253997a21d5593e5a32a69"
+    },
+    {
+      "path": "src/components/hub/HubEmpty.tsx",
+      "sha256": "fbcabf2e7ab559aea58116e54d54087c00d05b844c6d700df31a01f496ac0d62"
+    },
+    {
+      "path": "src/components/hub/HubShell.tsx",
+      "sha256": "f9deaf333c86a613f8fe441c7c7b21e66ccacb8cc0138bdefa2cde58527a8018"
+    },
+    {
+      "path": "src/components/hub/HubSidebar.tsx",
+      "sha256": "5184d6ad1eb4e833e4ea7b9035ed29e3005958f5276936cc815490ddc1bb73e2"
+    },
+    {
+      "path": "src/components/hub/StatusBar.tsx",
+      "sha256": "a08894e267f3aaecbf2be2afb698ced7130a5af88450277f3378f2e649296fb5"
+    },
+    {
+      "path": "src/components/hub/StatusPill.tsx",
+      "sha256": "62f15bececfed17eae9e48650ee2eb181eec2ecadaa3b9e552d2b86d631c61a0"
+    },
+    {
+      "path": "src/components/hub/TopBar.tsx",
+      "sha256": "dfbde29c67c78c1d2b759e2e845e4efc64fc25d90eaa391cc5ae56dada10b0c8"
+    },
+    {
+      "path": "src/components/hub/VersionChip.tsx",
+      "sha256": "44f1c291e604ba9ba26a125dc2cb909e63151de74601ce1ddcb9ed5617a383f3"
+    },
+    {
+      "path": "src/components/hub/WorkspacePanel.tsx",
+      "sha256": "f33660094f6f7986aaf04256b52db2c9ed2b22b1054879f2561896322668b80b"
+    },
+    {
+      "path": "src/components/icons.tsx",
+      "sha256": "bdd4f6c4fe5658e56118d66b3a1483f717db6731501eeefb15e7bc4e5f907eb5"
+    },
+    {
+      "path": "src/components/index.ts",
+      "sha256": "562c49be42e5791751e1fa0a4ae9278a606aa8f2b02255712d701c52184de97a"
+    },
+    {
+      "path": "src/components/primitives/Glass.tsx",
+      "sha256": "62751479f7977905cf2bd28f2072a07a1df97c6373b1334aed50a061cd0ff3b0"
+    },
+    {
+      "path": "src/components/primitives/GlowOrb.tsx",
+      "sha256": "4d6bc373e3338ff8389d455e20369e7bde764ed92735993b4b7459e6961025aa"
+    },
+    {
+      "path": "src/components/primitives/Hairline.tsx",
+      "sha256": "c734cab757f5eea280bc4924bf426807ba0f62bb9b4fa6c1ebf7628c1b6e63d8"
+    },
+    {
+      "path": "src/components/primitives/SpinningBorder.tsx",
+      "sha256": "be3c48946dfdf8444f9772f0a8cc74927776367d99673b1d214fd827da2e96a0"
+    },
+    {
+      "path": "src/components/ui/AuthCard.tsx",
+      "sha256": "17382750b9f84555b2f718b8c4a63697cdfd28d671e461b817719fee375a239f"
+    },
+    {
+      "path": "src/components/ui/Avatar.tsx",
+      "sha256": "785478138679d8866a2526d9b3cc5598259382918e0dae18adfd14ce898c6e91"
+    },
+    {
+      "path": "src/components/ui/Badge.tsx",
+      "sha256": "1fa50fc3f05e4ba2ecf8a7694577f8c056bcf6f1873c5649dc3a50645b73f1f1"
+    },
+    {
+      "path": "src/components/ui/Button.tsx",
+      "sha256": "fa0a29412c077eeff63b238716972e142bd957de9c6d6c228bfbab1a85b2dd8b"
+    },
+    {
+      "path": "src/components/ui/CartLineItem.tsx",
+      "sha256": "f180fe4f36cba4db547139fc475725e206cd11b0d6c7bd7dedb1a85fdce66997"
+    },
+    {
+      "path": "src/components/ui/Chip.tsx",
+      "sha256": "95a40939c37f506d7ebd97219551ee3914b83448ca1f9ab45d6ecfb80763473b"
+    },
+    {
+      "path": "src/components/ui/CommandPalette.tsx",
+      "sha256": "d09d488b0c95d0a37cfa1764794fba2de9ed4cbca1a94804b4a7c8b279615e71"
+    },
+    {
+      "path": "src/components/ui/CreatorCard.tsx",
+      "sha256": "eaa9b81daa5c9dd8a20f9324fadfe1ba09c5e2828b54cd75ba96e28e666a7b79"
+    },
+    {
+      "path": "src/components/ui/EmptyState.tsx",
+      "sha256": "3ea5a402cad07a0b1a02199a089fea4d4d25271d1a3187e39bc7e9dfa232980b"
+    },
+    {
+      "path": "src/components/ui/FavoriteButton.tsx",
+      "sha256": "10d0509d41a9166c6967d9e5de26e08e9850f2f991f2865d3dd5f8f978c5b889"
+    },
+    {
+      "path": "src/components/ui/IconButton.tsx",
+      "sha256": "e4c7c14193dd0391964ffd935a9c06479ae61e43b077fb30d0487fc97f9aa365"
+    },
+    {
+      "path": "src/components/ui/IconTile.tsx",
+      "sha256": "442b37f45ce88708935b5bc6a62fc38e042fac19b25279c1b38b5ad2053a78c7"
+    },
+    {
+      "path": "src/components/ui/Input.tsx",
+      "sha256": "f6b01c108c07c4e8e0f0c48f2a8c07548899b24cf84e38b22b652be561bf8800"
+    },
+    {
+      "path": "src/components/ui/Kbd.tsx",
+      "sha256": "d5c878543656727e3f81c19444020d1e40cd2ee872eb6ed4eccd25c7fb2fe64a"
+    },
+    {
+      "path": "src/components/ui/Logo.tsx",
+      "sha256": "a70059f913dac1b3e2891105d753f0b9d8cb9ca6385b051612a3fcd62138276d"
+    },
+    {
+      "path": "src/components/ui/NavItem.tsx",
+      "sha256": "48e1f813c9c91fac60c84736ea2305b0ffafd7990cd2c3c57a6b4e8ec677b4a2"
+    },
+    {
+      "path": "src/components/ui/Overlay.tsx",
+      "sha256": "cb5d7512991666aac937c940e7e31ac5df151e18945854cb482fc475515ed1cd"
+    },
+    {
+      "path": "src/components/ui/Price.tsx",
+      "sha256": "ff2da6f0196db024e2d7a03bb0008f27e6946e1412a1b1c771f2be3616b86ae6"
+    },
+    {
+      "path": "src/components/ui/RankedRow.tsx",
+      "sha256": "6aa0bf827b6b12817c95a8a2216e0494d39399582384158c7ea5fb9ded8e1b21"
+    },
+    {
+      "path": "src/components/ui/Rating.tsx",
+      "sha256": "bca5c754b5e8ac4b152a89259505b043a08868e915aa9dc1db212c1b0452971f"
+    },
+    {
+      "path": "src/components/ui/SearchTrigger.tsx",
+      "sha256": "604144674686a14e27ecb8fb80f95834aaadd7c3e1385ad4c52ae0c125893e41"
+    },
+    {
+      "path": "src/components/ui/SectionHeader.tsx",
+      "sha256": "21b5b79892f3ecb5f868b7a1a7e902ca2d554b9065c1972a0826df1722c2e7b1"
+    },
+    {
+      "path": "src/components/ui/Sheet.tsx",
+      "sha256": "7351bb538318f9f9ad8bdf3d62d280cf34e6349c810f360801073d2377faa91f"
+    },
+    {
+      "path": "src/components/ui/Skeleton.tsx",
+      "sha256": "b17af8f66333a7cf5747e11b9421eca391524c9c4e138785249bdebab5493331"
+    },
+    {
+      "path": "src/components/ui/StatCell.tsx",
+      "sha256": "b84e3b71635e2a4c11dba4f196edcaea947f9fa35703b6b3e35f84e83081646c"
+    },
+    {
+      "path": "src/components/ui/Toast.tsx",
+      "sha256": "e6db41f6058fd4b23fcfb405d76d90406c2b002ecef621bdacce3040dfaeea78"
+    },
+    {
+      "path": "src/lib/categories.ts",
+      "sha256": "db59dce14fc827af18d87ae359a3d6d94b14ce7b778937af408babcc4134efa5"
+    },
+    {
+      "path": "src/lib/cn.ts",
+      "sha256": "741e238fa32b0eabc95f43d0282f6b99204173faf9b48d8b4a2c62f0a4caf1e5"
+    },
+    {
+      "path": "src/lib/color.ts",
+      "sha256": "5fa842ae7e16df0a079a86b1a945b7dcaff63739c53631ab2bc91aa4a1c69ea7"
+    },
+    {
+      "path": "src/lib/tokens.ts",
+      "sha256": "caa08857cc5a600c47a9ae9d59a1eceba7df9077e2f6f9001ce0eec390796d18"
+    },
+    {
+      "path": "src/theme/ThemeProvider.tsx",
+      "sha256": "42094875409913aad562c39f80aec83c89b6eed26c658f5a545d5bec482c02b1"
+    }
+  ]
+}

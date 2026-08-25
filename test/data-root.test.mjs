@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import { createServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -14,6 +15,7 @@ import {
 import { createInstallHost as createInstallHostAdapter } from '../dist/adapters/install-host.js'
 import {
   createPosixDaemonLaunchSpec,
+  setupHub,
   startDaemonDetached,
   uninstallHub
 } from '../dist/control/install.js'
@@ -540,18 +542,33 @@ test('POSIX detached start uses argv spawning and pins both aliases to an explic
   assert.equal(launches[0].env.HUB_API_PORT, String(port))
 })
 
-test('uninstall remains compatible with legacy HUB_ROOT and clears only the selected root alias', async (t) => {
+test('setup and uninstall accept legacy HUB_ROOT while preserving its pre-existing alias', async (t) => {
   const root = tempRoot(t)
-  const packageRoot = path.join(root, 'package')
   const dataRoot = path.join(root, 'legacy-data')
   const installDir = path.join(root, 'install')
-  fs.mkdirSync(installDir, { recursive: true })
-  fs.writeFileSync(path.join(installDir, 'installed.txt'), 'fixture\n')
+  const portProbe = createServer()
+  await new Promise((resolveListen, rejectListen) => {
+    portProbe.once('error', rejectListen)
+    portProbe.listen(0, '127.0.0.1', resolveListen)
+  })
+  const portAddress = portProbe.address()
+  assert.ok(portAddress && typeof portAddress === 'object')
+  const port = String(portAddress.port)
+  await new Promise((resolveClose, rejectClose) => {
+    portProbe.close((error) => error ? rejectClose(error) : resolveClose())
+  })
   const environment = new Map([
     ['HUB_ROOT', dataRoot],
-    ['SG_INSTALL_DIR', installDir]
+    ['SG_INSTALL_DIR', installDir],
+    ['HUB_API_PORT', port]
+  ])
+  const persistentEnvironment = new Map([
+    ['HUB_ROOT', { exists: true, value: dataRoot, kind: 'ExpandString' }]
   ])
   const environmentWrites = []
+  let userPathState = { exists: false, value: '', kind: null }
+  const readUserEnvironment = (name) => persistentEnvironment.get(name)
+    || { exists: false, value: '', kind: null }
   const host = createInstallHost({
     platform: 'win32',
     home: root,
@@ -561,21 +578,68 @@ test('uninstall remains compatible with legacy HUB_ROOT and clears only the sele
     env: (name) => environment.get(name),
     extraShimDir: () => null,
     pidAlive: () => false,
-    userPath: () => '',
-    setUserPath: () => {},
-    setUserEnv: (name, value) => {
-      environmentWrites.push([name, value])
-      if (value === null) environment.delete(name)
-      else environment.set(name, value)
+    localVolumeKind: () => 'local',
+    which: (command) => {
+      if (command === 'node') return process.execPath
+      if (command === 'git') return 'git'
+      if (command === 'codex') return 'codex'
+      if (command === 'sg' && fs.existsSync(path.join(installDir, 'bin', 'sg.cmd'))) {
+        return path.join(installDir, 'bin', 'sg.cmd')
+      }
+      return ''
+    },
+    commandVersion: () => 'fixture-version',
+    integrationSnapshot: undefined,
+    userPathState: () => ({ ...userPathState }),
+    userPath: () => userPathState.value,
+    compareExchangeUserPath: (expected, next) => {
+      assert.deepEqual(userPathState, expected)
+      userPathState = { ...next }
+      return true
+    },
+    userEnvState: (name) => ({ ...readUserEnvironment(name) }),
+    compareExchangeUserEnv: (name, expected, next) => {
+      assert.deepEqual(readUserEnvironment(name), expected)
+      environmentWrites.push([name, next.exists ? next.value : null])
+      if (next.exists) persistentEnvironment.set(name, { ...next })
+      else persistentEnvironment.delete(name)
+      return true
     },
     broadcastEnv: () => {}
   })
 
-  const result = await uninstallHub(packageRoot, host)
+  const setup = await setupHub(hubRoot, {
+    dryRun: false,
+    json: true,
+    noDaemon: true,
+    noPath: false,
+    noTask: true
+  }, host)
+  assert.equal(setup.ok, true, JSON.stringify(setup.issues))
+  assert.deepEqual(environmentWrites, [
+    ['SKILL_GRAFT_HOME', dataRoot],
+    ['HUB_API_PORT', port]
+  ])
+  assert.deepEqual(readUserEnvironment('HUB_ROOT'), {
+    exists: true,
+    value: dataRoot,
+    kind: 'ExpandString'
+  })
+
+  environmentWrites.length = 0
+  const result = await uninstallHub(hubRoot, host)
   assert.equal(result.ok, true, JSON.stringify(result.issues))
-  assert.deepEqual(environmentWrites, [['HUB_ROOT', null]])
-  assert.equal(environment.has('HUB_ROOT'), false)
-  assert.equal(environment.has('SKILL_GRAFT_HOME'), false)
+  assert.deepEqual(environmentWrites, [
+    ['SKILL_GRAFT_HOME', null],
+    ['HUB_API_PORT', null]
+  ])
+  assert.deepEqual(readUserEnvironment('HUB_ROOT'), {
+    exists: true,
+    value: dataRoot,
+    kind: 'ExpandString'
+  })
+  assert.equal(persistentEnvironment.has('SKILL_GRAFT_HOME'), false)
+  assert.equal(persistentEnvironment.has('HUB_API_PORT'), false)
 })
 
 test('installed shims pass coherent primary and compatibility roots to the child', (t) => {
@@ -721,6 +785,7 @@ test('trace run-daemon launcher assigns each data-root alias exactly once and fa
       GIT_OPTIONAL_LOCKS: '0'
     }
   }
+  fs.mkdirSync(trace.pinned.TEMP, { recursive: true })
   const launcher = renderShims(paths, trace).runDaemonCmd
   assert.equal((launcher.match(/^set "SKILL_GRAFT_HOME=/gm) || []).length, 1)
   assert.equal((launcher.match(/^set "HUB_ROOT=/gm) || []).length, 1)
@@ -741,6 +806,72 @@ test('trace run-daemon launcher assigns each data-root alias exactly once and fa
     legacy: path.resolve(dataRoot),
     xdg: path.join(home, 'xdg-config')
   })
+})
+
+test('Windows run-daemon launcher pins lifecycle HOME authority instead of inheriting the parent profile', {
+  skip: process.platform !== 'win32'
+}, (t) => {
+  const root = tempRoot(t)
+  const packageRoot = path.join(root, 'package')
+  const dataRoot = path.join(root, 'data')
+  const installDir = path.join(root, 'install')
+  const cliPath = path.join(packageRoot, 'dist', 'control', 'cli.js')
+  const marker = path.join(root, 'run-daemon-lifecycle-environment.json')
+  fs.mkdirSync(path.dirname(cliPath), { recursive: true })
+  fs.writeFileSync(cliPath, [
+    "const fs = require('node:fs')",
+    "fs.writeFileSync(process.env.SG_RUN_DAEMON_MARKER, JSON.stringify({ HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, APPDATA: process.env.APPDATA, LOCALAPPDATA: process.env.LOCALAPPDATA, TEMP: process.env.TEMP, TMP: process.env.TMP }))"
+  ].join('\n'))
+  const paths = resolveInstallPaths(pathApi, {
+    hubRoot: packageRoot,
+    packageRoot,
+    dataRoot,
+    nodePath: process.execPath,
+    installDir
+  })
+  const launcherEnvironment = {
+    HOME: path.join(root, 'lifecycle-home'),
+    USERPROFILE: path.join(root, 'lifecycle-home'),
+    APPDATA: path.join(root, 'lifecycle-home', 'appdata'),
+    LOCALAPPDATA: path.join(root, 'lifecycle-home', 'localappdata'),
+    TEMP: path.join(root, 'lifecycle-home', 'temp'),
+    TMP: path.join(root, 'lifecycle-home', 'temp')
+  }
+  fs.mkdirSync(launcherEnvironment.TEMP, { recursive: true })
+  const launcher = renderShims(paths, undefined, launcherEnvironment).runDaemonCmd
+  for (const name of Object.keys(launcherEnvironment)) {
+    assert.equal((launcher.match(new RegExp(`^set "${name}=`, 'gm')) || []).length, 1, name)
+  }
+  assert.throws(
+    () => renderShims(paths, undefined, { HOME: `${launcherEnvironment.HOME}"hostile` }),
+    /daemon launcher HOME is not safely representable/
+  )
+  assert.throws(
+    () => renderShims(paths, undefined, { USERPROFILE: `${launcherEnvironment.USERPROFILE}\r\nhostile` }),
+    /daemon launcher USERPROFILE is not safely representable/
+  )
+  fs.mkdirSync(paths.installDir, { recursive: true })
+  fs.writeFileSync(paths.runDaemonCmd, launcher)
+  const inheritedRoot = path.join(root, 'wrong-inherited-profile')
+  const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', paths.runDaemonCmd], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+    env: {
+      ...process.env,
+      HOME: inheritedRoot,
+      USERPROFILE: inheritedRoot,
+      APPDATA: path.join(inheritedRoot, 'appdata'),
+      LOCALAPPDATA: path.join(inheritedRoot, 'localappdata'),
+      TEMP: path.join(inheritedRoot, 'temp'),
+      TMP: path.join(inheritedRoot, 'temp'),
+      SG_RUN_DAEMON_MARKER: marker
+    }
+  })
+
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), launcherEnvironment)
+
 })
 
 test('Windows sg shim never expands hostile inherited roots and lets the Node resolver fail closed', {

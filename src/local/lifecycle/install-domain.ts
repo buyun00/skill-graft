@@ -6,6 +6,210 @@ export const PRODUCT_ALIAS = 'ozdqp-hub'
 export const TASK_NAME = 'SkillGraft'
 export const API_PORT = 18765
 export const INSTALL_DIR_NAME = 'skill-graft'
+export const INSTALL_MANIFEST_VERSION = 2 as const
+export const DATA_ROOT_MARKER_VERSION = 1 as const
+export const PUBLIC_RUNTIME_CORPUS_VERSION = 1 as const
+export const LIFECYCLE_ROOT_RECEIPT_VERSION = 1 as const
+
+export type Sha256Digest = `sha256:${string}`
+
+export type OwnedInstallFile = {
+  path: string
+  sha256: Sha256Digest
+}
+
+export type OwnedEnvironmentValue = {
+  name: 'SKILL_GRAFT_HOME' | 'HUB_ROOT' | 'HUB_API_PORT'
+  value: string
+  created: boolean
+  kind: 'String' | 'ExpandString'
+}
+
+export type LifecycleUserPathValueState = {
+  exists: boolean
+  value: string
+  kind: 'String' | 'ExpandString' | null
+}
+
+export type InstallManifestV2 = {
+  schemaVersion: typeof INSTALL_MANIFEST_VERSION
+  installId: string
+  product: typeof PRODUCT_NAME
+  command: typeof PRODUCT_COMMAND
+  alias: typeof PRODUCT_ALIAS
+  packageRoot: string
+  packageVersion: string
+  packageSha256: Sha256Digest
+  nodePath: string
+  dataRoot: string
+  dataRootId: string
+  installDir: string
+  binDir: string
+  extraShimDir: string | null
+  port: number
+  taskName: string
+  features: {
+    path: boolean
+    task: boolean
+    daemon: boolean
+  }
+  owned: {
+    files: readonly OwnedInstallFile[]
+    pathEntry: {
+      value: string
+      added: boolean
+      prior: LifecycleUserPathValueState | null
+    }
+    environment: readonly OwnedEnvironmentValue[]
+    task: { taskPath: '\\'; name: string; launcher: string; created: boolean } | null
+  }
+  installedAt: string
+  updatedAt: string
+}
+
+export type PublicRuntimeCorpusEntry = {
+  path: string
+  sha256: Sha256Digest
+  size: number
+}
+
+export type DataRootMarkerV1 = {
+  schemaVersion: typeof DATA_ROOT_MARKER_VERSION
+  dataRootId: string
+  activeInstallId: string | null
+  canonicalRoot: string
+  createdAt: string
+  runtime: {
+    schemaVersion: typeof PUBLIC_RUNTIME_CORPUS_VERSION
+    files: readonly PublicRuntimeCorpusEntry[]
+  }
+}
+
+/**
+ * Per-user discovery authority for the one preserved Skill Graft data root.
+ *
+ * This record deliberately contains only stable lifecycle identity. Provider
+ * selections such as PATH, Task Scheduler, and API port remain manifest/WAL
+ * authority and are never inferred from ambient process environment.
+ */
+type LifecycleRootReceiptBaseV1 = {
+  schemaVersion: typeof LIFECYCLE_ROOT_RECEIPT_VERSION
+  product: typeof PRODUCT_NAME
+  installId: string
+  dataRootId: string
+  dataRoot: string
+  installDir: string
+  packageRoot: string
+  packageVersion: string
+  packageSha256: Sha256Digest
+  createdAt: string
+  updatedAt: string
+}
+
+export type LifecycleRootReceiptV1 = LifecycleRootReceiptBaseV1 & ({
+  state: 'active' | 'inactive'
+} | {
+  state: 'purging'
+  purgeId: string
+  lockToken: string
+  priorInactiveReceiptSha256: Sha256Digest
+  planHash: Sha256Digest
+  treeSha256: Sha256Digest
+  entries: number
+  bytes: number
+  rootDev: string
+  rootIno: string
+  tombstone: string
+  quarantine: string
+  deletedWalSha256: Sha256Digest
+})
+
+export type DaemonLifecycleReceiptAuthorityFileState = Readonly<{
+  bytes: Buffer | null
+  stat: Readonly<{ dev: number; ino: number; size: number; mtimeMs: number; nlink: number }> | null
+}>
+
+/**
+ * Leaf-level snapshot passed into daemon-protocol through an explicit reader
+ * port.  The lifecycle control layer remains the only receipt parser; keeping
+ * this value type in the domain module avoids an install -> daemon -> install
+ * runtime import cycle when D1 wires the protocol into production.
+ */
+export type DaemonLifecycleReceiptAuthoritySnapshot = Readonly<{
+  home: string
+  directory: string
+  directoryState: Readonly<{ dev: number; ino: number; size: number; mtimeMs: number; nlink: number }>
+  entries: readonly string[]
+  homeIdentity: string
+  namespaceMarker: string
+  namespaceMarkerState: DaemonLifecycleReceiptAuthorityFileState
+  receiptFile: string
+  receipt: LifecycleRootReceiptV1
+  receiptState: DaemonLifecycleReceiptAuthorityFileState
+  ownerStageNamespaceId: string | null
+  ownerStageAuthorityMarker: string | null
+  ownerStageAuthorityMarkerState: DaemonLifecycleReceiptAuthorityFileState | null
+  daemonStageNamespaceId: string | null
+  daemonStageAuthorityMarker: string | null
+  daemonStageAuthorityMarkerState: DaemonLifecycleReceiptAuthorityFileState | null
+}>
+
+export type LifecycleIntegrationStateV1 = {
+  userPath: LifecycleUserPathValueState & {
+    managed: boolean
+  }
+  environment: readonly {
+    name: OwnedEnvironmentValue['name']
+    exists: boolean
+    value: string
+    kind: 'String' | 'ExpandString' | null
+  }[]
+  task: {
+    managed: boolean
+    exists: boolean
+    action: string
+  }
+}
+
+export type LifecycleExternalArtifactFactV1 = {
+  kind: 'file' | 'symlink' | 'directory' | 'other'
+  dev: number
+  ino: number
+  mode: number
+  size: number
+  mtimeMs: number
+  nlink: number
+  sha256: Sha256Digest | null
+  linkTarget: string | null
+}
+
+export type LifecycleExternalArtifactV1 = {
+  path: string
+  ownedSha256: Sha256Digest
+  action: 'delete-exact' | 'preserve-absent' | 'preserve-foreign'
+  before: LifecycleExternalArtifactFactV1 | null
+}
+
+export type LifecycleWalV1 = {
+  schemaVersion: 1
+  walId: string
+  lockToken: string
+  operation: 'setup' | 'upgrade' | 'uninstall'
+  phase: 'prepared' | 'switched' | 'committed'
+  installDir: string
+  oldManifest: InstallManifestV2 | null
+  newManifest: InstallManifestV2 | null
+  oldReceipt: LifecycleRootReceiptV1 | null
+  newReceipt: LifecycleRootReceiptV1
+  oldMarker: DataRootMarkerV1 | null
+  newMarker: DataRootMarkerV1 | null
+  oldIntegration: LifecycleIntegrationStateV1
+  newIntegration: LifecycleIntegrationStateV1
+  externalArtifacts: readonly LifecycleExternalArtifactV1[]
+  tombstone: string | null
+  oldDaemonRunning: boolean
+  createdAt: string
+}
 
 export type InstallPaths = {
   product: string
@@ -26,6 +230,9 @@ export type InstallPaths = {
   shimAliasCmd: string
   shimUnix: string
   manifestPath: string
+  dataMarkerPath: string
+  lifecycleLockPath: string
+  lifecycleWalPath: string
   silentVbs: string
   runDaemonCmd: string
   extraShimDir: string | null
@@ -94,6 +301,21 @@ export type DoctorReport = {
     apiHealthy: boolean
     apiUrl: string
   }
+  lifecycle: {
+    manifest: boolean
+    ownership: boolean
+    lockHealthy: boolean
+    dataMarker: boolean
+    packageVersion: string
+    installedVersion: string
+    versionMatch: boolean
+    corpusEmpty: boolean
+    lockState: 'clear' | 'active' | 'stale' | 'unverifiable'
+    walPending: boolean
+    durablePending: number
+    reviewLocks: { active: number; stale: number; unverifiable: number }
+    expected: { path: boolean; task: boolean; daemon: boolean } | null
+  }
   issues: DoctorIssue[]
 }
 
@@ -132,12 +354,60 @@ export type SetupResult = {
 export type UninstallResult = {
   ok: boolean
   action: 'uninstall'
+  status: 'uninstalled' | 'already-uninstalled' | 'failed'
   stopped: boolean
   taskRemoved: boolean
   pathRemoved: boolean
   filesRemoved: boolean
   extraShimsRemoved: boolean
   installDir: string
+  issues: DoctorIssue[]
+}
+
+export type UpgradeFlags = {
+  dryRun: boolean
+  json: boolean
+  noDaemon: boolean
+}
+
+export type UpgradeResult = {
+  ok: boolean
+  action: 'upgrade'
+  dryRun: boolean
+  status: 'planned' | 'upgraded' | 'already-current' | 'failed'
+  fromVersion: string
+  toVersion: string
+  packageRoot: string
+  installDir: string
+  doctor: DoctorReport
+  issues: DoctorIssue[]
+}
+
+export type PurgePlanV1 = {
+  schemaVersion: 1
+  action: 'purge'
+  dataRootId: string
+  treeSha256: Sha256Digest
+  entries: number
+  bytes: number
+  planHash: Sha256Digest
+}
+
+export type PurgeFlags = {
+  dataRoot: string
+  dryRun: boolean
+  commit: boolean
+  planHash?: Sha256Digest
+  dataRootId?: string
+  json: boolean
+}
+
+export type PurgeResult = {
+  ok: boolean
+  action: 'purge'
+  mode: 'dryRun' | 'commit'
+  status: 'planned' | 'purged' | 'already-absent' | 'failed'
+  plan: PurgePlanV1 | null
   issues: DoctorIssue[]
 }
 
@@ -168,14 +438,34 @@ export type DoctorFacts = {
   shimAliasExists: boolean
   shimUnixExists: boolean
   extraShimExists: boolean
+  extraShimDir?: string | null
   userPath: string
   pathSep: string
   caseInsensitive: boolean
   taskRegistered: boolean
   daemonPid: number
+  apiPid?: number
   daemonAlive: boolean
   apiHealthy: boolean
   apiPort: number
+  manifestExists?: boolean
+  manifestOwned?: boolean
+  lifecycleExpected?: { path: boolean; task: boolean; daemon: boolean }
+  lifecycleLockHealthy?: boolean
+  dataMarkerOk?: boolean
+  packageVersion?: string
+  installedVersion?: string
+  versionMatch?: boolean
+  corpusEmpty?: boolean
+  lifecycleLockState?: 'clear' | 'active' | 'stale' | 'unverifiable'
+  lifecycleWalPending?: boolean
+  durablePending?: number
+  reviewLockActive?: number
+  reviewLockStale?: number
+  reviewLockUnverifiable?: number
+  integrationInspectionError?: string
+  daemonInspectionError?: string
+  corpusInspectionError?: string
 }
 
 export function resolveInstallDir(input: {
@@ -201,6 +491,7 @@ export function resolveInstallPaths(
     nodePath: string
     installDir: string
     extraShimDir?: string | null
+    taskName?: string
     port?: number
   }
 ): InstallPaths {
@@ -210,12 +501,15 @@ export function resolveInstallPaths(
   const installDir = path.resolve(input.installDir)
   const binDir = path.join(installDir, 'bin')
   const extraShimDir = input.extraShimDir ? path.resolve(input.extraShimDir) : null
-  const port = input.port || API_PORT
+  const port = input.port ?? API_PORT
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error('lifecycle API port must be an integer from 1 to 65535')
+  }
   return {
     product: PRODUCT_NAME,
     command: PRODUCT_COMMAND,
     alias: PRODUCT_ALIAS,
-    taskName: TASK_NAME,
+    taskName: input.taskName || TASK_NAME,
     packageRoot,
     dataRoot,
     hubRoot,
@@ -228,6 +522,11 @@ export function resolveInstallPaths(
     shimAliasCmd: path.join(binDir, `${PRODUCT_ALIAS}.cmd`),
     shimUnix: path.join(binDir, PRODUCT_COMMAND),
     manifestPath: path.join(installDir, 'install.json'),
+    dataMarkerPath: path.join(dataRoot, '.skill-graft-data-root.json'),
+    // All mutations of one data root, including purge, share this external
+    // namespace.  It stays outside the root so rename/delete cannot erase it.
+    lifecycleLockPath: `${dataRoot}.lifecycle.lock`,
+    lifecycleWalPath: `${dataRoot}.lifecycle-wal.json`,
     silentVbs: path.join(installDir, 'silent-run.vbs'),
     runDaemonCmd: path.join(installDir, 'run-daemon.cmd'),
     extraShimDir,
@@ -286,8 +585,11 @@ export function mergeUserPath(
 ): { path: string; changed: boolean; already: boolean } {
   const parts = current.split(sep).map((part) => part.trim()).filter(Boolean)
   const already = parts.some((part) => sameDir(part, binDir, caseInsensitive))
-  if (already) return { path: current.replace(/\s+$/, ''), changed: false, already: true }
-  const next = parts.length ? `${binDir}${sep}${parts.join(sep)}` : binDir
+  if (already) return { path: current, changed: false, already: true }
+  // PATH is user-owned opaque text.  Detection may normalize each entry, but
+  // the lifecycle is only allowed to prepend its one entry and must preserve
+  // every existing byte (including empty entries, whitespace, and %VARS%).
+  const next = current.length > 0 ? `${binDir}${sep}${current}` : binDir
   return { path: next, changed: true, already: false }
 }
 
@@ -297,14 +599,21 @@ export function removeFromUserPath(
   sep: string,
   caseInsensitive: boolean
 ): { path: string; changed: boolean } {
-  const parts = current.split(sep).map((part) => part.trim()).filter(Boolean)
-  const kept = parts.filter((part) => !sameDir(part, binDir, caseInsensitive))
-  const next = kept.join(sep)
-  return { path: next, changed: next !== parts.join(sep) }
+  const boundary = current.indexOf(sep)
+  const first = boundary < 0 ? current : current.slice(0, boundary)
+  if (!sameDir(first, binDir, caseInsensitive)) return { path: current, changed: false }
+  return {
+    path: boundary < 0 ? '' : current.slice(boundary + sep.length),
+    changed: true
+  }
 }
 
 export function pathHasDir(current: string, dir: string, sep: string, caseInsensitive: boolean): boolean {
   return current.split(sep).some((part) => sameDir(part.trim(), dir, caseInsensitive))
+}
+
+export function expectedTaskAction(vbsPath: string): string {
+  return `wscript.exe\u0000"${stripTrailingSep(vbsPath)}"`
 }
 
 export function toGitBashPath(winPath: string): string {
@@ -314,7 +623,16 @@ export function toGitBashPath(winPath: string): string {
   return winPath
 }
 
-export function renderShims(paths: InstallPaths, daemonTrace?: DaemonTraceEnvironment): {
+export type DaemonLauncherEnvironment = Readonly<Partial<Record<
+  'HOME' | 'USERPROFILE' | 'APPDATA' | 'LOCALAPPDATA' | 'TEMP' | 'TMP',
+  string
+>>>
+
+export function renderShims(
+  paths: InstallPaths,
+  daemonTrace?: DaemonTraceEnvironment,
+  launcherEnvironment: DaemonLauncherEnvironment = {}
+): {
   sgCmd: string
   aliasCmd: string
   unix: string
@@ -326,10 +644,19 @@ export function renderShims(paths: InstallPaths, daemonTrace?: DaemonTraceEnviro
   const dataRoot = stripTrailingSep(paths.dataRoot)
   const node = stripTrailingSep(paths.nodePath)
   const cli = stripTrailingSep(paths.cliPath)
-  const sgCmd = renderCmdShim(dataRoot, node, cli, paths.port)
+  const sgCmd = renderCmdShim(dataRoot, node, cli, paths.port, paths.installDir, paths.taskName)
   const unixNode = toGitBashPath(node)
   const unixCli = toGitBashPath(cli)
   const unixData = toGitBashPath(dataRoot)
+  const launcherEnvironmentLines = (['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP'] as const)
+    .flatMap((name) => {
+      const value = launcherEnvironment[name]
+      if (value === undefined) return []
+      if (!value || /["\u0000\r\n]/.test(value)) {
+        throw new Error(`daemon launcher ${name} is not safely representable`)
+      }
+      return [`set "${name}=${batEnvironment(value)}"`]
+    })
   const unix = [
     '#!/bin/sh',
     'if [ -z "${SKILL_GRAFT_HOME-}" ] && [ -z "${HUB_ROOT-}" ]; then',
@@ -343,14 +670,17 @@ export function renderShims(paths: InstallPaths, daemonTrace?: DaemonTraceEnviro
     'if [ -z "${HUB_API_PORT-}" ]; then',
     `  HUB_API_PORT=${shellSingleQuote(String(paths.port))}`,
     'fi',
-    'export SKILL_GRAFT_HOME HUB_ROOT HUB_API_PORT',
+    `SG_INSTALL_DIR=${shellSingleQuote(toGitBashPath(paths.installDir))}`,
+    `SG_TASK_NAME=${shellSingleQuote(paths.taskName)}`,
+    'export SKILL_GRAFT_HOME HUB_ROOT HUB_API_PORT SG_INSTALL_DIR SG_TASK_NAME',
     `exec ${shellSingleQuote(unixNode)} ${shellSingleQuote(unixCli)} "$@"`,
     ''
   ].join('\n')
   const runCmd = stripTrailingSep(paths.runDaemonCmd)
   const vbs = [
     'Set sh = CreateObject("Wscript.Shell")',
-    `sh.Run "cmd.exe /c ""${runCmd.replace(/"/g, '')}""", 0, False`,
+    `rc = sh.Run("cmd.exe /c ""${runCmd.replace(/"/g, '')}""", 0, True)`,
+    'WScript.Quit rc',
     ''
   ].join('\r\n')
   const runDaemonCmd = [
@@ -360,6 +690,9 @@ export function renderShims(paths: InstallPaths, daemonTrace?: DaemonTraceEnviro
     `set "SKILL_GRAFT_HOME=${bat(dataRoot)}"`,
     `set "HUB_ROOT=${bat(dataRoot)}"`,
     `set "HUB_API_PORT=${paths.port}"`,
+    `set "SG_INSTALL_DIR=${bat(paths.installDir)}"`,
+    `set "SG_TASK_NAME=${bat(paths.taskName)}"`,
+    ...launcherEnvironmentLines,
     ...(daemonTrace ? [
       'for /f "tokens=1 delims==" %%G in (\'set GIT_ 2^>nul\') do set "%%G="',
       'for /f "tokens=1 delims==" %%D in (\'set DSH_ 2^>nul\') do set "%%D="',
@@ -373,6 +706,7 @@ export function renderShims(paths: InstallPaths, daemonTrace?: DaemonTraceEnviro
     ] : []),
     `cd /d "${bat(packageRoot)}"`,
     `"${bat(node)}" "${bat(cli)}" daemon run`,
+    'exit /b %ERRORLEVEL%',
     ''
   ].join('\r\n')
   const manifest = `${JSON.stringify(
@@ -407,24 +741,63 @@ export function evaluateDoctor(paths: InstallPaths, facts: DoctorFacts): DoctorR
   const onUserPath = pathHasDir(facts.userPath, paths.binDir, facts.pathSep, facts.caseInsensitive)
   const pathOk = onUserPath || facts.extraShimExists
   const daemonOk = facts.daemonAlive && facts.apiHealthy
+  const expected = facts.lifecycleExpected
+  const manifestOk = facts.manifestExists ?? false
+  const ownershipOk = facts.manifestOwned ?? false
+  const lockHealthy = facts.lifecycleLockHealthy ?? true
+  const dataMarkerOk = facts.dataMarkerOk ?? false
+  const versionMatch = facts.versionMatch ?? false
+  const lockState = facts.lifecycleLockState || (lockHealthy ? 'clear' : 'unverifiable')
+  const walPending = Boolean(facts.lifecycleWalPending)
+  const durablePending = facts.durablePending || 0
+  const reviewActive = facts.reviewLockActive || 0
+  const reviewStale = facts.reviewLockStale || 0
+  const reviewUnverifiable = facts.reviewLockUnverifiable || 0
   if (!nodeOk) issues.push({ level: 'error', message: 'Node.js is not installed or not on PATH' })
   if (!gitOk) issues.push({ level: 'error', message: 'Git is not installed or not on PATH' })
   if (!distOk) issues.push({ level: 'error', message: `CLI is not built (${paths.cliPath}). Run setup.cmd or npm run build` })
   if (!layoutOk) issues.push({ level: 'error', message: `Missing hub directories: ${facts.missingLayout.join(', ')}` })
   if (!shimsOk) issues.push({ level: 'warn', message: `sg is not installed. Run:  ${paths.cliPath ? 'sg setup' : 'setup.cmd'}` })
-  if (shimsOk && !pathOk) issues.push({ level: 'warn', message: `User PATH does not include ${paths.binDir}. Open a new terminal after setup` })
+  if (shimsOk && expected?.path && !pathOk) issues.push({ level: 'warn', message: `User PATH does not include ${paths.binDir}. Open a new terminal after setup` })
   if (!facts.codexPath) issues.push({ level: 'warn', message: 'Codex CLI is not installed; attach/edit/chat cannot spawn a conversation' })
-  if (!facts.taskRegistered) issues.push({ level: 'warn', message: `Logon task ${paths.taskName} is not registered` })
-  if (!facts.daemonAlive) issues.push({ level: 'warn', message: 'Keep-alive daemon is not running' })
-  else if (!facts.apiHealthy) issues.push({ level: 'warn', message: `API is down (${paths.apiUrl})` })
+  if (expected?.task && !facts.taskRegistered) issues.push({ level: 'warn', message: `Logon task ${paths.taskName} is not registered` })
+  if (expected?.daemon && !facts.daemonAlive) issues.push({ level: 'warn', message: 'Keep-alive daemon is not running' })
+  else if (expected?.daemon && !facts.apiHealthy) issues.push({ level: 'warn', message: `API is down (${paths.apiUrl})` })
+  if (facts.integrationInspectionError) {
+    issues.push({ level: 'error', message: `Lifecycle integration inspection failed: ${facts.integrationInspectionError}` })
+  }
+  if (facts.daemonInspectionError) {
+    issues.push({ level: 'error', message: `Daemon inspection failed: ${facts.daemonInspectionError}` })
+  }
+  if (facts.corpusInspectionError) {
+    issues.push({ level: 'error', message: `Private Skill corpus inspection failed: ${facts.corpusInspectionError}` })
+  }
+  if (!manifestOk) issues.push({ level: 'error', message: 'Install ownership manifest is missing' })
+  else if (!ownershipOk) issues.push({ level: 'error', message: 'Install ownership manifest does not match current lifecycle artifacts' })
+  if (!dataMarkerOk) issues.push({ level: 'error', message: 'Data-root ownership marker is missing or invalid' })
+  if (lockState === 'active') issues.push({ level: 'error', message: 'Lifecycle operation is currently active' })
+  else if (lockState === 'stale') issues.push({ level: 'warn', message: 'Lifecycle lock is stale and recoverable on the next write' })
+  else if (lockState === 'unverifiable') issues.push({ level: 'error', message: 'Lifecycle lock is unverifiable' })
+  if (walPending) issues.push({ level: 'error', message: 'Lifecycle WAL requires recovery before the installation is ready' })
+  if (durablePending > 0) issues.push({ level: 'error', message: `${durablePending} durable transaction artifact(s) require recovery` })
+  if (reviewActive > 0) issues.push({ level: 'error', message: `${reviewActive} application lease(s) are active` })
+  if (reviewStale > 0) issues.push({ level: 'warn', message: `${reviewStale} application lease(s) are stale and recoverable` })
+  if (reviewUnverifiable > 0) issues.push({ level: 'error', message: `${reviewUnverifiable} application lease artifact(s) are unverifiable` })
+  if (!facts.packageVersion || !facts.installedVersion || !versionMatch) issues.push({ level: 'error', message: 'Installed package version does not match the active ownership manifest' })
+  if (facts.corpusEmpty) issues.push({ level: 'warn', message: 'Private Skill corpus is empty; import or create Skills before pinning a worktree' })
   const errors = issues.filter((issue) => issue.level === 'error')
+  const expectedReady = !expected || (
+    (!expected.path || pathOk)
+    && (!expected.task || facts.taskRegistered)
+    && (!expected.daemon || daemonOk)
+  )
   return {
-    ok: errors.length === 0,
+    ok: errors.length === 0 && expectedReady,
     hubRoot: paths.hubRoot,
     command: PRODUCT_COMMAND,
     node: { ok: nodeOk, path: facts.nodePath, version: facts.nodeVersion },
     git: { ok: gitOk, path: facts.gitPath, version: facts.gitVersion },
-    dist: { ok: distOk, path: paths.cliPath, version: distOk ? 'built' : '' },
+    dist: { ok: distOk, path: paths.cliPath, version: distOk ? facts.packageVersion || 'unknown' : '' },
     codex: { ok: Boolean(facts.codexPath), path: facts.codexPath, version: facts.codexPath ? 'present' : '' },
     layout: { ok: layoutOk, missing: facts.missingLayout },
     shims: {
@@ -433,7 +806,7 @@ export function evaluateDoctor(paths: InstallPaths, facts: DoctorFacts): DoctorR
       alias: facts.shimAliasExists ? paths.shimAliasCmd : '',
       unix: facts.shimUnixExists ? paths.shimUnix : ''
     },
-    path: { ok: pathOk, binDir: paths.binDir, onUserPath, extraShimDir: paths.extraShimDir },
+    path: { ok: pathOk, binDir: paths.binDir, onUserPath, extraShimDir: facts.extraShimDir ?? paths.extraShimDir },
     daemon: {
       ok: daemonOk,
       taskName: paths.taskName,
@@ -442,6 +815,21 @@ export function evaluateDoctor(paths: InstallPaths, facts: DoctorFacts): DoctorR
       pid: facts.daemonPid,
       apiHealthy: facts.apiHealthy,
       apiUrl: paths.apiUrl
+    },
+    lifecycle: {
+      manifest: manifestOk,
+      ownership: ownershipOk,
+      lockHealthy,
+      dataMarker: dataMarkerOk,
+      packageVersion: facts.packageVersion || '',
+      installedVersion: facts.installedVersion || '',
+      versionMatch,
+      corpusEmpty: Boolean(facts.corpusEmpty),
+      lockState,
+      walPending,
+      durablePending,
+      reviewLocks: { active: reviewActive, stale: reviewStale, unverifiable: reviewUnverifiable },
+      expected: expected || null
     },
     issues
   }
@@ -495,6 +883,10 @@ export function formatSetupReport(result: SetupResult): string {
 
 export function formatDoctorReport(report: DoctorReport): string {
   const mark = (ok: boolean) => (ok ? 'ok  ' : 'FAIL')
+  const expected = report.lifecycle.expected
+  const state = (enabled: boolean, ok: boolean, success: string, failure: string) => enabled
+    ? `${ok ? 'ok  ' : 'warn'} ${ok ? success : failure}`
+    : 'skip not owned'
   const lines = [
     'skill-graft doctor',
     '',
@@ -505,9 +897,9 @@ export function formatDoctorReport(report: DoctorReport): string {
     `  CLI         ${mark(report.dist.ok)} ${report.dist.path}`,
     `  Layout      ${mark(report.layout.ok)} ${report.layout.ok ? 'ok' : report.layout.missing.join(', ')}`,
     `  sg          ${mark(report.shims.ok)} ${report.shims.cmd || 'not installed'}`,
-    `  PATH        ${mark(report.path.ok)} ${report.path.binDir}${report.path.onUserPath ? ' (user PATH)' : ''}`,
-    `  Autostart   ${report.daemon.taskRegistered ? 'ok  ' : 'warn'} task ${report.daemon.taskName}`,
-    `  Daemon      ${report.daemon.running ? 'ok  ' : 'warn'} pid ${report.daemon.pid || '-'}  api ${report.daemon.apiHealthy ? 'up' : 'down'}`,
+    `  PATH        ${expected?.path === false ? 'skip not owned' : `${mark(report.path.ok)} ${report.path.binDir}${report.path.onUserPath ? ' (user PATH)' : ''}`}`,
+    `  Autostart   ${state(expected?.task !== false, report.daemon.taskRegistered, `task ${report.daemon.taskName}`, `task ${report.daemon.taskName} missing`)}`,
+    `  Daemon      ${state(expected?.daemon !== false, report.daemon.running && report.daemon.apiHealthy, `pid ${report.daemon.pid} api up`, `pid ${report.daemon.pid || '-'} api down`)}`,
     ''
   ]
   if (report.issues.length) {
@@ -521,6 +913,27 @@ export function formatDoctorReport(report: DoctorReport): string {
 }
 
 export function formatUninstallReport(result: UninstallResult): string {
+  if (result.status === 'already-uninstalled' && result.ok) {
+    return [
+      'skill-graft uninstall',
+      '',
+      'Already uninstalled; no owned artifacts were removed.'
+    ].join('\n')
+  }
+  if (result.status === 'uninstalled' && result.ok) {
+    const outcome = (removed: boolean) => (removed ? 'ok   removed' : 'skip not owned / preserved')
+    return [
+      'skill-graft uninstall',
+      '',
+      `  Daemon      ${outcome(result.stopped)}`,
+      `  Autostart   ${outcome(result.taskRemoved)}`,
+      `  PATH        ${outcome(result.pathRemoved)}`,
+      `  Shims       ${result.filesRemoved ? 'ok   removed' : 'FAIL not removed'} ${result.installDir}`,
+      `  Extra shims ${outcome(result.extraShimsRemoved)}`,
+      '',
+      'Removed. The hub repository itself was left in place.'
+    ].join('\n')
+  }
   const mark = (ok: boolean) => (ok ? 'ok  ' : 'FAIL')
   return [
     'skill-graft uninstall',
@@ -530,19 +943,66 @@ export function formatUninstallReport(result: UninstallResult): string {
     `  PATH        ${mark(result.pathRemoved)} bin removed`,
     `  Shims       ${mark(result.filesRemoved)} ${result.installDir}`,
     '',
-    result.ok ? 'Removed. The hub repository itself was left in place.' : 'Uninstall did not finish.'
+    'Uninstall did not finish.'
   ].join('\n')
 }
 
-function renderCmdShim(dataRoot: string, nodePath: string, cliPath: string, port: number): string {
+function renderCmdShim(
+  dataRoot: string,
+  nodePath: string,
+  cliPath: string,
+  port: number,
+  installDir: string,
+  taskName: string
+): string {
   return [
     '@echo off',
     'setlocal DisableDelayedExpansion',
     ...renderInteractiveCmdDataRootDefaults(dataRoot),
     `if not defined HUB_API_PORT set "HUB_API_PORT=${port}"`,
+    `set "SG_INSTALL_DIR=${bat(installDir)}"`,
+    `set "SG_TASK_NAME=${bat(taskName)}"`,
     `"${bat(nodePath)}" "${bat(cliPath)}" %*`,
     ''
   ].join('\r\n')
+}
+
+export function formatUpgradeReport(result: UpgradeResult): string {
+  const mark = (ok: boolean) => (ok ? 'ok  ' : 'FAIL')
+  return [
+    `skill-graft upgrade${result.dryRun ? ' (dry-run)' : ''}`,
+    '',
+    `  Package     ${result.fromVersion || '-'} -> ${result.toVersion || '-'}`,
+    `  Install     ${mark(result.ok)} ${result.status}`,
+    `  Doctor      ${mark(result.doctor.ok)} ${result.installDir}`,
+    '',
+    result.ok
+      ? result.dryRun ? 'Dry-run only. Re-run without --dry-run to apply.' : 'Upgrade complete.'
+      : result.status === 'upgraded' || result.status === 'already-current'
+        ? 'Static installation is committed; daemon readiness repair is required. Retry sg upgrade or sg daemon start.'
+        : 'Upgrade incomplete; inspect the issues and rerun to complete WAL recovery.'
+  ].join('\n')
+}
+
+export function formatPurgeReport(result: PurgeResult): string {
+  const plan = result.plan
+  return [
+    `skill-graft purge (${result.mode === 'dryRun' ? 'dry-run' : 'commit'})`,
+    '',
+    `  Status      ${result.status}`,
+    ...(plan ? [
+      `  Data ID     ${plan.dataRootId}`,
+      `  Entries    ${plan.entries}`,
+      `  Bytes      ${plan.bytes}`,
+      `  Plan hash  ${plan.planHash}`
+    ] : []),
+    '',
+    result.ok
+      ? result.status === 'already-absent'
+        ? 'No preserved data root exists; nothing was changed.'
+        : result.mode === 'dryRun' ? 'Dry-run only. Re-run with --commit and the exact ID/hash.' : 'Data root purged.'
+      : 'Purge did not finish.'
+  ].join('\n')
 }
 
 function renderInteractiveCmdDataRootDefaults(dataRoot: string): string[] {

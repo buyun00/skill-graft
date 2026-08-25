@@ -653,8 +653,10 @@ function createMemoryP3Ports(p2, options = {}) {
 }
 
 function memoryApplicationInfrastructure(context, options = {}) {
+  const p2 = createMemoryP2Ports(context, options.p2)
   return {
-    p2: createMemoryP2Ports(context, options.p2),
+    p2,
+    p3: createMemoryP3Ports(p2, options.p3),
     transactions: createMemoryApplicationTransactions()
   }
 }
@@ -3381,6 +3383,20 @@ test('Local composition keeps tracing off by default and fails malformed explici
       SKILL_GRAFT_REAL_E2E: '0'
     }
   }), /requires SKILL_GRAFT_REAL_E2E=1/)
+
+  const infrastructure = memoryApplicationInfrastructure(context)
+  for (const missing of ['p2', 'p3', 'transactions']) {
+    const incomplete = { ...infrastructure }
+    delete incomplete[missing]
+    assert.throws(() => createLocalHost({
+      packageRoot: '/package-not-needed-for-incomplete-infrastructure',
+      context,
+      ...incomplete,
+      sessions,
+      ledger,
+      traceEnvironment: {}
+    }), /p2, p3, and transactions must be supplied together/)
+  }
 })
 
 test('ingest dry-run plans through Core, replays, conflicts, and records audit with zero business effects', async () => {

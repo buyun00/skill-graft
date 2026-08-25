@@ -15,7 +15,9 @@ function assertTemporaryRoot(root) {
 }
 
 export function createTemporaryTestHub(sourceRoot) {
-  const root = assertTemporaryRoot(fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-default-')))
+  const parent = assertTemporaryRoot(fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-default-')))
+  const root = path.join(parent, 'data')
+  fs.mkdirSync(root)
   fs.mkdirSync(path.join(root, 'skill-review', 'history'), { recursive: true })
   fs.mkdirSync(path.join(root, 'skills', 'adopted'), { recursive: true })
   fs.mkdirSync(path.join(root, 'skills', 'inbox'), { recursive: true })
@@ -48,7 +50,7 @@ export function createTemporaryTestHub(sourceRoot) {
   return {
     root,
     cleanup() {
-      fs.rmSync(root, { recursive: true, force: true })
+      fs.rmSync(parent, { recursive: true, force: true })
     }
   }
 }
@@ -57,6 +59,7 @@ export function createTemporaryCliPackage(sourceRoot) {
   const root = assertTemporaryRoot(fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-cli-package-')))
   fs.cpSync(path.join(sourceRoot, 'dist'), path.join(root, 'dist'), { recursive: true })
   fs.cpSync(path.join(sourceRoot, 'server'), path.join(root, 'server'), { recursive: true })
+  fs.cpSync(path.join(sourceRoot, 'web'), path.join(root, 'web'), { recursive: true })
   fs.cpSync(path.join(sourceRoot, 'overlay'), path.join(root, 'overlay'), { recursive: true })
   fs.copyFileSync(path.join(sourceRoot, 'AGENTS.override.md'), path.join(root, 'AGENTS.override.md'))
   for (const name of RESIDENT) {

@@ -42,6 +42,9 @@ function victimFingerprint(root) {
 }
 
 test('default CLI helper writes sessions only to its temporary fake-runner hub', (t) => {
+  const fileFixtureRoot = path.dirname(path.resolve(testHubRoot))
+  assert.equal(path.dirname(path.resolve(process.env.HOME)), fileFixtureRoot)
+  assert.equal(fs.existsSync(path.join(process.env.HOME, '.skill-graft-lifecycle')), false)
   const liveSessions = path.join(hubRoot, 'skill-review', 'sessions.json')
   const liveHistory = path.join(hubRoot, 'skill-review', 'history')
   const beforeSessions = readOptional(liveSessions)
@@ -63,8 +66,16 @@ test('default CLI helper writes sessions only to its temporary fake-runner hub',
   ])
   assert.equal(result.status, 0, result.stderr)
   const payload = JSON.parse(result.stdout)
-  assert.equal(payload.session.status, 'queued')
-  assert.equal(payload.session.pid, 0)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.contractVersion, 1)
+  assert.equal(payload.commandKind, 'attach')
+  assert.equal(payload.data.session.status, 'queued')
+  assert.equal(Object.hasOwn(payload.data.session, 'pid'), false)
+  assert.equal(fs.existsSync(path.join(
+    testHubRoot,
+    'skill-review',
+    `run-codex-${payload.data.session.id}.cmd`
+  )), false)
   assert.equal(path.relative(os.tmpdir(), testHubRoot).startsWith('..'), false)
   assert.equal(fs.existsSync(path.join(testHubRoot, 'skill-review', 'sessions.json')), true)
 

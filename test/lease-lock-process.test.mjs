@@ -11,8 +11,10 @@ const leaseModuleUrl = pathToFileURL(path.join(outputRoot, 'adapters', 'lease-lo
 const leases = await import(leaseModuleUrl)
 
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-lease-'))
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-lease-'))
+  const root = path.join(parent, 'namespace')
+  fs.mkdirSync(root)
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
   return root
 }
 
@@ -36,6 +38,34 @@ function fakeInspector(label, status = () => 'alive-owner') {
 function lockEntries(root) {
   const directory = path.join(root, 'leases')
   return fs.existsSync(directory) ? fs.readdirSync(directory) : []
+}
+
+function treeFingerprint(root) {
+  const rows = []
+  const visit = (directory, relative = '') => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const absolute = path.join(directory, entry.name)
+      const item = path.posix.join(relative, entry.name)
+      const stat = fs.lstatSync(absolute)
+      if (entry.isSymbolicLink()) rows.push([item, 'link', fs.readlinkSync(absolute)])
+      else if (entry.isDirectory()) {
+        rows.push([item, 'dir'])
+        visit(absolute, item)
+      } else rows.push([item, 'file', stat.nlink, fs.readFileSync(absolute).toString('base64')])
+    }
+  }
+  visit(root)
+  return rows
+}
+
+async function strictConstructionOrAcquireRefusal(root, create, acquireIdentity, pattern) {
+  const before = treeFingerprint(root)
+  let manager
+  let constructionError
+  try { manager = create() } catch (error) { constructionError = error }
+  if (constructionError) assert.match(String(constructionError), pattern)
+  else await assert.rejects(manager.acquire(acquireIdentity), pattern)
+  assert.deepEqual(treeFingerprint(root), before)
 }
 
 function acquisitionStaging(root, token) {
@@ -318,6 +348,65 @@ test('renewal rechecks the old expiry around token, temporary write, and replace
   await runScenario('replace', 'replace')
 })
 
+test('ambiguous renewal publication retains both exact revisions until release', async (t) => {
+  const root = fixture(t)
+  const originalFsync = fs.fsyncSync
+  const originalLstat = fs.lstatSync
+  let tokenCalls = 0
+  let renewalArmed = false
+  let directoryFsyncFailed = false
+  let temporaryObservationFailed = false
+  t.after(() => {
+    fs.fsyncSync = originalFsync
+    fs.lstatSync = originalLstat
+  })
+
+  const manager = leases.createLeaseLockManager({
+    root,
+    leaseMs: 10_000,
+    pid: 351,
+    token() {
+      tokenCalls += 1
+      return tokenCalls === 1 ? 'ambiguityowner01' : 'ambiguityrenew01'
+    },
+    processInspector: fakeInspector('renew-ambiguity'),
+    fault(name) {
+      if (name === 'lease-after-renew-temporary') renewalArmed = true
+    }
+  })
+  const acquired = await manager.acquire(identity('renew-ambiguity'))
+  assert.equal(acquired.status, 'acquired')
+
+  fs.fsyncSync = function (...args) {
+    if (renewalArmed && !directoryFsyncFailed) {
+      directoryFsyncFailed = true
+      const error = new Error('simulated-renew-directory-fsync-failure')
+      error.code = 'EIO'
+      throw error
+    }
+    return originalFsync.apply(this, args)
+  }
+  fs.lstatSync = function (target, ...args) {
+    if (directoryFsyncFailed && !temporaryObservationFailed
+      && String(target).includes('.owner.skill-graft-renew-')) {
+      temporaryObservationFailed = true
+      const error = new Error('simulated-renew-temporary-observation-failure')
+      error.code = 'EIO'
+      throw error
+    }
+    return originalLstat.call(this, target, ...args)
+  }
+
+  await assert.rejects(acquired.lease.renew(), /renew-directory-fsync|temporary-observation/)
+  assert.equal(directoryFsyncFailed, true)
+  assert.equal(temporaryObservationFailed, true)
+
+  fs.fsyncSync = originalFsync
+  fs.lstatSync = originalLstat
+  await acquired.lease.release()
+  assert.deepEqual(lockEntries(root), [])
+})
+
 test('failed post-commit release cleanup is retained and retried in the background', async (t) => {
   const root = fixture(t)
   let cleanupFaults = 0
@@ -384,15 +473,16 @@ test('artifact sweep rejects an unfenced retired directory and removes pid-reuse
   fs.mkdirSync(path.join(orphanLeases, `.retired-hub-global.lock-${'a'.repeat(64)}.tmp`), {
     recursive: true
   })
-  const orphanManager = leases.createLeaseLockManager({
-    root: orphanRoot,
-    leaseMs: 1_000,
-    pid: 406,
-    token: () => 'cdcdcdcdcdcdcdcd',
-    processInspector: fakeInspector('orphan')
-  })
-  await assert.rejects(
-    orphanManager.acquire(identity('unfenced-retired')),
+  await strictConstructionOrAcquireRefusal(
+    orphanRoot,
+    () => leases.createLeaseLockManager({
+      root: orphanRoot,
+      leaseMs: 1_000,
+      pid: 406,
+      token: () => 'cdcdcdcdcdcdcdcd',
+      processInspector: fakeInspector('orphan')
+    }),
+    identity('unfenced-retired'),
     /missing its fencing claim/
   )
 
@@ -597,23 +687,22 @@ test('fresh acquisition staging fails closed for extra, linked, malformed, overs
         return
       }
       const safeLabel = label.replaceAll(/[^A-Za-z0-9._-]/g, '-')
-      const manager = leases.createLeaseLockManager({
+      const requestId = `invalid-${safeLabel}`
+      await strictConstructionOrAcquireRefusal(root, () => leases.createLeaseLockManager({
         root,
         leaseMs: 10_000,
         token: () => 'cdcdcdcdcdcdcdcd',
         processInspector: fakeInspector(`invalid-${safeLabel}`)
-      })
-      const requestId = `invalid-${safeLabel}`
-      await assert.rejects(manager.acquire(identity(requestId)), pattern)
+      }), identity(requestId), pattern)
     })
   }
 
   await rejectsShape('extra entry', ({ staging }) => {
     fs.writeFileSync(path.join(staging, 'owner.json'), '')
     fs.writeFileSync(path.join(staging, 'extra'), '')
-  }, /staging is incomplete/)
+  }, /staging is incomplete|unexpected artifact/)
   await rejectsShape('linked owner', ({ root, staging }) => {
-    const target = path.join(root, 'external-owner.json')
+    const target = path.join(path.dirname(root), 'external-owner.json')
     fs.writeFileSync(target, '{}')
     try {
       fs.symlinkSync(target, path.join(staging, 'owner.json'), 'file')
@@ -621,23 +710,23 @@ test('fresh acquisition staging fails closed for extra, linked, malformed, overs
       if (error?.code === 'EPERM') return 'skip'
       throw error
     }
-  }, /staging is incomplete|plain file|symlink|reparse/)
+  }, /staging is incomplete|plain file|symlink|reparse|unexpected artifact/)
   await rejectsShape('malformed owner JSON', ({ staging }) => {
     fs.writeFileSync(path.join(staging, 'owner.json'), '{bad json}', 'utf8')
-  }, /owner is invalid/)
+  }, /owner is invalid|owner is malformed/)
   await rejectsShape('invalid UTF-8 owner', ({ staging }) => {
     fs.writeFileSync(path.join(staging, 'owner.json'), Buffer.from([0xc3, 0x28]))
   }, /not valid UTF-8/)
   await rejectsShape('oversized owner', ({ staging }) => {
     fs.writeFileSync(path.join(staging, 'owner.json'), Buffer.alloc(64 * 1024 + 1, 0x20))
-  }, /exceeds the 65536 byte limit/)
+  }, /exceeds the 65536 byte limit|owner is unsafe/)
   await rejectsShape('valid owner whose token mismatches its staging name', ({ staging }) => {
     fs.writeFileSync(
       path.join(staging, 'owner.json'),
       `${JSON.stringify(stagingOwner('efefefefefefefef'), null, 2)}\n`,
       'utf8'
     )
-  }, /name does not match its owner/)
+  }, /name does not match its owner|staging is misbound/)
   await rejectsShape('valid owner whose lock identity mismatches its staging name', ({ staging, token }) => {
     fs.writeFileSync(
       path.join(staging, 'owner.json'),
@@ -647,7 +736,7 @@ test('fresh acquisition staging fails closed for extra, linked, malformed, overs
       }), null, 2)}\n`,
       'utf8'
     )
-  }, /name does not match its owner/)
+  }, /name does not match its owner|staging is misbound/)
 })
 
 test('an acquisition staging artifact disappearing after directory enumeration is benign', async (t) => {
@@ -678,7 +767,7 @@ test('an acquisition staging artifact disappearing after directory enumeration i
 test('stale cleanup refuses a same-name staging directory replacement after observation', async (t) => {
   const root = fixture(t)
   const staging = acquisitionStaging(root, '7878787878787878')
-  const original = path.join(root, 'original-observed-staging')
+  const original = path.join(path.dirname(root), 'original-observed-staging')
   const replacementOwner = path.join(staging, 'owner.json')
   fs.mkdirSync(staging, { recursive: true })
   fs.writeFileSync(replacementOwner, '{"schemaVersion": 1,\n')
@@ -701,7 +790,7 @@ test('stale cleanup refuses a same-name staging directory replacement after obse
   })
   await assert.rejects(
     manager.acquire(identity('stale-replacement')),
-    /observed cleanup identity/
+    /observed cleanup identity|owner is malformed/
   )
   assert.equal(replaced, true)
   assert.equal(fs.readFileSync(replacementOwner, 'utf8'), 'replacement-must-survive')
@@ -717,14 +806,13 @@ test('live lock and owner paths reject a linked or reparse directory', async (t)
     if (error?.code === 'EPERM') return
     throw error
   }
-  const manager = leases.createLeaseLockManager({
+  await strictConstructionOrAcquireRefusal(root, () => leases.createLeaseLockManager({
     root,
     leaseMs: 1_000,
     pid: 505,
     token: () => 'eeeeeeeeeeeeeeee',
     processInspector: fakeInspector('linked')
-  })
-  await assert.rejects(manager.acquire(identity('linked')), /symlink|reparse|plain directory/)
+  }), identity('linked'), /symlink|reparse|plain directory/)
 })
 
 function spawnContender(
@@ -876,7 +964,7 @@ test('real process contention has exactly one winner and one busy result across 
 
 test('two real sweepers concurrently remove one stale acquisition staging directory', { timeout: 60_000 }, async (t) => {
   const root = fixture(t)
-  const barrier = path.join(root, 'stale-sweeper-barrier')
+  const barrier = path.join(path.dirname(root), 'stale-sweeper-barrier')
   const staging = acquisitionStaging(root, '2323232323232323')
   fs.mkdirSync(barrier)
   fs.mkdirSync(staging, { recursive: true })

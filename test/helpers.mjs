@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -7,6 +8,19 @@ export const hubRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 export const cliPath = path.join(hubRoot, 'dist', 'control', 'cli.js')
 const temporaryHub = createTemporaryTestHub(hubRoot)
 export const testHubRoot = temporaryHub.root
+const testProfileRoot = path.dirname(testHubRoot)
+const testHome = path.join(testProfileRoot, 'home')
+const testAppData = path.join(testProfileRoot, 'appdata')
+const testLocalAppData = path.join(testProfileRoot, 'localappdata')
+const testDshHome = path.join(testProfileRoot, 'dsh-home')
+for (const directory of [testHome, testAppData, testLocalAppData, testDshHome]) {
+  fs.mkdirSync(directory, { recursive: true })
+}
+process.env.HOME = testHome
+process.env.USERPROFILE = testHome
+process.env.APPDATA = testAppData
+process.env.LOCALAPPDATA = testLocalAppData
+process.env.DSH_HOME = testDshHome
 process.env.HUB_ROOT = testHubRoot
 process.env.SKILL_GRAFT_HOME = testHubRoot
 process.env.HUB_SPAWN_CODEX = '0'
