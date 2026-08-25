@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "phase": "P9",
+  "status": "sealed-authorized-minimal-gate",
+  "verifiedAt": "2026-08-25",
+  "branch": "codex/skill-graft-p9-integration",
+  "history": {
+    "p4": "43ac1875ab6a08892f6ce222f95c90011affb619",
+    "sharedContract": "29ea16e32f95a6cd9e1f31b90d223d6c332cf509",
+    "applicationBoundary": "d2a96110512114c430f370ae4c21616bb83c1b13",
+    "localImplementation": "eae42d9cb2a7356f8f0b975ab98b4cf357a023ee",
+    "p5Final": "14f9481bd007589b5c83cd01a73fae9a0f6256b8",
+    "dshFinal": "604da2ffde1ea40b2798d32310710ab6183b7d80",
+    "merge": "e9d044a4d5298fc35b1594d9ea1d5b9f67233e93",
+    "finalCommit": "this-record-containing-commit"
+  },
+  "run": {
+    "id": "p9-c852220d-2693-426d-afda-10f06f959af1",
+    "root": "E:\\skill-graft-e2e\\p9-c852220d-2693-426d-afda-10f06f959af1",
+    "sourceHead": "e9d044a4d5298fc35b1594d9ea1d5b9f67233e93",
+    "fullGateExitZero": false,
+    "fullGateStopReason": "expected LOCK_BUSY was initially interpreted with expectedOk=true",
+    "suffixExitZero": true,
+    "prefixRerunAfterHelperFix": false
+  },
+  "runtime": {
+    "node": "v24.15.0",
+    "npm": "11.12.1",
+    "pnpm": "11.19.0",
+    "dshRootVersion": "0.1.0-rc.5",
+    "dshSourceGitMetadataAvailable": false
+  },
+  "packages": {
+    "local": {
+      "name": "ozdqp-skill-hub",
+      "version": "0.1.0",
+      "bytes": 1028011,
+      "sha256": "f9de6ed3433f52671bc5c3fc4dd59a23a3c9c803cf7ba40d45b1024e62c50ee1",
+      "containsSource": false
+    },
+    "dsh": {
+      "name": "@ozdqp/skill-graft-dsh",
+      "version": "0.1.0",
+      "bytes": 200072,
+      "sha256": "b65ccdfa3e9d37e9ff6898f728923b977931e26b91c32bfc4769e4db1424f5bf",
+      "containsSource": false,
+      "contractEntry": "shared Application.commandBus",
+      "localDependencies": []
+    },
+    "sourceTreeCliUsed": false
+  },
+  "shared": {
+    "snapshotA": "sha256:2855110081852edb3c9dc3f6cc066b1641378d09946d0d9da7dc0887c4d4e5e5",
+    "snapshotB": "sha256:8c412d746eb1de1d71bcc0360fa2be427233992ed957afafee91781f344728f6",
+    "crossHostBundleRequestReplay": false,
+    "crossCompositionRequestReplay": true,
+    "busy": {
+      "executor": "installed Local tgz dist/dsh composition with installed DSH runtime assets",
+      "command": "setPin",
+      "code": "LOCK_BUSY",
+      "retryable": true,
+      "resultEvidenceKind": "operator-observed node:test failure output",
+      "resultAssertedBySuffix": false,
+      "requestEnteredLedger": false,
+      "requestEnteredAudit": false,
+      "probeBytesPreserved": true,
+      "sideEffectEvidenceKind": "exit-zero suffix assertions",
+      "provesDshBundleRpc": false,
+      "provesPathKeyLock": false,
+      "provesDifferentProbeParallelism": false
+    },
+    "winner": {
+      "host": "local",
+      "command": "setPin",
+      "snapshot": "sha256:8c412d746eb1de1d71bcc0360fa2be427233992ed957afafee91781f344728f6",
+      "readByDshComposition": true,
+      "readByDshBundleRpc": false,
+      "materializedSharedProbe": false
+    },
+    "futureSchema": {
+      "detected": 3,
+      "current": 2,
+      "inspectStatus": "unsupported",
+      "writable": false,
+      "rejectionCode": "STATE_VERSION_UNSUPPORTED",
+      "retryable": false,
+      "stateBytesPreserved": true,
+      "ledgerPreserved": true,
+      "auditPreserved": true,
+      "libraryPreserved": true,
+      "allProbeBytesPreserved": true
+    },
+    "finalStateSha256": "sha256:689a9164ae8817ca0318192f60f9045822f90cf55b9b437ed370ed63704c283d",
+    "finalLedgerSha256": "sha256:ab49b352fdbe0d7cc8d8406114302c881110113bae77f8bedc2608211c988d8b",
+    "finalAuditSha256": "sha256:7e907763f8f9f3e3edc655dd786781f807ace9356a570a39e0711408abf7dbae"
+  },
+  "materialization": {
+    "local": {
+      "probe": "local-owned",
+      "snapshot": "sha256:2855110081852edb3c9dc3f6cc066b1641378d09946d0d9da7dc0887c4d4e5e5",
+      "planHash": "sha256:c700a4510d7474ec5ef3c0101fd409b6737eb2966e8672a4d9d35c9d4de3763f",
+      "materializationId": "sha256:c10c165c2dc111c8369126eb77c01d1da4480d0d6cb70556a010c63196ca3eba"
+    },
+    "dshComposition": {
+      "probe": "dsh-owned",
+      "snapshot": "sha256:2855110081852edb3c9dc3f6cc066b1641378d09946d0d9da7dc0887c4d4e5e5",
+      "planHash": "sha256:9bdac8f2f194c0a0dc86cf839c126387d5641b27baa0c9c1871a761263453a21",
+      "materializationId": "sha256:d9d87b05278fed72d8ab192e9f6de405db74d45e0a066d8590b2f0fc2f27f229"
+    },
+    "sameProbeCrossHostSync": false,
+    "planHashesClaimedEqual": false
+  },
+  "sessions": {
+    "localAttach": "completed",
+    "dshCompositionAttach": "completed",
+    "dshCompositionChatQuery": "queued",
+    "publicProjectionChecked": true,
+    "applicationAndFilesystemReal": true,
+    "runnerExecutionBoundary": "focused-fixture",
+    "realLocalRunnerEvidence": "artifacts/verification/P5/README.md",
+    "realDshRunnerEvidence": "artifacts/verification/P8/README.md"
+  },
+  "dshProfile": {
+    "installedInIsolatedHome": true,
+    "boundHost": "127.0.0.1",
+    "port": 49214,
+    "tcpReady": true,
+    "webReady": true,
+    "p9LiveRpcStatus": "startup-empty-response-limitation",
+    "installedDirectCompositionUsed": true,
+    "compositionModuleSource": "installed Local tgz dist/dsh",
+    "runtimeAssetPackageRoot": "installed DSH profile tgz",
+    "priorLiveRpcEvidence": "artifacts/verification/P8/README.md"
+  },
+  "cleanup": {
+    "candidateOwnedProcesses": 0,
+    "candidateListeners": 0,
+    "candidateLeaseEntries": 0,
+    "candidateSharedTransactionEntries": 0,
+    "candidateProbeTransactionEntries": 0,
+    "allP9RunLeaseEntriesAfterReap": 0,
+    "allRunCleanupEvidenceKind": "terminal audit outside suffix",
+    "failedRunRootsDeleted": false,
+    "homesDistinct": true
+  },
+  "scope": {
+    "sharedContractsChanged": false,
+    "sharedCoreChanged": false,
+    "sharedApplicationChanged": false,
+    "localImplementationChanged": false,
+    "dshImplementationChanged": false,
+    "defaultSuiteRun": false,
+    "faultMatrixRun": false,
+    "p10Entered": false
+  },
+  "p10Prerequisites": [
+    "sharded transaction, ledger and WAL semantics for true different-probe parallelism",
+    "safe cross-host lock owner read-only projection and UI",
+    "host-neutral runtime asset, marker, planHash and materialization contract"
+  ]
+}
