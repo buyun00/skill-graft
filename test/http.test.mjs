@@ -1000,7 +1000,10 @@ test('SSE emits an explicit terminal event and stops polling after client abort'
           lastMessage: '',
           error: '',
           exitCode: status === 'completed' ? 0 : null,
-          continuationToken: ''
+          continuationToken: '',
+          capabilities: { canResume: status === 'completed', canCancel: status === 'running' },
+          steps: [{ id: 'prepareSnapshot', status: 'completed' }],
+          events: [{ sequence: 1, type: 'step.completed', stepId: 'prepareSnapshot' }]
         }
       },
       events: [],
@@ -1023,6 +1026,9 @@ test('SSE emits an explicit terminal event and stops polling after client abort'
     headers: { Cookie: cookie }
   })
   const terminalText = await terminal.text()
+  assert.match(terminalText, /event: session/)
+  assert.match(terminalText, /"steps":\[\{"id":"prepareSnapshot","status":"completed"\}\]/)
+  assert.match(terminalText, /"events":\[\{"sequence":1,"type":"step.completed","stepId":"prepareSnapshot"\}\]/)
   assert.match(terminalText, /event: status/)
   assert.match(terminalText, /"status":"completed"/)
   assert.match(terminalText, /event: end/)

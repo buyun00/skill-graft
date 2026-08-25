@@ -126,6 +126,11 @@ export type ReapSessionsResult = {
   sessions: readonly SessionView[]
 }
 
+export type CancelSessionResult = {
+  action: 'cancelSession'
+  session: SessionView
+}
+
 export type HubSchemaStatus = 'empty' | 'legacy' | 'current' | 'unsupported'
 
 export type InspectSchemaResult = {
@@ -245,6 +250,7 @@ export type CommandDataByKind = {
   chat: SessionCommandResult<'chat'>
   analyze: SessionCommandResult<'analyze'>
   resumeSession: SessionCommandResult<'resumeSession'>
+  cancelSession: CancelSessionResult
   reapSessions: ReapSessionsResult
   createSnapshot: CreateSnapshotResult
   setPin: SetPinResult

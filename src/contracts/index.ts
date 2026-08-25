@@ -9,6 +9,7 @@ export type {
   AttachCommand,
   BaseCommand,
   ChatCommand,
+  CancelSessionCommand,
   ClaimWorktreeCommand,
   CreateSnapshotCommand,
   DecideCommand,
@@ -75,6 +76,7 @@ export type {
   ApplyLegacyDetachResult,
   CommandDataByKind,
   ClaimWorktreeResult,
+  CancelSessionResult,
   CreateSnapshotResult,
   DecideResult,
   EnvelopeBase,
@@ -109,7 +111,6 @@ export type {
   InboxSuggestionView,
   LastIngestView,
   SessionKind,
-  SessionStatus,
   SessionTarget,
   SessionView,
   SkillContentView,
@@ -119,6 +120,41 @@ export type {
   WorktreeListView,
   WorktreeView
 } from './state.js'
+export {
+  CURRENT_SESSION_STATUSES,
+  LEGACY_SESSION_STATUSES,
+  SESSION_EVENT_TYPES,
+  SESSION_RUNNER_ERROR_CODES,
+  SESSION_RUNNER_EVENT_TYPES,
+  SESSION_RUNNER_STATES,
+  SESSION_STEP_IDS,
+  SESSION_TASK_VERSION
+} from './session.js'
+export type {
+  CurrentSessionStatus,
+  LegacySessionStatus,
+  SessionCapabilitiesView,
+  SessionCompletionRule,
+  SessionEventType,
+  SessionEventView,
+  SessionRunnerError,
+  SessionRunnerErrorCode,
+  SessionRunnerEvent,
+  SessionRunnerEventsPage,
+  SessionRunnerEventType,
+  SessionRunnerResult,
+  SessionRunnerSnapshot,
+  SessionRunnerState,
+  SessionStatus,
+  SessionStepId,
+  SessionStepOwner,
+  SessionStepStatus,
+  SessionStepView,
+  SessionTask,
+  SessionTaskCapabilities,
+  SessionTaskPrompt,
+  SessionTaskStep
+} from './session.js'
 export {
   P2_JSON_SCHEMA_DRAFT,
   P2_VALIDATION_ERROR_CODES,

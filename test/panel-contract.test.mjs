@@ -103,7 +103,12 @@ function applicationData(kind, body) {
     case 'analyze':
     case 'chat':
     case 'resumeSession':
-      return { action: kind, session: session(kind, kind === 'resumeSession' ? body.sessionId : undefined), applied: null }
+    case 'cancelSession':
+      return {
+        action: kind,
+        session: session(kind, kind === 'resumeSession' || kind === 'cancelSession' ? body.sessionId : undefined),
+        applied: null
+      }
     case 'decide': return { action: body.action, item: { id: body.id, status: body.action }, worktrees: { applied: [], skipped: [] } }
     default: return { accepted: kind }
   }
@@ -175,7 +180,7 @@ function withoutGeneratedRequestId(body) {
   return rest
 }
 
-test('panel API uses the typed Application envelope for all P4 operations', async (t) => {
+test('panel API uses the typed Application envelope for Local operations', async (t) => {
   const { server, seen, base } = await listenRecorder()
   t.after(() => new Promise((resolve) => server.close(resolve)))
   const api = createPanelApi({ base })
@@ -206,6 +211,7 @@ test('panel API uses the typed Application envelope for all P4 operations', asyn
   const detached = await api.detachWorktree(worktree, 'contract detach')
   const started = await api.startCodex({ kind: 'chat', intent: 'hello' })
   const resumed = await api.resumeCodex('session-1', 'continue')
+  const cancelled = await api.cancelCodex('session-1', 'panel requested cancellation')
 
   assert.equal(seen.filter((item) => item.path === '/api/health' && item.method === 'GET').length, 1)
   assert.equal(seen.filter((item) => item.path === '/api/host/diagnostics' && item.method === 'GET').length, 2)
@@ -299,6 +305,11 @@ test('panel API uses the typed Application envelope for all P4 operations', asyn
     sessionId: 'session-1',
     message: 'continue'
   })
+  assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'cancelSession')[0]), {
+    kind: 'cancelSession',
+    sessionId: 'session-1',
+    reason: 'panel requested cancellation'
+  })
 
   assert.equal(pin.changed, true)
   assert.equal(queuedSessionView(attached).label, '已入队')
@@ -307,6 +318,7 @@ test('panel API uses the typed Application envelope for all P4 operations', asyn
   assert.equal(started.id, 'session-chat')
   assert.equal(codexSessionHref(started), '/codex?id=session-chat')
   assert.equal(resumed.id, 'session-1')
+  assert.equal(cancelled.id, 'session-1')
   assert.equal(api.sessionStreamUrl('abc'), `${base}/api/codex/session/stream?id=abc`)
 })
 
@@ -525,7 +537,9 @@ test('panel sources are typed-transport renderers and close terminal EventSource
   }
   assert.match(source, /createMutationRetryRegistry/)
   assert.match(source, /EventSource/)
+  assert.match(source, /addEventListener\("session"/)
   assert.match(source, /addEventListener\("end"/)
+  assert.match(source, /cancelSession/)
   assert.match(source, /source\.close\(\)/)
   assert.doesNotMatch(source, /\/api\/(?:state|worktrees|decide|analyze|codex\/start|codex\/resume|worktree\/attach|worktree\/detach)/)
   assert.doesNotMatch(source, /src\/core/)

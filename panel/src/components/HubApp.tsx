@@ -350,6 +350,23 @@ export function HubApp() {
               setBusy(false);
             }
           }}
+          onCancel={async (id) => {
+            setBusy(true);
+            try {
+              const session = await api.cancelCodex(id);
+              const view = queuedSessionView(session);
+              toast({
+                type: "info",
+                title: "取消请求已处理",
+                description: [view.id, view.status].filter(Boolean).join(" · "),
+              });
+              await load();
+            } catch (err) {
+              toast({ type: "error", title: "cancel 失败", description: String((err as Error).message || err) });
+            } finally {
+              setBusy(false);
+            }
+          }}
         />
       );
     }

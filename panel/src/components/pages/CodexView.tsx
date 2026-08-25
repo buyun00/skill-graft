@@ -12,6 +12,32 @@ type Session = {
   worktree?: string;
   lastMessage?: string;
   canResume?: boolean;
+  capabilities?: {
+    canResume?: boolean;
+    canCancel?: boolean;
+  };
+  steps?: SessionStep[];
+  events?: SessionEvent[];
+};
+
+type SessionStep = {
+  id?: string;
+  kind?: string;
+  label?: string;
+  status?: string;
+  detail?: string;
+  message?: string;
+  updatedAt?: string;
+};
+
+type SessionEvent = {
+  id?: string;
+  type?: string;
+  at?: string;
+  stepId?: string;
+  status?: string;
+  message?: string;
+  detail?: string;
 };
 
 export function CodexView({
@@ -21,6 +47,7 @@ export function CodexView({
   onSelect,
   onStart,
   onResume,
+  onCancel,
 }: {
   sessions: Session[];
   selectedId: string;
@@ -28,17 +55,20 @@ export function CodexView({
   onSelect: (id: string) => void;
   onStart: (body: { kind?: string; intent?: string; worktree?: string }) => void;
   onResume: (id: string, message: string) => void;
+  onCancel: (id: string) => void;
 }) {
   const [intent, setIntent] = useState("");
   const [message, setMessage] = useState("");
   const [log, setLog] = useState("");
   const [streamStatus, setStreamStatus] = useState("");
+  const [liveSession, setLiveSession] = useState<Session | null>(null);
   const preRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
     if (!selectedId) {
       setLog("");
       setStreamStatus("");
+      setLiveSession(null);
       return;
     }
     const url = panelApi.sessionStreamUrl(selectedId);
@@ -46,6 +76,15 @@ export function CodexView({
     let terminal = false;
     setLog("");
     setStreamStatus("connecting");
+    setLiveSession(null);
+    source.addEventListener("session", (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        if (data && typeof data === "object") setLiveSession(data as Session);
+      } catch {
+        // The next typed session event or list refresh remains authoritative.
+      }
+    });
     source.addEventListener("log", (event) => {
       try {
         const data = JSON.parse((event as MessageEvent).data);
@@ -82,7 +121,10 @@ export function CodexView({
     if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
   }, [log]);
 
-  const selected = sessions.find((item) => item.id === selectedId) || null;
+  const selectedFromList = sessions.find((item) => item.id === selectedId) || null;
+  const selected = liveSession?.id === selectedId ? liveSession : selectedFromList;
+  const canResume = selected?.capabilities?.canResume ?? selected?.canResume ?? false;
+  const canCancel = selected?.capabilities?.canCancel ?? false;
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[300px_1fr] gap-4">
@@ -125,7 +167,7 @@ export function CodexView({
       <section className="glass p-5 rounded-[22px]">
         <SectionHeader
           title={selected ? `${selected.kind || "session"} ${selected.id}` : "Codex 日志"}
-          description="SSE log/status/end；terminal end 后显式 close，不自动重连"
+          description="SSE session/log/status/end；步骤与事件来自 typed SessionView"
         />
         {selected ? (
           <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -138,22 +180,73 @@ export function CodexView({
             <Button
               size="sm"
               variant="glass"
-              disabled={!selected.canResume && selected.status === "running"}
+              disabled={!canResume || !message.trim()}
               loading={busy}
               onClick={() => onResume(selected.id, message)}
             >
               resume
+            </Button>
+            <Button
+              size="sm"
+              variant="glass"
+              disabled={!canCancel}
+              loading={busy}
+              onClick={() => onCancel(selected.id)}
+            >
+              cancel
             </Button>
             <span className="text-[12px] text-ink/40">{streamStatus}</span>
           </div>
         ) : (
           <p className="text-[13.5px] text-ink/45 mb-3">选择或开始一个会话。</p>
         )}
+        {selected ? (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
+            <div className="rounded-xl bg-ink/[0.03] p-3">
+              <p className="text-[12px] font-[600] text-ink/65 mb-2">真实步骤</p>
+              <div className="space-y-2">
+                {(selected.steps || []).map((step, index) => (
+                  <div key={step.id || `${step.kind || "step"}-${index}`} className="text-[12px] text-ink/70">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono break-all">{step.label || step.id || step.kind || `step ${index + 1}`}</span>
+                      <span className="text-ink/45">{step.status || "unknown"}</span>
+                    </div>
+                    {step.message || step.detail ? (
+                      <p className="text-ink/45 break-words">{step.message || step.detail}</p>
+                    ) : null}
+                  </div>
+                ))}
+                {(selected.steps || []).length === 0 ? (
+                  <p className="text-[12px] text-ink/40">尚无步骤事件。</p>
+                ) : null}
+              </div>
+            </div>
+            <div className="rounded-xl bg-ink/[0.03] p-3">
+              <p className="text-[12px] font-[600] text-ink/65 mb-2">会话事件</p>
+              <div className="space-y-2 max-h-48 overflow-auto">
+                {(selected.events || []).map((event, index) => (
+                  <div key={event.id || `${event.type || "event"}-${event.at || index}`} className="text-[12px] text-ink/70">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono break-all">{event.type || event.stepId || `event ${index + 1}`}</span>
+                      <span className="text-ink/40">{event.at || event.status || ""}</span>
+                    </div>
+                    {event.message || event.detail ? (
+                      <p className="text-ink/45 break-words">{event.message || event.detail}</p>
+                    ) : null}
+                  </div>
+                ))}
+                {(selected.events || []).length === 0 ? (
+                  <p className="text-[12px] text-ink/40">尚无会话事件。</p>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
         <pre
           ref={preRef}
-          className="text-[12px] leading-6 whitespace-pre-wrap break-all text-ink/80 font-mono bg-ink/[0.03] rounded-xl p-3 max-h-[55vh] overflow-auto"
+          className="text-[12px] leading-6 whitespace-pre-wrap break-all text-ink/80 font-mono bg-ink/[0.03] rounded-xl p-3 max-h-[38vh] overflow-auto"
         >
-          {log || (selectedId ? "等待 event: log / event: status / event: end…" : "")}
+          {log || (selectedId ? "等待 event: session / log / status / end…" : "")}
         </pre>
       </section>
     </div>

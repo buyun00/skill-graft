@@ -5,6 +5,7 @@ export {
   createHubApplication,
   createMemoryRequestLedger,
   createMemorySessions,
+  createSessionTask,
   isApplicationSuccess
 } from './application/index.js'
 export type {
@@ -17,7 +18,14 @@ export type {
   SharedUseCasePorts,
   RequestLedgerEntry,
   RequestLedgerPort,
-  SessionPort
+  SessionPort,
+  SessionCancelRequest,
+  SessionRunnerCancelRequest,
+  SessionRunnerEventsRequest,
+  SessionRunnerPort,
+  SessionRunnerResumeRequest,
+  SessionRunnerStartRequest,
+  SessionRunnerStatusRequest
 } from './application/index.js'
 export { createLocalHost, openLocalHost } from './local/create-local-host.js'
 export type { CreateLocalHostOptions, LocalHost } from './local/create-local-host.js'

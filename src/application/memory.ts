@@ -278,7 +278,7 @@ export function createMemoryRequestLedger(): MemoryLedger {
 
 export type MemorySessions = SessionPort & {
   sessions: SessionView[]
-  calls: { list: number; get: number; start: number; resume: number; reap: number; completeAttach: number }
+  calls: { list: number; get: number; start: number; resume: number; cancel: number; reap: number; completeAttach: number }
 }
 
 export function createMemorySessions(options: {
@@ -290,7 +290,7 @@ export function createMemorySessions(options: {
     ...item,
     attachCompletion: item.attachCompletion ? { ...item.attachCompletion } : undefined
   }))
-  const calls = { list: 0, get: 0, start: 0, resume: 0, reap: 0, completeAttach: 0 }
+  const calls = { list: 0, get: 0, start: 0, resume: 0, cancel: 0, reap: 0, completeAttach: 0 }
   let counter = sessions.length
   const now = options.now || (() => '2000-01-01T00:00:00.000Z')
   const nextId = options.nextId || (() => `memory-session-${++counter}`)
@@ -299,10 +299,14 @@ export function createMemorySessions(options: {
   const find = (id: string) => sessions.find((item) => item.id === id) || null
   const copy = (value: SessionView) => ({
     ...value,
+    steps: value.steps.map((step) => ({ ...step })),
+    events: value.events.map((event) => ({ ...event })),
+    capabilities: { ...value.capabilities },
     inboxIds: value.inboxIds ? [...value.inboxIds] : undefined,
     attachCompletion: value.attachCompletion ? { ...value.attachCompletion } : undefined
   })
   const targetFor = (input: SessionStartRequest) => {
+    if (input.task?.target) return { ...input.task.target }
     if (input.target) return input.target
     if (!input.locator) return undefined
     const key = `${input.locator.kind}:${input.locator.value}`
@@ -329,15 +333,44 @@ export function createMemorySessions(options: {
     start(input: SessionStartRequest) {
       calls.start += 1
       const startRunner = input.options?.start !== false
+      const id = input.task?.id || nextId()
+      const attemptId = `attempt-${id}-1`
+      const at = now()
+      const taskSteps = input.task?.steps || []
       const value: SessionView = {
-        id: nextId(),
+        id,
         kind: input.kind,
         status: startRunner ? 'running' : 'queued',
+        revision: 1,
+        attemptId,
+        cancelRequested: false,
         target: targetFor(input),
         intent: input.intent,
         runnerId: startRunner ? `memory-runner-${counter}` : undefined,
-        startedAt: now(),
+        startedAt: at,
         canResume: false,
+        steps: taskSteps.map((step) => ({
+          ...step,
+          status: startRunner && step.owner === 'runner' ? 'running' : 'pending',
+          ...(startRunner && step.owner === 'runner' ? { at } : {})
+        })),
+        events: [{
+          sequence: 1,
+          attemptId,
+          type: 'session.queued',
+          at,
+          status: startRunner ? 'running' : 'queued'
+        }, ...(startRunner ? [{
+          sequence: 2,
+          attemptId,
+          type: 'runner.started' as const,
+          at,
+          status: 'running' as const
+        }] : [])],
+        capabilities: {
+          canResume: false,
+          canCancel: startRunner && (input.task?.capabilities.cancel ?? true)
+        },
         inboxIds: input.inboxIds ? [...input.inboxIds] : undefined
       }
       sessions.push(value)
@@ -351,9 +384,62 @@ export function createMemorySessions(options: {
       if (value.kind === 'attach' && value.status === 'completed') throw portFault('request-in-progress')
       value.intent = input.message
       value.status = input.options?.start === false ? 'queued' : 'running'
+      value.revision += 1
+      const attemptNumber = Number(value.attemptId?.match(/-(\d+)$/)?.[1] || 1) + 1
+      value.attemptId = `attempt-${value.id}-${attemptNumber}`
+      value.cancelRequested = false
       value.error = undefined
       value.exitCode = null
       value.endedAt = undefined
+      value.steps = (input.task?.steps || value.steps).map((step) => ({
+        id: step.id,
+        title: step.title,
+        owner: step.owner,
+        status: value.status === 'running' && step.owner === 'runner' ? 'running' : 'pending',
+        ...(value.status === 'running' && step.owner === 'runner' ? { at: now() } : {})
+      }))
+      value.events = [...value.events, {
+        sequence: value.events.length + 1,
+        attemptId: value.attemptId,
+        type: value.status === 'running' ? 'runner.started' : 'session.queued',
+        at: now(),
+        status: value.status
+      }]
+      value.capabilities = { canResume: false, canCancel: value.status === 'running' }
+      return copy(value)
+    },
+    cancel(input) {
+      calls.cancel += 1
+      const value = find(input.sessionId)
+      if (!value) throw portFault('resource-not-found')
+      if (value.status === 'completed' || value.status === 'failed' || value.status === 'cancelled') {
+        return copy(value)
+      }
+      const at = now()
+      const eventStatus = value.status === 'waiting' ? 'awaiting' : value.status
+      value.revision += 1
+      value.cancelRequested = true
+      value.events = [...value.events, {
+        sequence: value.events.length + 1,
+        attemptId: value.attemptId || `attempt-${value.id}-1`,
+        type: 'session.cancel-requested',
+        at,
+        status: eventStatus
+      }]
+      value.status = 'cancelled'
+      value.endedAt = at
+      value.steps = value.steps.map((step) => step.status === 'completed'
+        ? step
+        : { ...step, status: 'cancelled', at })
+      value.events = [...value.events, {
+        sequence: value.events.length + 1,
+        attemptId: value.attemptId || `attempt-${value.id}-1`,
+        type: 'runner.status',
+        at,
+        status: 'cancelled'
+      }]
+      value.canResume = false
+      value.capabilities = { canResume: false, canCancel: false }
       return copy(value)
     },
     reap() {
@@ -378,11 +464,25 @@ export function createMemorySessions(options: {
         }
         return { status: 'already-completed', session: copy(value) }
       }
-      if (value.status !== 'waiting') return { status: 'not-authorized', reason: 'not-waiting' }
+      if (value.status !== 'awaiting' && value.status !== 'waiting') {
+        return { status: 'not-authorized', reason: 'not-awaiting' }
+      }
       if (value.exitCode !== 0) return { status: 'not-authorized', reason: 'exit-not-zero' }
       value.status = 'completed'
+      value.revision += 1
       value.attachCompletion = { ...input.proof }
       value.canResume = false
+      value.steps = value.steps.map((step) => step.owner === 'application'
+        ? { ...step, status: 'completed', at: input.proof.completedAt }
+        : step)
+      value.events = [...value.events, {
+        sequence: value.events.length + 1,
+        attemptId: value.attemptId || `attempt-${value.id}-1`,
+        type: 'session.completed',
+        at: input.proof.completedAt,
+        status: 'completed'
+      }]
+      value.capabilities = { canResume: false, canCancel: false }
       return { status: 'completed', session: copy(value) }
     }
   }
