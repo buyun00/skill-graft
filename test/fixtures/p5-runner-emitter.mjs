@@ -1,10 +1,24 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import { TextDecoder } from 'node:util'
 
 const mode = process.argv[2] || 'complete'
 const pidFile = process.argv[3] || ''
 const lastMessageFile = process.argv[4] || ''
 const environmentReportFile = process.argv[5] || ''
+const promptReportFile = process.argv[6] || ''
+
+if (mode === 'capture-utf8') {
+  const chunks = []
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
+  const input = Buffer.concat(chunks)
+  new TextDecoder('utf-8', { fatal: true }).decode(input)
+  if (promptReportFile) fs.writeFileSync(promptReportFile, input)
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: '019cfake0-0000-7000-8000-000000000001' }))
+  console.log(JSON.stringify({ type: 'turn.started' }))
+  console.log(JSON.stringify({ type: 'turn.completed' }))
+  process.exit(0)
+}
 
 process.stdin.resume()
 

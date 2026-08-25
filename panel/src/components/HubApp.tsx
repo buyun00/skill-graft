@@ -55,6 +55,7 @@ export function HubApp() {
   const [paletteQuery, setPaletteQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [busyPath, setBusyPath] = useState("");
+  const [registeringWorktree, setRegisteringWorktree] = useState(false);
   const [queued, setQueued] = useState<Record<string, ReturnType<typeof queuedSessionView>>>({});
   const [state, setState] = useState<Record<string, unknown> | null>(null);
   const [worktrees, setWorktrees] = useState<Record<string, unknown> | null>(null);
@@ -276,6 +277,26 @@ export function HubApp() {
     }
   };
 
+  const runRegisterWorktree = async (path: string) => {
+    setRegisteringWorktree(true);
+    try {
+      const result = await api.registerWorktree(path);
+      setWorktrees(result);
+      setWorktreesError("");
+      const selected = typeof result.worktree === "string" ? result.worktree : "";
+      toast({
+        type: "success",
+        title: result.changed ? "工作树已添加" : "工作树已登记",
+        description: selected || path,
+      });
+      if (selected) push(`/workspaces?path=${encodeURIComponent(selected)}`);
+    } catch (err) {
+      toast({ type: "error", title: "添加工作树失败", description: String((err as Error).message || err) });
+    } finally {
+      setRegisteringWorktree(false);
+    }
+  };
+
   const runDetach = async (path: string) => {
     setBusy(true);
     setBusyPath(path);
@@ -372,7 +393,9 @@ export function HubApp() {
           selectedPath={workspacePath}
           queued={queued}
           busyPath={busyPath}
+          registeringWorktree={registeringWorktree}
           onSelect={(path) => push(`/workspaces?path=${encodeURIComponent(path)}`)}
+          onRegisterWorktree={runRegisterWorktree}
           onAttach={runAttach}
           onDetach={runDetach}
         />
@@ -383,6 +406,7 @@ export function HubApp() {
       return (
         <CodexView
           sessions={sessions}
+          worktrees={overview.workspaces}
           selectedId={sessionId}
           busy={busy}
           onSelect={(id) => push(`/codex?id=${encodeURIComponent(id)}`)}

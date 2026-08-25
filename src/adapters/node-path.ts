@@ -21,6 +21,7 @@ export function createNodePath(platform = process.platform): PathPort {
   return {
     join: (...parts) => pathApi.join(...parts),
     resolve: (...parts) => pathApi.resolve(...parts),
+    isAbsolute: (value) => pathApi.isAbsolute(value),
     dirname: (value) => pathApi.dirname(value),
     basename: (value) => pathApi.basename(value),
     comparisonKey,

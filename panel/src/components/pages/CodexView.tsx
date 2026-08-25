@@ -39,6 +39,7 @@ type SessionEvent = {
 
 export function CodexView({
   sessions,
+  worktrees,
   selectedId,
   busy,
   onSelect,
@@ -47,6 +48,7 @@ export function CodexView({
   onCancel,
 }: {
   sessions: Session[];
+  worktrees: Array<{ name: string; path?: string; id: string }>;
   selectedId: string;
   busy?: boolean;
   onSelect: (id: string) => void;
@@ -55,6 +57,7 @@ export function CodexView({
   onCancel: (id: string) => void;
 }) {
   const [intent, setIntent] = useState("");
+  const [worktree, setWorktree] = useState("");
   const [message, setMessage] = useState("");
   const [log, setLog] = useState("");
   const [streamStatus, setStreamStatus] = useState("");
@@ -128,13 +131,35 @@ export function CodexView({
       <section className="glass p-4 rounded-[22px]">
         <SectionHeader title="会话" description="GET /api/codex/sessions" />
         <div className="space-y-3 mb-4">
+          <div>
+            <label htmlFor="chat-worktree" className="block text-[12px] font-[600] text-ink/60 mb-1">
+              对话目标
+            </label>
+            <select
+              id="chat-worktree"
+              value={worktree}
+              onChange={(event) => setWorktree(event.target.value)}
+              className="w-full px-3 py-2 rounded-xl bg-ink/[0.03] border border-ink/[0.06] text-[13px] text-ink"
+            >
+              <option value="">Hub 闲聊（无需工作树）</option>
+              {worktrees.map((item) => {
+                const path = item.path || item.id;
+                return <option key={path} value={path}>{item.name} · {path}</option>;
+              })}
+            </select>
+          </div>
           <textarea
             value={intent}
             onChange={(e) => setIntent(e.target.value)}
             placeholder="新对话意图"
             className="w-full min-h-[72px] px-3 py-2 rounded-xl bg-ink/[0.03] border border-ink/[0.06] text-[13px] text-ink"
           />
-          <Button size="sm" variant="accent" loading={busy} onClick={() => onStart({ kind: "chat", intent })}>
+          <Button
+            size="sm"
+            variant="accent"
+            loading={busy}
+            onClick={() => onStart({ kind: "chat", intent, ...(worktree ? { worktree } : {}) })}
+          >
             开始对话
           </Button>
         </div>

@@ -3,6 +3,7 @@ export type { ContractVersion } from './version.js'
 export type { CommandMeta, JsonObject, JsonPrimitive, JsonValue } from './common.js'
 export { QUERY_COMMAND_KINDS, WRITE_COMMAND_KINDS } from './commands.js'
 export type {
+  RegisterWorktreeCommand,
   AnalyzeCommand,
   ApplyLegacyAttachCommand,
   ApplyLegacyDetachCommand,
@@ -72,6 +73,7 @@ export { AUDIT_EVENT_TYPES } from './events.js'
 export type { AuditEvent, AuditEventType } from './events.js'
 export { UNKNOWN_COMMAND_KIND } from './results.js'
 export type {
+  RegisterWorktreeResult,
   ApplyLegacyAttachResult,
   ApplyLegacyDetachResult,
   CommandDataByKind,

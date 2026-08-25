@@ -88,7 +88,7 @@ test('P5 Local runner uses launcher-pinned paths without explicit composition op
   }
 })
 
-test('P5 Local runner binds tasks and maps real controller start/resume receipts', { skip: process.platform !== 'win32' }, async (t) => {
+test('P5 Local runner binds tasks and maps real controller start/resume receipts with UTF-8 prompts', { skip: process.platform !== 'win32' }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p5-local-runner-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const credentials = path.join(root, 'credential-source')
@@ -123,10 +123,10 @@ test('P5 Local runner binds tasks and maps real controller start/resume receipts
   })
 
   const started = await port.start({
-    task: task('p5-start-resume', 'structured start'),
+    task: task('p5-start-resume', '请开启中文闲聊：你好，世界！'),
     kind: 'chat',
     target: { kind: 'hub', id: 'hub' },
-    intent: 'structured start',
+    intent: '请开启中文闲聊：你好，世界！',
     options: { wait: true }
   })
   assert.equal(started.status, 'completed', JSON.stringify(started))
@@ -140,8 +140,8 @@ test('P5 Local runner binds tasks and maps real controller start/resume receipts
 
   const resumed = await port.resume({
     sessionId: started.id,
-    task: task(started.id, 'structured resume'),
-    message: 'structured resume',
+    task: task(started.id, '继续中文对话：再见！'),
+    message: '继续中文对话：再见！',
     options: { wait: true }
   })
   assert.equal(resumed.status, 'completed', JSON.stringify(resumed))

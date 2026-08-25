@@ -44,6 +44,12 @@ export type RepairLegacyResult = {
   }[]
 }
 
+export type RegisterWorktreeResult = WorktreeListView & {
+  action: 'registerWorktree'
+  worktree: string
+  changed: boolean
+}
+
 export type ApplyLegacyAttachResult = {
   action: 'applyLegacyAttach'
   mode: 'legacyLinks'
@@ -239,6 +245,7 @@ export type CommandDataByKind = {
   getSnapshot: GetSnapshotResult
   getPin: GetPinResult
   planSync: PlanSyncResult
+  registerWorktree: RegisterWorktreeResult
   repairLegacy: RepairLegacyResult
   applyLegacyAttach: ApplyLegacyAttachResult
   applyLegacyDetach: ApplyLegacyDetachResult

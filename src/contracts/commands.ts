@@ -19,6 +19,7 @@ export const QUERY_COMMAND_KINDS = [
 ] as const
 
 export const WRITE_COMMAND_KINDS = [
+  'registerWorktree',
   'repairLegacy',
   'applyLegacyAttach',
   'applyLegacyDetach',
@@ -55,6 +56,10 @@ export interface StatusCommand extends BaseCommand<'status'> {}
 export interface ListSkillsCommand extends BaseCommand<'listSkills'> {}
 
 export interface ListWorktreesCommand extends BaseCommand<'listWorktrees'> {}
+
+export interface RegisterWorktreeCommand extends BaseCommand<'registerWorktree'> {
+  worktree: string
+}
 
 export interface ReadSkillCommand extends BaseCommand<'readSkill'> {
   path: string
@@ -228,6 +233,7 @@ export type QueryCommand =
   | PlanSyncCommand
 
 export type WriteCommand =
+  | RegisterWorktreeCommand
   | RepairLegacyCommand
   | ApplyLegacyAttachCommand
   | ApplyLegacyDetachCommand

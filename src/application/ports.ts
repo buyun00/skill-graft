@@ -105,6 +105,34 @@ export interface HubQueryPort {
   inspectWorktree(worktree: string): MaybePromise<WorktreeInspection>
 }
 
+export type WorktreeRegistryInvalidReason =
+  | 'invalid-path'
+  | 'not-absolute'
+  | 'not-found'
+  | 'not-directory'
+  | 'cannot-canonicalize'
+  | 'not-git-worktree'
+  | 'not-exact-worktree'
+  | 'hub-root'
+  | 'not-recognized'
+  | 'too-many-worktrees'
+
+export type WorktreeRegistryResult =
+  | {
+      status: 'registered'
+      worktree: string
+      changed: boolean
+    }
+  | {
+      status: 'invalid'
+      reason: WorktreeRegistryInvalidReason
+    }
+
+/** Validates and durably records an exact user-selected Git worktree. */
+export interface WorktreeRegistryPort {
+  register(worktree: string): MaybePromise<WorktreeRegistryResult>
+}
+
 export type WorktreeIdentity = {
   pathKey: Sha256Identifier
   worktreeId: string

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Button, SectionHeader, StatusPill } from "graft-glass-ui/src/components";
 import { WorkspaceOperations } from "./WorkspaceOperations";
 
@@ -21,7 +22,9 @@ export function WorkspacesView({
   selectedPath,
   queued,
   busyPath,
+  registeringWorktree,
   onSelect,
+  onRegisterWorktree,
   onAttach,
   onDetach,
 }: {
@@ -29,16 +32,61 @@ export function WorkspacesView({
   selectedPath: string;
   queued: Record<string, Queued>;
   busyPath?: string;
+  registeringWorktree?: boolean;
   onSelect: (path: string) => void;
+  onRegisterWorktree: (path: string) => void;
   onAttach: (path: string) => void;
   onDetach: (path: string) => void;
 }) {
+  const [locationPath, setLocationPath] = useState("");
+  const submitLocation = () => {
+    const path = locationPath.trim();
+    if (path) onRegisterWorktree(path);
+  };
+
   return (
     <div>
     <section className="glass p-5 md:p-6 rounded-[22px]">
       <SectionHeader title="工作区" description="typed listWorktrees · attach/detach 是 Application 会话" />
+      <div className="mb-4 rounded-2xl bg-ink/[0.025] border border-ink/[0.06] p-3">
+        <label htmlFor="worktree-location" className="block text-[13px] font-[600] text-ink/70">
+          添加工作树
+        </label>
+        <p className="mt-1 text-[12px] text-ink/45">
+          粘贴具体 Git 工作树根目录的绝对路径。只登记这个工作树，不会扫描同级目录。
+        </p>
+        <div className="mt-3 flex flex-col sm:flex-row gap-2">
+          <input
+            id="worktree-location"
+            value={locationPath}
+            onChange={(event) => setLocationPath(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitLocation();
+              }
+            }}
+            placeholder="例如 C:\\Projects\\my-worktree"
+            autoComplete="off"
+            className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-white/45 border border-ink/[0.08] text-[13px] text-ink"
+          />
+          <Button
+            size="sm"
+            variant="accent"
+            disabled={!locationPath.trim()}
+            loading={registeringWorktree}
+            onClick={submitLocation}
+          >
+            添加并选择
+          </Button>
+        </div>
+      </div>
       <div className="space-y-2">
-        {items.length === 0 ? <p className="text-[13.5px] text-ink/45">没有工作树。</p> : null}
+        {items.length === 0 ? (
+          <p className="text-[13.5px] text-ink/45">
+            还没有工作树。请粘贴具体 Git 工作树根目录的绝对路径；网页不会静默扫描你的磁盘。
+          </p>
+        ) : null}
         {items.map((item) => {
           const path = item.path || item.id;
           const active = path === selectedPath;

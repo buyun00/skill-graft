@@ -71,6 +71,14 @@ function applicationData(kind, body) {
   switch (kind) {
     case 'status': return { hubRoot: 'C:\\hub', counts: { resident: 1, adopted: 0, queued: 0, proposed: 0 }, items: [] }
     case 'listWorktrees': return { scanRoots: [], worktrees: [] }
+    case 'registerWorktree':
+      return {
+        action: kind,
+        worktree: body.worktree,
+        changed: true,
+        scanRoots: [],
+        worktrees: [{ name: 'worktree', path: body.worktree }]
+      }
     case 'readSkill': return { path: body.path, content: '# skill' }
     case 'listHistory': return { records: [{ id: 'history-1', type: 'sync' }] }
     case 'listSessions': return { sessions: [session('chat', 'session-1')] }
@@ -192,6 +200,7 @@ test('panel API uses the typed Application envelope for Local operations', async
   assert.equal((await api.getDaemon()).ok, false)
   await api.getState()
   await api.getWorktrees()
+  await api.registerWorktree(worktree, { requestId: 'register-worktree-request' })
   await api.getSkill('skills/ozdqp-development')
   await api.getHistory()
   await api.getSessions()
@@ -210,6 +219,7 @@ test('panel API uses the typed Application envelope for Local operations', async
   const attached = await api.attachWorktree(worktree, 'contract attach')
   const detached = await api.detachWorktree(worktree, 'contract detach')
   const started = await api.startCodex({ kind: 'chat', intent: 'hello' })
+  await api.startCodex({ kind: 'chat', intent: 'worktree hello', worktree })
   const resumed = await api.resumeCodex('session-1', 'continue')
   const cancelled = await api.cancelCodex('session-1', 'panel requested cancellation')
 
@@ -222,6 +232,11 @@ test('panel API uses the typed Application envelope for Local operations', async
 
   assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'status')[0]), { kind: 'status' })
   assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'listWorktrees')[0]), { kind: 'listWorktrees' })
+  assert.deepEqual(commandBodies(seen, 'registerWorktree')[0], {
+    kind: 'registerWorktree',
+    worktree,
+    requestId: 'register-worktree-request'
+  })
   assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'readSkill')[0]), {
     kind: 'readSkill',
     path: 'skills/ozdqp-development'
@@ -295,11 +310,10 @@ test('panel API uses the typed Application envelope for Local operations', async
     worktree,
     intent: 'contract detach'
   })
-  assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'chat')[0]), {
-    kind: 'chat',
-    intent: 'hello',
-    runner: {}
-  })
+  assert.deepEqual(commandBodies(seen, 'chat').map(withoutGeneratedRequestId), [
+    { kind: 'chat', intent: 'hello', runner: {} },
+    { kind: 'chat', intent: 'worktree hello', worktree, runner: {} }
+  ])
   assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'resumeSession')[0]), {
     kind: 'resumeSession',
     sessionId: 'session-1',
@@ -531,6 +545,7 @@ test('panel sources are typed-transport renderers and close terminal EventSource
     'sync',
     'migrateLegacy',
     'rollbackLegacyMigration',
+    'registerWorktree',
     'listHistory'
   ]) {
     assert.match(source, new RegExp(`['\"]${kind}['\"]`), kind)
@@ -540,6 +555,10 @@ test('panel sources are typed-transport renderers and close terminal EventSource
   assert.match(source, /addEventListener\("session"/)
   assert.match(source, /addEventListener\("end"/)
   assert.match(source, /cancelSession/)
+  assert.match(source, /添加并选择/)
+  assert.match(source, /具体 Git 工作树根目录的绝对路径/)
+  assert.match(source, /只登记这个工作树，不会扫描同级目录/)
+  assert.match(source, /Hub 闲聊（无需工作树）/)
   assert.match(source, /source\.close\(\)/)
   assert.doesNotMatch(source, /\/api\/(?:state|worktrees|decide|analyze|codex\/start|codex\/resume|worktree\/attach|worktree\/detach)/)
   assert.doesNotMatch(source, /src\/core/)

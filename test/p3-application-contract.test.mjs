@@ -748,6 +748,9 @@ function createFixture(options = {}) {
     runtime,
     recovery: options.recovery,
     queries,
+    worktreeRegistry: {
+      register: () => ({ status: 'invalid', reason: 'not-found' })
+    },
     useCases,
     legacyAttach,
     legacyDetach,

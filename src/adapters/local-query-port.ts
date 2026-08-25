@@ -28,6 +28,7 @@ import type { LocalHostContext } from './host-context.js'
 import { adoptedSkillNames, residentSkillNames } from './local-skill-corpus.js'
 import { canonicalLocalWorktreePath } from './local-worktree-path.js'
 import { worktreeTargetId } from './worktree-target.js'
+import { readRegisteredWorktrees } from './local-worktree-registry.js'
 
 function resolveSkillTarget(context: LocalHostContext, requested: string): SkillReadPortResult {
   const root = context.path.resolve(context.hubRoot)
@@ -140,8 +141,16 @@ function historyRecords(context: LocalHostContext, limit: number): HistoryRecord
   return records
 }
 
-function checkoutRules(context: LocalHostContext): CheckoutRules {
+function configuredCheckoutRules(context: LocalHostContext): CheckoutRules {
   return parseCheckoutRules(context.fs.readText(context.path.join(context.hubRoot, 'overlay', 'checkout-rules.txt')))
+}
+
+function effectiveCheckoutRules(context: LocalHostContext): CheckoutRules {
+  const base = configuredCheckoutRules(context)
+  return {
+    ...base,
+    paths: [...base.paths, ...readRegisteredWorktrees(context)]
+  }
 }
 
 function v2WorktreePins(context: LocalHostContext): readonly WorktreePinV1[] {
@@ -200,20 +209,26 @@ function latestLocalChangeMs(context: LocalHostContext, dir: string): number {
   return Math.max(0, ...times)
 }
 
-function discoveryCandidates(context: LocalHostContext, scanRoots: readonly string[], rules: CheckoutRules): string[] {
-  const candidates: string[] = []
+function discoveryCandidates(
+  context: LocalHostContext,
+  scanRoots: readonly string[],
+  rules: CheckoutRules,
+  registeredWorktrees: readonly string[]
+): Array<{ path: string; exact: boolean }> {
+  const candidates: Array<{ path: string; exact: boolean }> = []
   for (const root of scanRoots) {
     if (!root || !context.fs.exists(root)) continue
     try {
       for (const entry of context.fs.readDir(root)) {
         if (!entry.isDirectory && !entry.isSymbolicLink) continue
-        candidates.push(context.path.join(root, entry.name))
+        candidates.push({ path: context.path.join(root, entry.name), exact: false })
       }
     } catch {
       /* unreadable scan roots contribute no host facts */
     }
   }
-  candidates.push(...rules.paths)
+  candidates.push(...rules.paths.map((path) => ({ path, exact: false })))
+  candidates.push(...registeredWorktrees.map((path) => ({ path, exact: true })))
   return candidates
 }
 
@@ -256,13 +271,19 @@ function projectionFact(
 
 function readWorktreeFacts(context: LocalHostContext): WorktreeDiscoveryFacts {
   const scanRoots = context.persist.readList(context.path.join(context.hubRoot, 'overlay', 'scan-roots.txt'))
-  const rules = checkoutRules(context)
+  const explicitWorktrees = readRegisteredWorktrees(context)
+  const baseRules = configuredCheckoutRules(context)
+  const rules: CheckoutRules = {
+    ...baseRules,
+    paths: [...baseRules.paths, ...explicitWorktrees]
+  }
   const attached = context.persist.readList(context.path.join(context.hubRoot, 'overlay', 'attached-worktrees.txt'))
   const materializedIds = materializedWorktreeIds(context)
   const blocked = context.persist.readList(context.path.join(context.hubRoot, 'overlay', 'do-not-auto-attach.txt'))
   let ordinal = 0
   const observations: WorktreeCloneObservation[] = []
-  for (const candidate of discoveryCandidates(context, scanRoots, rules)) {
+  for (const candidateFact of discoveryCandidates(context, scanRoots, baseRules, explicitWorktrees)) {
+    const candidate = candidateFact.path
     const resolved = context.path.resolve(candidate)
     const rawCommon = context.git.output(candidate, ['rev-parse', '--git-common-dir']).trim()
     const common = rawCommon ? context.path.resolve(candidate, rawCommon) : context.path.resolve(candidate, '.git')
@@ -287,8 +308,10 @@ function readWorktreeFacts(context: LocalHostContext): WorktreeDiscoveryFacts {
         }))
       }
     }
-    const listed = parseWorktreePorcelain(context.git.output(candidate, ['worktree', 'list', '--porcelain']))
-      .map((info) => projectionFact(context, info, attached, materializedIds, blocked, ordinal++))
+    const listed = candidateFact.exact
+      ? []
+      : parseWorktreePorcelain(context.git.output(candidate, ['worktree', 'list', '--porcelain']))
+        .map((info) => projectionFact(context, info, attached, materializedIds, blocked, ordinal++))
     observations.push({
       cloneIdentity: `clone:${context.hash.sha256(context.path.comparisonKey(common)).slice(0, 24)}`,
       cloneRoot: cloneRootFromCommonDir(context, common),
@@ -301,7 +324,7 @@ function readWorktreeFacts(context: LocalHostContext): WorktreeDiscoveryFacts {
 
 function inspectWorktree(context: LocalHostContext, worktree: string): WorktreeInspection {
   const resolvedPath = context.path.resolve(worktree)
-  const rules = checkoutRules(context)
+  const rules = effectiveCheckoutRules(context)
   const name = context.path.basename(resolvedPath).toLowerCase()
   const attached = context.persist.readList(context.path.join(context.hubRoot, 'overlay', 'attached-worktrees.txt'))
   const canonical = canonicalLocalWorktreePath(context, resolvedPath) || resolvedPath

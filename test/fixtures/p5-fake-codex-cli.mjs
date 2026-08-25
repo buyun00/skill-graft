@@ -1,12 +1,10 @@
 import fs from 'node:fs'
+import { TextDecoder } from 'node:util'
 
 const args = process.argv.slice(2)
-const prompt = await new Promise((resolve) => {
-  let value = ''
-  process.stdin.setEncoding('utf8')
-  process.stdin.on('data', (chunk) => { value += chunk })
-  process.stdin.on('end', () => resolve(value))
-})
+const promptChunks = []
+for await (const chunk of process.stdin) promptChunks.push(Buffer.from(chunk))
+const prompt = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(promptChunks))
 const resume = args[0] === 'exec' && args[1] === 'resume'
 const outputIndex = args.indexOf('-o')
 const output = outputIndex >= 0 ? args[outputIndex + 1] : ''

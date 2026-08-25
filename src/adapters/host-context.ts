@@ -20,6 +20,7 @@ export type LocalHubStateFile = {
 export interface PathPort {
   join(...parts: string[]): string
   resolve(...parts: string[]): string
+  isAbsolute(value: string): boolean
   dirname(value: string): string
   basename(value: string): string
   /** Platform-aware stable key for comparing host paths; never expose it as a contract path. */
