@@ -250,6 +250,8 @@ export function toSessionView(ctx: HubContext, session: HubSession): SessionView
     id: current.id,
     kind: toSessionKind(current.kind),
     status: toSessionStatus(current.status),
+    revision: 0,
+    cancelRequested: false,
     target: toSessionTarget(ctx, current),
     intent: current.intent || undefined,
     runnerId: current.pid ? `local:${current.id}` : undefined,
@@ -261,6 +263,9 @@ export function toSessionView(ctx: HubContext, session: HubSession): SessionView
     summary: current.summary || undefined,
     lastMessage: current.lastMessage || undefined,
     canResume: Boolean(current.canResume),
+    steps: [],
+    events: [],
+    capabilities: { canResume: Boolean(current.canResume), canCancel: false },
     inboxIds: current.inboxIds,
     attachCompletion: current.attachCompletion ? { ...current.attachCompletion } : undefined
   }
@@ -293,7 +298,7 @@ export function completeAttachSession(
     }
     return { status: 'already-completed', session: toSessionView(ctx, session) }
   }
-  if (session.status !== 'waiting') return { status: 'not-authorized', reason: 'not-waiting' }
+  if (session.status !== 'waiting') return { status: 'not-authorized', reason: 'not-awaiting' }
   if (session.exitCode !== 0) return { status: 'not-authorized', reason: 'exit-not-zero' }
   session.status = 'completed'
   session.attachCompletion = { ...input.proof }

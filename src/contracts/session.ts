@@ -72,6 +72,81 @@ export type SessionTask = {
   capabilities: SessionTaskCapabilities
 }
 
+export const SESSION_RUNNER_STATES = [
+  'starting',
+  'running',
+  'cancelling',
+  'succeeded',
+  'failed',
+  'cancelled',
+  'lost'
+] as const
+
+export type SessionRunnerState = (typeof SESSION_RUNNER_STATES)[number]
+
+export const SESSION_RUNNER_EVENT_TYPES = [
+  'runner.started',
+  'runner.progress',
+  'runner.succeeded',
+  'runner.failed',
+  'runner.cancelled'
+] as const
+
+export type SessionRunnerEventType = (typeof SESSION_RUNNER_EVENT_TYPES)[number]
+
+export const SESSION_RUNNER_ERROR_CODES = [
+  'RUNNER_UNAVAILABLE',
+  'RUNNER_NOT_FOUND',
+  'RUNNER_INVALID_STATE',
+  'RUNNER_START_FAILED',
+  'RUNNER_RESUME_FAILED',
+  'RUNNER_CANCEL_FAILED',
+  'RUNNER_PROTOCOL_ERROR'
+] as const
+
+export type SessionRunnerErrorCode = (typeof SESSION_RUNNER_ERROR_CODES)[number]
+
+/** Host-neutral and safe to persist or return through a transport. */
+export type SessionRunnerError = {
+  code: SessionRunnerErrorCode
+  retryable: boolean
+  details?: { retryAfterMs?: number }
+}
+
+/**
+ * Opaque execution snapshot returned by every SessionRunner implementation.
+ * Process identifiers, filesystem paths, argv, credentials, and native host
+ * objects are deliberately excluded.
+ */
+export type SessionRunnerSnapshot = {
+  runnerId: string
+  attemptId: string
+  state: SessionRunnerState
+  continuationToken?: string
+  startedAt?: string
+  endedAt?: string
+  exitCode?: number | null
+  error?: SessionRunnerError
+}
+
+/** Bounded host-neutral progress event; runner output text is never included. */
+export type SessionRunnerEvent = {
+  sequence: number
+  attemptId: string
+  type: SessionRunnerEventType
+  at: string
+  code?: SessionRunnerErrorCode
+}
+
+export type SessionRunnerEventsPage = {
+  events: readonly SessionRunnerEvent[]
+  nextSequence: number
+}
+
+export type SessionRunnerResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: SessionRunnerError }
+
 export type SessionStepView = SessionTaskStep & {
   status: SessionStepStatus
   at?: string

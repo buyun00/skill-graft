@@ -17,6 +17,10 @@ import type {
   Sha256Identifier,
   SessionKind,
   SessionRequestOptions,
+  SessionRunnerEventsPage,
+  SessionRunnerResult,
+  SessionRunnerSnapshot,
+  SessionTask,
   SessionTarget,
   SessionView
 } from '../contracts/index.js'
@@ -210,6 +214,50 @@ export type SessionResumeRequest = {
   options?: SessionRequestOptions
 }
 
+export type SessionRunnerStartRequest = {
+  task: SessionTask
+  attemptId: string
+  options?: SessionRequestOptions
+}
+
+export type SessionRunnerResumeRequest = {
+  task: SessionTask
+  attemptId: string
+  runnerId: string
+  continuationToken: string
+  options?: SessionRequestOptions
+}
+
+export type SessionRunnerCancelRequest = {
+  sessionId: string
+  attemptId: string
+  runnerId: string
+  reason?: string
+}
+
+export type SessionRunnerStatusRequest = {
+  sessionId: string
+  attemptId: string
+  runnerId: string
+}
+
+export type SessionRunnerEventsRequest = SessionRunnerStatusRequest & {
+  afterSequence?: number
+}
+
+/**
+ * Shared execution boundary implemented independently by Local and DSH.
+ * Implementations consume a host-neutral task and expose only opaque IDs,
+ * normalized lifecycle state, and bounded structured events.
+ */
+export interface SessionRunnerPort {
+  start(input: SessionRunnerStartRequest): MaybePromise<SessionRunnerResult<SessionRunnerSnapshot>>
+  resume(input: SessionRunnerResumeRequest): MaybePromise<SessionRunnerResult<SessionRunnerSnapshot>>
+  cancel(input: SessionRunnerCancelRequest): MaybePromise<SessionRunnerResult<SessionRunnerSnapshot>>
+  status(input: SessionRunnerStatusRequest): MaybePromise<SessionRunnerResult<SessionRunnerSnapshot>>
+  events(input: SessionRunnerEventsRequest): MaybePromise<SessionRunnerResult<SessionRunnerEventsPage>>
+}
+
 export type AttachCompletionRequest = {
   sessionId: string
   proof: AttachCompletionProof
@@ -219,7 +267,7 @@ export type AttachCompletionOutcome =
   | { status: 'completed' | 'already-completed'; session: SessionView }
   | {
       status: 'not-authorized'
-      reason: 'not-found' | 'not-attach' | 'target-mismatch' | 'not-waiting' | 'exit-not-zero'
+      reason: 'not-found' | 'not-attach' | 'target-mismatch' | 'not-awaiting' | 'exit-not-zero'
     }
   | { status: 'proof-conflict' }
 

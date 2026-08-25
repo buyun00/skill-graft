@@ -299,6 +299,9 @@ export function createMemorySessions(options: {
   const find = (id: string) => sessions.find((item) => item.id === id) || null
   const copy = (value: SessionView) => ({
     ...value,
+    steps: value.steps.map((step) => ({ ...step })),
+    events: value.events.map((event) => ({ ...event })),
+    capabilities: { ...value.capabilities },
     inboxIds: value.inboxIds ? [...value.inboxIds] : undefined,
     attachCompletion: value.attachCompletion ? { ...value.attachCompletion } : undefined
   })
@@ -329,15 +332,30 @@ export function createMemorySessions(options: {
     start(input: SessionStartRequest) {
       calls.start += 1
       const startRunner = input.options?.start !== false
+      const id = nextId()
+      const attemptId = `attempt-${id}-1`
+      const at = now()
       const value: SessionView = {
-        id: nextId(),
+        id,
         kind: input.kind,
         status: startRunner ? 'running' : 'queued',
+        revision: 1,
+        attemptId,
+        cancelRequested: false,
         target: targetFor(input),
         intent: input.intent,
         runnerId: startRunner ? `memory-runner-${counter}` : undefined,
-        startedAt: now(),
+        startedAt: at,
         canResume: false,
+        steps: [],
+        events: [{
+          sequence: 1,
+          attemptId,
+          type: 'session.queued',
+          at,
+          status: startRunner ? 'running' : 'queued'
+        }],
+        capabilities: { canResume: false, canCancel: startRunner },
         inboxIds: input.inboxIds ? [...input.inboxIds] : undefined
       }
       sessions.push(value)
@@ -378,7 +396,9 @@ export function createMemorySessions(options: {
         }
         return { status: 'already-completed', session: copy(value) }
       }
-      if (value.status !== 'waiting') return { status: 'not-authorized', reason: 'not-waiting' }
+      if (value.status !== 'awaiting' && value.status !== 'waiting') {
+        return { status: 'not-authorized', reason: 'not-awaiting' }
+      }
       if (value.exitCode !== 0) return { status: 'not-authorized', reason: 'exit-not-zero' }
       value.status = 'completed'
       value.attachCompletion = { ...input.proof }

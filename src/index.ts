@@ -17,7 +17,13 @@ export type {
   SharedUseCasePorts,
   RequestLedgerEntry,
   RequestLedgerPort,
-  SessionPort
+  SessionPort,
+  SessionRunnerCancelRequest,
+  SessionRunnerEventsRequest,
+  SessionRunnerPort,
+  SessionRunnerResumeRequest,
+  SessionRunnerStartRequest,
+  SessionRunnerStatusRequest
 } from './application/index.js'
 export { createLocalHost, openLocalHost } from './local/create-local-host.js'
 export type { CreateLocalHostOptions, LocalHost } from './local/create-local-host.js'
