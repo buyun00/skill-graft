@@ -1,5 +1,13 @@
 import type { JsonObject } from './common.js'
+import type {
+  SessionCapabilitiesView,
+  SessionEventView,
+  SessionStatus,
+  SessionStepView
+} from './session.js'
 import type { Sha256Identifier } from './snapshot.js'
+
+export type { CurrentSessionStatus, LegacySessionStatus, SessionStatus } from './session.js'
 
 export type SkillKind = 'resident' | 'adopted' | 'inbox'
 
@@ -47,8 +55,6 @@ export type InboxItemView = {
 
 export type SessionKind = 'attach' | 'detach' | 'edit' | 'chat' | 'analyze'
 
-export type SessionStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
-
 export type SessionTarget = {
   kind: 'hub' | 'worktree' | 'skill' | 'inbox'
   /** Host-neutral logical or opaque identifier; never a host filesystem path. */
@@ -71,6 +77,12 @@ export type SessionView = {
   id: string
   kind: SessionKind
   status: SessionStatus
+  /** Monotonic Application-owned CAS revision. */
+  revision: number
+  /** Active or most recent execution attempt. */
+  attemptId?: string
+  /** Set before cancellation is dispatched; terminal cancelled requires runner confirmation. */
+  cancelRequested: boolean
   target?: SessionTarget
   intent?: string
   runnerId?: string
@@ -82,6 +94,9 @@ export type SessionView = {
   summary?: string
   lastMessage?: string
   canResume: boolean
+  steps: readonly SessionStepView[]
+  events: readonly SessionEventView[]
+  capabilities: SessionCapabilitiesView
   inboxIds?: readonly string[]
   attachCompletion?: AttachCompletionProof
 }

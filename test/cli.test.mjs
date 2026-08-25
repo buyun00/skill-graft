@@ -131,7 +131,7 @@ test('U4 unknown command is non-zero; --help and -h exit 0', () => {
 
   const help = spawnHub(['--help'])
   assert.equal(help.status, 0, help.stderr)
-  for (const verb of ['status', 'list-worktrees', 'list-skills', 'repair-links', 'apply-legacy-attach', 'apply-legacy-detach', 'ingest', 'decide', 'attach', 'detach', 'edit', 'chat', 'analyze', 'resume', 'session', 'setup', 'uninstall', 'doctor', 'daemon']) {
+  for (const verb of ['status', 'list-worktrees', 'list-skills', 'repair-links', 'apply-legacy-attach', 'apply-legacy-detach', 'ingest', 'decide', 'attach', 'detach', 'edit', 'chat', 'analyze', 'resume', 'cancel', 'session', 'setup', 'uninstall', 'doctor', 'daemon']) {
     assert.match(help.stdout, new RegExp(verb))
   }
 

@@ -180,6 +180,10 @@ export function createPanelApi(options = {}) {
       sessionId: id,
       message
     }, commandOptions),
+    cancelCodex: (id, reason, commandOptions = {}) => sessionCommand('cancelSession', {
+      sessionId: id,
+      ...(reason ? { reason } : {})
+    }, commandOptions),
     sessionStreamUrl: (id) => joinUrl(base, `${API_PATHS.stream}?id=${encodeURIComponent(id || '')}`)
   }
 }

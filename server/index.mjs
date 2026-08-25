@@ -637,6 +637,7 @@ export function createHttpServer(options = {}) {
     let lastLogText = null
     let lastLogBytes = -1
     let lastStatus = ''
+    let lastSession = ''
 
     const clearTimers = () => {
       if (pollTimer) clearTimeout(pollTimer)
@@ -705,6 +706,11 @@ export function createHttpServer(options = {}) {
           writeEvent('status', { status: 'missing' })
           finish('missing')
           return
+        }
+        const serializedSession = JSON.stringify(session)
+        if (serializedSession !== lastSession) {
+          lastSession = serializedSession
+          writeEvent('session', session)
         }
         const log = utf8Tail(host.localSessions?.readLog(id) || '', streamLogTailBytes)
         if (log.totalBytes !== lastLogBytes || log.text !== lastLogText) {

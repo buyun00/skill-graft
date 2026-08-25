@@ -96,6 +96,8 @@ function usage(): string {
     '  analyze [--id <inbox-id>] [--intent <text>] [--no-spawn] [--wait]',
     '                                 Enqueue an analysis session; on finish writes suggestion.* and status=proposed.',
     '  resume --id <id> --message <text> [--no-spawn] [--wait]',
+    '  cancel --id <id> [--reason <text>]',
+    '                                 Request cancellation and return the durable session state',
     '  session list [--status <status> ...]',
     '  session show --id <id> [--wait]',
     '  session --id <id> [--wait]     Deprecated alias for session show',
@@ -710,6 +712,19 @@ async function main() {
       sessionId: id,
       message,
       runner
+    }))
+    return
+  }
+  if (command === 'cancel') {
+    const id = takeFlag(argv, '--id')
+    const reason = takeFlag(argv, '--reason')
+    if (!id) fail('cancel requires --id')
+    requireNoArguments(argv, 'cancel')
+    print(await execute({
+      kind: 'cancelSession',
+      meta: commandMeta(),
+      sessionId: id,
+      reason
     }))
     return
   }

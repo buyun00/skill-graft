@@ -30,6 +30,7 @@ export const WRITE_COMMAND_KINDS = [
   'chat',
   'analyze',
   'resumeSession',
+  'cancelSession',
   'reapSessions',
   'createSnapshot',
   'setPin',
@@ -163,6 +164,11 @@ export interface ResumeSessionCommand extends BaseCommand<'resumeSession'> {
   runner?: SessionRequestOptions
 }
 
+export interface CancelSessionCommand extends BaseCommand<'cancelSession'> {
+  sessionId: string
+  reason?: string
+}
+
 export interface ReapSessionsCommand extends BaseCommand<'reapSessions'> {
   sessionIds?: readonly string[]
 }
@@ -233,6 +239,7 @@ export type WriteCommand =
   | ChatCommand
   | AnalyzeCommand
   | ResumeSessionCommand
+  | CancelSessionCommand
   | ReapSessionsCommand
   | CreateSnapshotCommand
   | SetPinCommand
