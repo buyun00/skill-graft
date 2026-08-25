@@ -7,6 +7,7 @@ artifacts/
 docs/
 node_modules/
 panel/
+packages/
 scripts/
 skill-review/
 src/

@@ -16,6 +16,7 @@ fs.mkdirSync(path.join(stageRoot, 'lib'), { recursive: true })
 for (const relative of ['package.json', 'cordis.patch.yml', 'overlay']) {
   fs.cpSync(path.join(sourceRoot, relative), path.join(stageRoot, relative), { recursive: true })
 }
+fs.copyFileSync(path.join(repoRoot, 'LICENSE'), path.join(stageRoot, 'LICENSE'))
 
 await build({
   entryPoints: [path.join(sourceRoot, 'src', 'index.ts')],

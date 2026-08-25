@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "phase": "P10",
+  "status": "sealed-limited-rc-with-unverified-runtime-gates",
+  "date": "2026-08-25",
+  "branch": "codex/skill-graft-p10-release-candidate",
+  "baselineSha": "c539aca29d5a32fea5898be5fc6a292165248e54",
+  "releaseCommit": "this-file-containing-commit",
+  "tools": {
+    "node": "v24.15.0",
+    "npm": "11.12.1",
+    "pnpm": "11.19.0",
+    "git": "2.49.0.windows.1"
+  },
+  "packages": [
+    {
+      "host": "local",
+      "version": "0.1.0",
+      "filename": "ozdqp-skill-hub-0.1.0.tgz",
+      "files": 266,
+      "bytes": 1027697,
+      "sha256": "ac5afd0ed323ad3480e72a670da0530940b1008b01f1dcebf636f7fc7aa3c162",
+      "license": "Apache-2.0"
+    },
+    {
+      "host": "local",
+      "version": "0.1.1-rc.1",
+      "filename": "ozdqp-skill-hub-0.1.1-rc.1.tgz",
+      "files": 266,
+      "bytes": 1027700,
+      "sha256": "69a7056045958886e1d1dfe4e3dd6449ba674ca555f3056e63e55018fd0a28a3",
+      "license": "Apache-2.0"
+    },
+    {
+      "host": "dsh",
+      "version": "0.1.0",
+      "filename": "ozdqp-skill-graft-dsh-0.1.0.tgz",
+      "files": 8,
+      "bytes": 204028,
+      "sha256": "932370a67729e3a9c3afefbc7dd929907f6017dda1921356a257337cb777ec5b",
+      "license": "Apache-2.0"
+    },
+    {
+      "host": "dsh",
+      "version": "0.1.1-rc.1",
+      "filename": "ozdqp-skill-graft-dsh-0.1.1-rc.1.tgz",
+      "files": 8,
+      "bytes": 204033,
+      "sha256": "0adfceba75f5fd44db93ca2d1aef0b4d16bd16eaad28f9aeb50e092d8117891d",
+      "license": "Apache-2.0"
+    }
+  ],
+  "real": [
+    "release build and DSH bundle build",
+    "four source-tree-external A/B npm packs with content, license and local-specifier audit",
+    "Local A and B source-tree-external npm install with external shims and no src directory",
+    "runner-side protected-root rejection and unchanged fingerprints for 18 protected roots",
+    "zero run-owned process and absent lease, transaction and lifecycle WAL paths for all three P10 run ids"
+  ],
+  "focused": [
+    "one P4 lifecycle contract test covering non-dry-run semantic-version downgrade refusal and authority preservation"
+  ],
+  "fallback": [],
+  "historicalOnly": [
+    "P8 installed DSH live RPC evidence",
+    "P9 source-tree-external DSH composition fallback"
+  ],
+  "unverified": [
+    "P10 Local installed setup, doctor and status",
+    "P10 Local real A-to-B lifecycle upgrade and B-to-A downgrade refusal",
+    "P10 Local uninstall, Hub preservation and purge",
+    "P10 DSH add, dump-config, profile, live RPC, upgrade and remove",
+    "clean registry-only DSH peer dependency closure",
+    "final isolated Node wrapper in a real rerun"
+  ],
+  "runs": [
+    {
+      "id": "p10-2ab1536f-9872-4008-b979-d47b6abc2076",
+      "result": "runner-preflight-failed-before-pack"
+    },
+    {
+      "id": "p10-65620e95-76fa-431d-b347-637d4f3b5deb",
+      "result": "local-package-cross-contamination-detected-before-pack",
+      "productFix": ".npmignore excludes packages/"
+    },
+    {
+      "id": "p10-00f0d4ce-548c-4e7e-80b1-55b326355971",
+      "result": "packs-and-local-npm-installs-passed-then-runner-node-path-failed-before-product-setup"
+    }
+  ],
+  "residue": {
+    "runOwnedProcesses": 0,
+    "leases": 0,
+    "transactions": 0,
+    "lifecycleLocks": 0,
+    "lifecycleWals": 0,
+    "purgeWals": 0,
+    "lifecycleInstallDirs": 0,
+    "runRootsRetainedOutsideSource": true
+  },
+  "releaseDecision": {
+    "gaReady": false,
+    "limitedRc": true,
+    "gaBlocker": "same-probe cross-host planHash/bytes/marker/materialization is not host-neutral",
+    "knownLimitations": [
+      "hub-global serializes writes across probes",
+      "no cross-host lock-owner read projection or UI",
+      "P10 DSH live RPC unverified",
+      "P9 busy evidence is not an exit-zero full chain",
+      "P10 installed Local and DSH runtime gates are unverified"
+    ]
+  },
+  "gitDelivery": {
+    "remoteDefaultBranchObserved": "master",
+    "remoteDefaultBranchObservedSha": "cfe617738ada757e042526d127df546092bce6c2",
+    "changeDefaultBranchSetting": false,
+    "pushOnlyP10BranchInThisTask": true,
+    "masterDeliveryAuthorized": true,
+    "masterDeliveryMode": "separate clean no-ff merge task after P10 seal",
+    "masterMergeEqualsGa": false
+  }
+}

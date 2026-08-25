@@ -125,6 +125,7 @@ const MANAGED_INSTALL_ROOT_FILES = new Set(['install.json', 'silent-run.vbs', 'r
 const MANAGED_INSTALL_BIN_FILES = new Set([PRODUCT_COMMAND, `${PRODUCT_COMMAND}.cmd`, `${PRODUCT_ALIAS}.cmd`])
 const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
+const SEMVER_VERSION = /^([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/
 const DATA_ROOT_DIR_NAME = 'skill-graft-data'
 const MANIFEST_MAX_BYTES = 1024 * 1024
 const MARKER_MAX_BYTES = 512 * 1024
@@ -187,6 +188,60 @@ type PackageIdentity = {
   sha256: Sha256Digest
   publicRuntime: ReadonlyMap<string, Buffer>
   publicRuntimeFacts: DataRootMarkerV1['runtime']['files']
+}
+
+type ParsedSemVer = Readonly<{
+  core: readonly [string, string, string]
+  prerelease: readonly string[] | null
+}>
+
+function parseSemVerVersion(value: string, label: string): ParsedSemVer {
+  const match = SEMVER_VERSION.exec(value)
+  if (!match) throw new Error(`${label} is not a valid semantic version`)
+  const core = [match[1], match[2], match[3]] as const
+  if (core.some((identifier) => identifier.length > 1 && identifier.startsWith('0'))) {
+    throw new Error(`${label} is not a valid semantic version`)
+  }
+  const prerelease = match[4]?.split('.') || null
+  if (prerelease?.some((identifier) => /^[0-9]+$/.test(identifier)
+    && identifier.length > 1 && identifier.startsWith('0'))) {
+    throw new Error(`${label} is not a valid semantic version`)
+  }
+  return { core, prerelease }
+}
+
+function compareNumericSemVerIdentifier(left: string, right: string): number {
+  if (left.length !== right.length) return left.length < right.length ? -1 : 1
+  return left === right ? 0 : left < right ? -1 : 1
+}
+
+function compareSemVerVersions(left: string, right: string): number {
+  const leftVersion = parseSemVerVersion(left, 'candidate release version')
+  const rightVersion = parseSemVerVersion(right, 'installed release version')
+  for (let index = 0; index < leftVersion.core.length; index += 1) {
+    const compared = compareNumericSemVerIdentifier(leftVersion.core[index], rightVersion.core[index])
+    if (compared !== 0) return compared
+  }
+  if (!leftVersion.prerelease && !rightVersion.prerelease) return 0
+  if (!leftVersion.prerelease) return 1
+  if (!rightVersion.prerelease) return -1
+  const count = Math.max(leftVersion.prerelease.length, rightVersion.prerelease.length)
+  for (let index = 0; index < count; index += 1) {
+    const leftIdentifier = leftVersion.prerelease[index]
+    const rightIdentifier = rightVersion.prerelease[index]
+    if (leftIdentifier === undefined) return -1
+    if (rightIdentifier === undefined) return 1
+    const leftNumeric = /^[0-9]+$/.test(leftIdentifier)
+    const rightNumeric = /^[0-9]+$/.test(rightIdentifier)
+    if (leftNumeric && rightNumeric) {
+      const compared = compareNumericSemVerIdentifier(leftIdentifier, rightIdentifier)
+      if (compared !== 0) return compared
+      continue
+    }
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1
+    if (leftIdentifier !== rightIdentifier) return leftIdentifier < rightIdentifier ? -1 : 1
+  }
+  return 0
 }
 
 type IntegrationSnapshot = {
@@ -11833,9 +11888,15 @@ export async function upgradeHub(
     if (oldPackage.sha256 !== oldManifest.packageSha256 || oldPackage.version !== oldManifest.packageVersion) {
       throw new Error('installed package no longer matches the ownership manifest')
     }
-    if (candidate.version === oldManifest.packageVersion
-      && candidate.sha256 !== oldManifest.packageSha256) {
-      throw new Error('candidate release reuses the installed version with different package bytes')
+    const versionPrecedence = compareSemVerVersions(candidate.version, oldManifest.packageVersion)
+    if (versionPrecedence < 0) {
+      throw new Error(`candidate release version ${candidate.version} is lower than installed version ${oldManifest.packageVersion}; semantic version downgrade is refused`)
+    }
+    if (versionPrecedence === 0 && candidate.sha256 !== oldManifest.packageSha256) {
+      if (candidate.version === oldManifest.packageVersion) {
+        throw new Error('candidate release reuses the installed version with different package bytes')
+      }
+      throw new Error('candidate release has the installed semantic version precedence with different package bytes')
     }
     oldMarker = preflightDataRoot(paths, candidate, host, false)
     if (!oldMarker || oldMarker.dataRootId !== oldManifest.dataRootId || oldMarker.activeInstallId !== oldManifest.installId) {

@@ -2870,6 +2870,25 @@ test('path-enabled upgrade binds full dist/web identity and remains idempotent',
   assert.equal(manifestB.packageVersion, '2.0.0')
   assert.match(fs.readFileSync(path.join(installDir, 'bin', 'sg.cmd'), 'utf8'), new RegExp(packageB.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 
+  const downgradeAuthority = {
+    install: treeBytes(installDir),
+    data: treeBytes(dataRoot),
+    receipt: treeBytes(path.dirname(lifecycleRootReceiptPath(host)))
+  }
+  const downgraded = await upgradeHub(packageA, { dryRun: false, json: true, noDaemon: true }, host)
+  assert.equal(downgraded.ok, false)
+  assert.equal(downgraded.status, 'failed')
+  assert.match(downgraded.issues[0].message, /semantic version downgrade is refused/)
+  assert.deepEqual(treeBytes(installDir), downgradeAuthority.install, 'downgrade changed installed authority')
+  assert.deepEqual(treeBytes(dataRoot), downgradeAuthority.data, 'downgrade changed Hub authority')
+  assert.deepEqual(
+    treeBytes(path.dirname(lifecycleRootReceiptPath(host))),
+    downgradeAuthority.receipt,
+    'downgrade changed lifecycle receipt authority'
+  )
+  assert.equal(fs.existsSync(upgradePaths.lifecycleWalPath), false)
+  assert.equal(fs.existsSync(upgradePaths.lifecycleLockPath), false)
+
   fs.appendFileSync(path.join(packageB, 'web', 'assets', 'app.js'), '// dirty web\n')
   assert.equal((await doctorHub(packageB, host, dataRoot)).lifecycle.versionMatch, false)
   fs.writeFileSync(path.join(packageB, 'web', 'assets', 'app.js'), '// web B\n')
