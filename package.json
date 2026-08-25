@@ -50,6 +50,7 @@
     "test:real:local:p2": "npm run build && node --test --test-concurrency=1 test/real/local/p2-snapshot-pin-lock.test.mjs",
     "test:real:local:p3": "npm run build && node --test --test-concurrency=1 test/real/local/p3-installed-materialization.test.mjs",
     "test:real:local:p4": "npm run build:release && node --test --test-concurrency=1 test/real/local/p4-installed-lifecycle.test.mjs",
+    "test:real:local:p5": "npm run build:release && node test/real/local/p5-installed-session-runner.mjs",
     "e2e:prepare": "node test/support/prepare-run.mjs",
     "e2e:prepare:p0-fixture": "node test/support/prepare-p0-fixture.mjs",
     "e2e:prepare:independent-p0-source": "node test/support/prepare-independent-p0-source.mjs",

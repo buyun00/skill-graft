@@ -10,6 +10,7 @@ import {
   SESSION_RUNNER_EVENT_TYPES,
   SESSION_RUNNER_STATES,
   SESSION_TASK_VERSION,
+  createSessionTask,
   createMemorySessions
 } from '../dist/index.js'
 
@@ -56,6 +57,12 @@ test('P5 memory session projection supplies the required durable view fields', (
     nextId: () => 'session-contract-1'
   })
   const session = sessions.start({
+    task: createSessionTask({
+      id: 'session-contract-1',
+      kind: 'chat',
+      target: { kind: 'hub', id: 'hub' },
+      intent: 'contract smoke'
+    }),
     kind: 'chat',
     target: { kind: 'hub', id: 'hub' },
     intent: 'contract smoke'
@@ -63,7 +70,13 @@ test('P5 memory session projection supplies the required durable view fields', (
   assert.equal(session.revision, 1)
   assert.equal(session.cancelRequested, false)
   assert.equal(session.attemptId, 'attempt-session-contract-1-1')
-  assert.deepEqual(session.steps, [])
+  assert.deepEqual(session.steps.map(({ id, owner, status }) => ({ id, owner, status })), [{
+    id: 'respond', owner: 'runner', status: 'running'
+  }])
   assert.equal(session.events[0].type, 'session.queued')
   assert.deepEqual(session.capabilities, { canResume: false, canCancel: true })
+  const cancelled = sessions.cancel({ sessionId: session.id })
+  assert.equal(cancelled.status, 'cancelled')
+  assert.equal(cancelled.cancelRequested, true)
+  assert.equal(cancelled.events.some((event) => event.type === 'session.cancel-requested'), true)
 })

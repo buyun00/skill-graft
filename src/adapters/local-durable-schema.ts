@@ -21,7 +21,12 @@ const COMMAND_KINDS = new Set<string>([...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_
 const AUDIT_TYPES = new Set<string>(AUDIT_EVENT_TYPES)
 const ERROR_CODES = new Set<string>(HUB_ERROR_CODES)
 const SESSION_KINDS = new Set(['attach', 'detach', 'edit', 'chat', 'analyze'])
-const SESSION_STATUSES = new Set(['queued', 'running', 'waiting', 'completed', 'failed', 'cancelled'])
+const SESSION_STATUSES = new Set(['queued', 'running', 'awaiting', 'waiting', 'completed', 'failed', 'cancelled'])
+const RUNNER_STATES = new Set(['starting', 'running', 'cancelling', 'succeeded', 'failed', 'cancelled', 'lost'])
+const RUNNER_ERROR_CODES = new Set([
+  'RUNNER_UNAVAILABLE', 'RUNNER_NOT_FOUND', 'RUNNER_INVALID_STATE', 'RUNNER_START_FAILED',
+  'RUNNER_RESUME_FAILED', 'RUNNER_CANCEL_FAILED', 'RUNNER_PROTOCOL_ERROR'
+])
 const SHA256_HEX = /^[a-f0-9]{64}$/
 const SHA256_IDENTIFIER = /^sha256:[a-f0-9]{64}$/
 const WORKTREE_TARGET_ID = /^worktree:[a-f0-9]{24}$/
@@ -187,8 +192,11 @@ function validateSession(value: unknown): boolean {
     'lastFile', 'startedAt', 'status', 'exitCode', 'error', 'codexSessionId'
   ], [
     'model', 'effort', 'summary', 'lastMessage', 'endedAt', 'canResume',
-    'inboxIds', 'attachCompletion'
+    'inboxIds', 'attachCompletion', 'sessionSchemaVersion', 'revision', 'attemptId',
+    'attemptNumber', 'runnerId', 'runnerState', 'runnerErrorCode', 'runnerEventSequence',
+    'cancelRequested', 'task', 'target', 'steps', 'events', 'runnerArtifacts'
   ])) return false
+  const p5 = value.sessionSchemaVersion === 2
   const completion = value.attachCompletion
   const completionValid = completion === undefined || record(completion)
     && exactKeys(completion, ['targetId', 'pathKey', 'materializationId', 'completedAt'])
@@ -199,7 +207,28 @@ function validateSession(value: unknown): boolean {
     && value.kind === 'attach'
     && value.status === 'completed'
     && value.exitCode === 0
-    && value.canResume === false
+    && (p5 || value.canResume === false)
+  const runnerArtifactsValid = value.runnerArtifacts === undefined || record(value.runnerArtifacts)
+    && exactKeys(value.runnerArtifacts, [
+      'attemptRoot', 'requestPath', 'promptPath', 'stdoutPath', 'stderrPath', 'eventsPath',
+      'lastMessagePath', 'cancelPath', 'statusPath', 'receiptPath', 'launchPath', 'codexHome',
+      'isolatedHome'
+    ])
+    && Object.values(value.runnerArtifacts).every((entry) => boundedString(entry, 8_192))
+  const p5Valid = !p5 || Number.isSafeInteger(value.revision) && (value.revision as number) >= 1
+    && boundedString(value.attemptId, 256)
+    && Number.isSafeInteger(value.attemptNumber) && (value.attemptNumber as number) >= 1
+    && (value.runnerId === undefined || boundedString(value.runnerId, 256))
+    && (value.runnerState === undefined || typeof value.runnerState === 'string' && RUNNER_STATES.has(value.runnerState))
+    && (value.runnerErrorCode === undefined || typeof value.runnerErrorCode === 'string' && RUNNER_ERROR_CODES.has(value.runnerErrorCode))
+    && Number.isSafeInteger(value.runnerEventSequence) && (value.runnerEventSequence as number) >= 0
+    && typeof value.cancelRequested === 'boolean'
+    && record(value.task) && jsonValue(value.task)
+    && record(value.target) && jsonValue(value.target)
+    && Array.isArray(value.steps) && value.steps.length <= 32 && value.steps.every((entry) => record(entry) && jsonValue(entry))
+    && Array.isArray(value.events) && value.events.length <= 256 && value.events.every((entry) => record(entry) && jsonValue(entry))
+    && runnerArtifactsValid
+    && value.status !== 'waiting'
   return boundedString(value.id, 256)
     && typeof value.kind === 'string' && SESSION_KINDS.has(value.kind)
     && ['path', 'worktree', 'intent', 'promptFile', 'logFile', 'lastFile', 'error', 'codexSessionId']
@@ -214,6 +243,7 @@ function validateSession(value: unknown): boolean {
     && (value.inboxIds === undefined || Array.isArray(value.inboxIds) && value.inboxIds.length <= 10_000
       && value.inboxIds.every((id) => boundedString(id, 256)))
     && completionValid
+    && p5Valid
 }
 
 function validateSessions(value: unknown): Validation {

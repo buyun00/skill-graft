@@ -11,4 +11,4 @@ sg snapshot create --request-id "attach-snapshot-{{SESSION_ID}}" --contract-v1
 - 返回的完整 `snapshotId`
 - `selectedSkills=[ozdqp-development,ozdqp-ui-development,ozdqp-git-workflow]`
 
-受信 CLI/daemon 只能在本进程 exit 0、session 已成为 `waiting` 后使用上述值依次调用 `claim`、`plan-sync` 和 `sync`，且最终 `sync` 必须继续传入同一会话 ID：`--session-id "{{SESSION_ID}}"`。若计划指出旧链接，则改走显式 `migrate-legacy --dry-run/--commit`。只有最终 pin 的 `materializedSnapshot` 与 marker 同时匹配、session 获得 completion proof 后才算完成；任一步失败都保持 waiting/未物化，绝不能手写 history、伪造 completed、提交中心仓或修改业务代码。
+受信 CLI/daemon 只能在本进程 exit 0、session 已成为 `awaiting` 后使用上述值依次调用 `claim`、`plan-sync` 和 `sync`，且最终 `sync` 必须继续传入同一会话 ID：`--session-id "{{SESSION_ID}}"`。若计划指出旧链接，则改走显式 `migrate-legacy --dry-run/--commit`。只有最终 pin 的 `materializedSnapshot` 与 marker 同时匹配、session 获得 completion proof 后才算完成；任一步失败都保持 awaiting/未物化，绝不能手写 history、伪造 completed、提交中心仓或修改业务代码。

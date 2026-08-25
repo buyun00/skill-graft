@@ -159,9 +159,9 @@ namespace SkillGraft.LocalRunner
                 log = new BoundedUtf8Log(path, maximumBytes);
             }
 
-            public void Lifecycle(string type, string message)
+            public void Lifecycle(string type)
             {
-                lock (gate) Append(type, null, null, null, message);
+                lock (gate) Append(type, null, null, null);
             }
 
             public void Codex(string line)
@@ -178,16 +178,14 @@ namespace SkillGraft.LocalRunner
                         Dictionary<string, object> item = Object(value, "item");
                         string itemType = item == null ? null : Text(item, "type");
                         string itemId = item == null ? null : Text(item, "id");
-                        string message = type == "error" ? Text(value, "message") : null;
-
                         if (type == "thread.started" && !String.IsNullOrWhiteSpace(threadId)) ThreadId = threadId;
                         if (type == "turn.completed") SawTurnCompleted = true;
                         if (type == "turn.failed" || type == "error") SawTurnFailed = true;
-                        Append(type, threadId, itemType, itemId, message);
+                        Append(type, threadId, itemType, itemId);
                     }
-                    catch (Exception error)
+                    catch (Exception)
                     {
-                        Append("runner.invalid-json-event", null, null, null, error.Message);
+                        Append("runner.invalid-json-event", null, null, null);
                     }
                 }
             }
@@ -206,7 +204,7 @@ namespace SkillGraft.LocalRunner
                     : null;
             }
 
-            private void Append(string type, string threadId, string itemType, string itemId, string message)
+            private void Append(string type, string threadId, string itemType, string itemId)
             {
                 sequence += 1;
                 StringBuilder text = new StringBuilder();
@@ -216,7 +214,6 @@ namespace SkillGraft.LocalRunner
                 Add(text, "threadId", threadId);
                 Add(text, "itemType", itemType);
                 Add(text, "itemId", itemId);
-                Add(text, "message", message);
                 text.Append("}");
                 log.AppendLine(text.ToString());
             }
@@ -229,6 +226,8 @@ namespace SkillGraft.LocalRunner
             string attemptId,
             string executable,
             string[] arguments,
+            string[] environmentNames,
+            string[] environmentValues,
             string workingDirectory,
             string promptPath,
             string stdoutPath,
@@ -258,7 +257,7 @@ namespace SkillGraft.LocalRunner
             using (BoundedUtf8Log stderr = new BoundedUtf8Log(stderrPath, maximumStderrBytes))
             using (StructuredEvents events = new StructuredEvents(eventsPath, maximumEventsBytes))
             {
-                events.Lifecycle("runner.controller.started", null);
+                events.Lifecycle("runner.controller.started");
                 try
                 {
                     job = CreateKillOnCloseJob();
@@ -273,6 +272,38 @@ namespace SkillGraft.LocalRunner
                     start.RedirectStandardError = true;
                     start.StandardOutputEncoding = Utf8;
                     start.StandardErrorEncoding = Utf8;
+                    string[] inheritedEnvironment = new[] {
+                        "SystemRoot", "WINDIR", "SystemDrive", "ComSpec", "PATH", "PATHEXT",
+                        "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS"
+                    };
+                    Dictionary<string, string> safeEnvironment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (string name in inheritedEnvironment)
+                    {
+                        string value = Environment.GetEnvironmentVariable(name);
+                        if (!String.IsNullOrEmpty(value)) safeEnvironment[name] = value;
+                    }
+                    start.EnvironmentVariables.Clear();
+                    foreach (KeyValuePair<string, string> pair in safeEnvironment)
+                    {
+                        start.EnvironmentVariables[pair.Key] = pair.Value;
+                    }
+                    string[] allowedEnvironment = new[] {
+                        "CODEX_HOME", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+                        "XDG_CONFIG_HOME", "TEMP", "TMP", "SKILL_GRAFT_HOME", "HUB_ROOT"
+                    };
+                    if ((environmentNames ?? new string[0]).Length != (environmentValues ?? new string[0]).Length)
+                    {
+                        throw new InvalidOperationException("Controller environment names and values differ");
+                    }
+                    for (int index = 0; index < (environmentNames ?? new string[0]).Length; index += 1)
+                    {
+                        string name = environmentNames[index];
+                        if (Array.IndexOf(allowedEnvironment, name) < 0)
+                        {
+                            throw new InvalidOperationException("Controller environment key is not allowed");
+                        }
+                        start.EnvironmentVariables[name] = environmentValues[index] ?? String.Empty;
+                    }
 
                     child = new Process();
                     child.StartInfo = start;
@@ -303,7 +334,7 @@ namespace SkillGraft.LocalRunner
                         child.StandardInput.Write(prompt.ReadToEnd());
                     }
                     child.StandardInput.Close();
-                    events.Lifecycle("runner.process.started", null);
+                    events.Lifecycle("runner.process.started");
                     WriteStatus(statusPath, sessionId, attemptId, "running", controllerPid, childPid, null, startedAt, null);
 
                     while (!child.WaitForExit(75))
@@ -311,7 +342,7 @@ namespace SkillGraft.LocalRunner
                         if (File.Exists(cancelPath))
                         {
                             cancellationRequested = true;
-                            events.Lifecycle("runner.cancel.requested", null);
+                            events.Lifecycle("runner.cancel.requested");
                             WriteStatus(statusPath, sessionId, attemptId, "cancelling", controllerPid, childPid, null, startedAt, null);
                             if (!TerminateJobObject(job, 1223))
                             {
@@ -323,12 +354,12 @@ namespace SkillGraft.LocalRunner
 
                     child.WaitForExit();
                     exitCode = child.ExitCode;
-                    events.Lifecycle("runner.process.exited", null);
+                    events.Lifecycle("runner.process.exited");
                 }
                 catch (Exception error)
                 {
                     errorText = error.GetType().Name + ": " + error.Message;
-                    events.Lifecycle("runner.controller.failed", errorText);
+                    events.Lifecycle("runner.controller.failed");
                     if (child != null && !child.HasExited)
                     {
                         try { TerminateJobObject(job, 1); } catch { }
@@ -538,11 +569,21 @@ namespace SkillGraft.LocalRunner
 '@
 
 $arguments = [string[]]@($request.arguments | ForEach-Object { [string]$_ })
+$environmentNames = [System.Collections.Generic.List[string]]::new()
+$environmentValues = [System.Collections.Generic.List[string]]::new()
+if ($null -ne $request.environment) {
+  foreach ($property in $request.environment.PSObject.Properties) {
+    $environmentNames.Add([string]$property.Name)
+    $environmentValues.Add([string]$property.Value)
+  }
+}
 $exitCode = [SkillGraft.LocalRunner.CodexController]::Run(
   [string]$request.sessionId,
   [string]$request.attemptId,
   [string]$request.executable,
   $arguments,
+  [string[]]$environmentNames.ToArray(),
+  [string[]]$environmentValues.ToArray(),
   [string]$request.workingDirectory,
   [string]$request.promptPath,
   [string]$request.stdoutPath,

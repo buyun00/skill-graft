@@ -4,6 +4,7 @@ import fs from 'node:fs'
 const mode = process.argv[2] || 'complete'
 const pidFile = process.argv[3] || ''
 const lastMessageFile = process.argv[4] || ''
+const environmentReportFile = process.argv[5] || ''
 
 process.stdin.resume()
 
@@ -12,6 +13,15 @@ console.log(JSON.stringify({ type: 'turn.started' }))
 console.error('stderr UTF-8: 结构化运行器')
 
 if (mode === 'complete') {
+  if (environmentReportFile) {
+    fs.writeFileSync(environmentReportFile, `${JSON.stringify({
+      providerSecretInherited: Boolean(process.env.OPENAI_API_KEY),
+      home: process.env.HOME,
+      appData: process.env.APPDATA,
+      temp: process.env.TEMP,
+      pathPresent: Boolean(process.env.PATH)
+    })}\n`, 'utf8')
+  }
   console.log(JSON.stringify({
     type: 'item.started',
     item: { id: 'item-1', type: 'command_execution', text: 'must not enter normalized events' }
