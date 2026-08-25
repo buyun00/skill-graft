@@ -1,8 +1,10 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { HubCommand } from '../../../src/contracts/index.js'
 import { openDshHost } from '../../../src/dsh/create-dsh-host.js'
+import { createDshSessionRuntime } from '../../../src/dsh/session-runtime.js'
 import {
   createDshWorkspaceLifecycle,
   type DshRuntimeSkill,
@@ -14,9 +16,21 @@ import {
   type DshWorkspaceLifecycle,
   type DshWorkspaceRegistry
 } from '../../../src/dsh/workspace-lifecycle.js'
+import { createDshAgentDriver } from './agent-driver.js'
 
 export const name = 'skill-graft-dsh'
-export const inject = ['connection', 'settings', 'workspaceRegistry', 'skills', 'systemPrompt']
+export const inject = [
+  'agentDefaultModel',
+  'agents',
+  'connection',
+  'sessionPersistence',
+  'sessions',
+  'settings',
+  'skills',
+  'systemPrompt',
+  'tools',
+  'workspaceRegistry'
+]
 
 export type DshPluginConfig = {
   dataRoot?: string
@@ -40,6 +54,11 @@ const SettingsConfig = z.object({
 })
 
 type CordisContext = {
+  agentDefaultModel: any
+  agents: {
+    get(id: string): any
+    withInitiator<T>(agent: any, operation: () => T): T
+  }
   connection: {
     rpc: {
       handle(
@@ -57,8 +76,11 @@ type CordisContext = {
     ): DshSettingsScope
   }
   workspaceRegistry: DshWorkspaceRegistry
+  sessionPersistence: unknown
+  sessions: any
   skills: DshSkillsRegistry
   systemPrompt: DshSystemPrompt
+  tools: { register(tool: unknown): () => void }
   provide(name: string, value: unknown): unknown
   effect<T>(callback: () => T, label?: string): T
   logger?(name: string): { info?(message: string): void; warn?(message: string): void }
@@ -107,6 +129,17 @@ function commandFromPayload(payload: unknown): Record<string, unknown> | null {
   return payload.command
 }
 
+function conversationCommandFromPayload(payload: unknown): {
+  parentSessionId: string
+  command: Record<string, unknown>
+} | null {
+  if (!isRecord(payload)
+    || typeof payload.parentSessionId !== 'string'
+    || !payload.parentSessionId.trim()
+    || !isRecord(payload.command)) return null
+  return { parentSessionId: payload.parentSessionId, command: payload.command }
+}
+
 function workspacePayload(payload: unknown): { workspaceId: string } | null {
   if (!isRecord(payload) || typeof payload.workspaceId !== 'string') return null
   return { workspaceId: payload.workspaceId }
@@ -114,11 +147,13 @@ function workspacePayload(payload: unknown): { workspaceId: string } | null {
 
 export async function apply(ctx: CordisContext, config: DshPluginConfig = {}): Promise<void> {
   const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+  const driver = createDshAgentDriver(ctx as any)
   const host = await openDshHost({
     packageRoot,
     dataRoot: resolvedDataRoot(config),
     hostId: 'dsh',
-    leaseMs: config.lockTimeoutMs ?? 30_000
+    leaseMs: config.lockTimeoutMs ?? 30_000,
+    createSessionRuntime: context => createDshSessionRuntime(context, driver)
   })
   let accepting = true
   let lifecycle: DshWorkspaceLifecycle | undefined
@@ -184,7 +219,15 @@ export async function apply(ctx: CordisContext, config: DshPluginConfig = {}): P
   const service = Object.freeze({
     application: host.application,
     dataRoot: host.dataRoot,
+    sessionRunner: host.runner,
     execute: (command: HubCommand) => execute(command as unknown as Record<string, unknown>, 'dsh-service'),
+    executeFromSession: (parentSessionId: string, command: HubCommand) => {
+      const parent = ctx.agents.get(parentSessionId)
+      if (!parent) return Promise.reject(new Error('DSH parent session is not live'))
+      return ctx.agents.withInitiator(parent, () => (
+        execute(command as unknown as Record<string, unknown>, 'dsh-conversation')
+      ))
+    },
     describe: () => lifecycle?.describe(),
     refresh: () => tracked(() => lifecycle!.refresh()),
     updateSettings: (patch: Partial<DshSettingsValue>) => tracked(() => lifecycle!.updateSettings(patch)),
@@ -195,6 +238,77 @@ export async function apply(ctx: CordisContext, config: DshPluginConfig = {}): P
     unregisterWorkspace: (workspaceId: string) => tracked(() => lifecycle!.unregisterWorkspace(workspaceId))
   })
   ctx.provide('skillGraft', service)
+
+  ctx.tools.register(defineTool({
+    name: 'skill_graft_session',
+    description: 'Start, reap, inspect, resume, or cancel a Skill Graft session through the shared Application. Starts are asynchronous; use reap before get/list. Attach requires an exact registered worktree path.',
+    parameters: {
+      action: {
+        type: 'string',
+        required: true,
+        enum: ['attach', 'chat', 'resume', 'cancel', 'reap', 'get', 'list']
+      },
+      worktree: { type: 'string' },
+      intent: { type: 'string' },
+      sessionId: { type: 'string' },
+      message: { type: 'string' }
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }]
+    },
+    async execute(args, exec) {
+      if (!exec.agent) throw new Error('skill_graft_session requires a live DSH conversation')
+      let command: Record<string, unknown>
+      switch (args.action) {
+        case 'attach':
+          if (!args.worktree?.trim()) throw new Error('attach requires worktree')
+          command = {
+            kind: 'attach',
+            worktree: args.worktree,
+            intent: args.intent,
+            runner: { wait: false }
+          }
+          break
+        case 'chat':
+          command = {
+            kind: 'chat',
+            intent: args.intent,
+            ...(args.worktree?.trim() ? { worktree: args.worktree } : {}),
+            runner: { wait: false }
+          }
+          break
+        case 'resume':
+          if (!args.sessionId?.trim() || !args.message?.trim()) throw new Error('resume requires sessionId and message')
+          command = {
+            kind: 'resumeSession',
+            sessionId: args.sessionId,
+            message: args.message,
+            runner: { wait: false }
+          }
+          break
+        case 'cancel':
+          if (!args.sessionId?.trim()) throw new Error('cancel requires sessionId')
+          command = { kind: 'cancelSession', sessionId: args.sessionId, reason: args.message }
+          break
+        case 'reap':
+          command = {
+            kind: 'reapSessions',
+            ...(args.sessionId?.trim() ? { sessionIds: [args.sessionId] } : {})
+          }
+          break
+        case 'get':
+          if (!args.sessionId?.trim()) throw new Error('get requires sessionId')
+          command = { kind: 'getSession', sessionId: args.sessionId }
+          break
+        case 'list':
+          command = { kind: 'listSessions' }
+          break
+      }
+      return await ctx.agents.withInitiator(exec.agent, () => execute(command, 'dsh-tool', exec.signal))
+    }
+  }))
+
   ctx.connection.rpc.handle('/skill-graft', async (endpoint, payload, signal) => {
     if (signal.aborted || !accepting) {
       return { ok: false, error: { code: 'cancelled', message: 'request was cancelled', details: {} } }
@@ -204,6 +318,16 @@ export async function apply(ctx: CordisContext, config: DshPluginConfig = {}): P
         const rawCommand = commandFromPayload(payload)
         if (!rawCommand) return badRequest('Skill Graft expects execute with a shared HubCommand payload')
         return { ok: true, value: await execute(rawCommand, 'dsh-rpc', signal) }
+      }
+      if (endpoint === 'execute-from-session') {
+        const input = conversationCommandFromPayload(payload)
+        if (!input) return badRequest('parentSessionId and shared HubCommand are required')
+        const parent = ctx.agents.get(input.parentSessionId)
+        if (!parent) return badRequest('parentSessionId does not name a live DSH conversation')
+        return {
+          ok: true,
+          value: await ctx.agents.withInitiator(parent, () => execute(input.command, 'dsh-conversation-rpc', signal))
+        }
       }
       if (endpoint === 'describe') return { ok: true, value: lifecycle!.describe() }
       if (endpoint === 'refresh') return { ok: true, value: await tracked(() => lifecycle!.refresh(signal), signal) }

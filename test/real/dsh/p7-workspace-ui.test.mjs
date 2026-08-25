@@ -55,6 +55,7 @@ test('P7 production bundle declares the DSH settings surface and lifecycle depen
   assert.deepEqual(packageJson.dsh.client.inject, [
     '@deepseek-ai/dsh-client-connection',
     '@deepseek-ai/dsh-client-runtime',
+    '@deepseek-ai/dsh-client-ui-conversation',
     '@deepseek-ai/dsh-client-ui-settings'
   ])
   const patch = fs.readFileSync(path.join(stagedPackageRoot, 'cordis.patch.yml'), 'utf8')

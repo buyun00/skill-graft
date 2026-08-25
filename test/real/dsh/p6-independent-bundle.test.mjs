@@ -35,7 +35,7 @@ test('P6 bundle is a self-contained DSH Host and Client package', () => {
   assert.equal(packageJson.dsh.client.inject.includes('@deepseek-ai/dsh-client-connection'), true)
   const patch = fs.readFileSync(path.join(stagedPackageRoot, 'cordis.patch.yml'), 'utf8')
   assert.match(patch, /name: '@ozdqp\/skill-graft-dsh'/)
-  assert.match(patch, /inject: \[connection,/)
+  assert.match(patch, /inject: \[[^\]]*\bconnection\b/)
   const hostBundle = fs.readFileSync(path.join(stagedPackageRoot, 'lib', 'index.js'), 'utf8')
   const clientBundle = fs.readFileSync(path.join(stagedPackageRoot, 'lib', 'client.js'), 'utf8')
   assert.match(hostBundle, /application\.commandBus/)

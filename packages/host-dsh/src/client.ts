@@ -4,6 +4,7 @@ export const inject = ['connection', 'slots']
 
 type SkillGraftApi = {
   execute(command: unknown, signal?: AbortSignal): Promise<any>
+  executeFromSession(parentSessionId: string, command: unknown, signal?: AbortSignal): Promise<any>
   describe(signal?: AbortSignal): Promise<any>
   refresh(signal?: AbortSignal): Promise<any>
   updateSettings(patch: unknown, signal?: AbortSignal): Promise<any>
@@ -88,6 +89,9 @@ function SkillGraftPanel({ api }: { api: SkillGraftApi }) {
   const [inboxGameRepo, setInboxGameRepo] = React.useState('')
   const [mergeTarget, setMergeTarget] = React.useState('ozdqp-development')
   const [skillDetail, setSkillDetail] = React.useState<any>(null)
+  const [sessionIntent, setSessionIntent] = React.useState('')
+  const [resumeMessage, setResumeMessage] = React.useState('Continue this Skill Graft task.')
+  const [selectedSessionId, setSelectedSessionId] = React.useState('')
   const activeControllers = React.useRef(new Set<AbortController>())
 
   const applyState = React.useCallback((next: any) => {
@@ -174,6 +178,9 @@ function SkillGraftPanel({ api }: { api: SkillGraftApi }) {
   const claimed = pin?.claimState === 'claimed'
   const history = successData(state.facts?.history)?.records || []
   const items = status?.items || []
+  const sessions = successData(state.facts?.sessions)?.sessions || status?.sessions || []
+  const selectedSession = sessions.find((entry: any) => entry.id === selectedSessionId)
+    || sessions[0]
   const isBusy = Boolean(busy)
 
   const setPin = () => {
@@ -185,8 +192,16 @@ function SkillGraftPanel({ api }: { api: SkillGraftApi }) {
   }
   const sync = () => {
     if (!selected || !plan?.planHash) return setError('Preview a server plan first.')
-    void execute('sync', { kind: 'sync', worktree: selected.path, planHash: plan.planHash })
+    void execute('sync', {
+      kind: 'sync',
+      worktree: selected.path,
+      planHash: plan.planHash,
+      ...(selectedSession?.kind === 'attach' && selectedSession.status === 'awaiting'
+        ? { sessionId: selectedSession.id }
+        : {})
+    })
   }
+  const selectedSkillNames = () => selectedSkills.split(',').map((entry) => entry.trim()).filter(Boolean)
 
   const inventoryGroup = (title: string, entries: any[]) => h('div', { style: styles.card },
     h('strong', null, `${title} (${entries.length})`),
@@ -283,10 +298,90 @@ function SkillGraftPanel({ api }: { api: SkillGraftApi }) {
         placeholder: 'comma-separated Skill names', onChange: (event: any) => setSelectedSkills(event.target.value)
       }), 'Application validates names, snapshot membership, claim and conflicts.'),
       h('div', { style: styles.row },
+        button('Create snapshot', () => { void execute('create snapshot', { kind: 'createSnapshot' }) }, isBusy),
+        button('Claim with attach', () => {
+          if (!selected || !snapshotId || selectedSession?.kind !== 'attach') return
+          void execute('claim', {
+            kind: 'claimWorktree',
+            worktree: selected.path,
+            snapshotId,
+            selectedSkills: selectedSkillNames(),
+            sessionId: selectedSession.id
+          })
+        }, isBusy || !selected || claimed || !snapshotId
+          || selectedSession?.kind !== 'attach' || selectedSession.status !== 'awaiting'),
         button('Save pin', setPin, isBusy || !selected || !claimed || !snapshotId),
         button('Preview plan', () => { if (selected) void execute('plan', { kind: 'planSync', worktree: selected.path }) }, isBusy || !selected || !claimed),
         button('Sync exact plan', sync, isBusy || !selected || plan?.executable !== true)),
       plan ? h('pre', { style: styles.pre }, JSON.stringify({ summary: plan.summary, operations: plan.operations, git: plan.git }, null, 2)) : null),
+
+    h('section', { style: styles.card, 'data-skill-graft-section': 'sessions' },
+      h('h3', { style: { margin: 0 } }, 'DSH sessions'),
+      h('div', { style: styles.muted }, 'Settings starts a real top-level DSH Agent. Conversation actions use the same Application entry and require a live parent conversation.'),
+      h('textarea', {
+        style: { ...styles.input, minHeight: 64 },
+        value: sessionIntent,
+        placeholder: 'Optional attach/chat intent',
+        onChange: (event: any) => setSessionIntent(event.target.value)
+      }),
+      h('div', { style: styles.row },
+        button('Start attach', () => {
+          if (!selected) return
+          void execute('start attach', {
+            kind: 'attach', worktree: selected.path, intent: sessionIntent,
+            runner: { wait: false }
+          })
+        }, isBusy || !selected),
+        button('Start chat', () => {
+          void execute('start chat', {
+            kind: 'chat', intent: sessionIntent,
+            ...(selected ? { worktree: selected.path } : {}),
+            runner: { wait: false }
+          })
+        }, isBusy),
+        button('Reap / refresh', () => { void execute('reap sessions', { kind: 'reapSessions' }) }, isBusy)),
+      sessions.length === 0
+        ? h('span', { style: styles.muted }, 'No DSH sessions yet.')
+        : h(React.Fragment, null,
+            field('Selected session', h('select', {
+              style: styles.input,
+              value: selectedSession?.id || '',
+              disabled: isBusy,
+              onChange: (event: any) => setSelectedSessionId(event.target.value)
+            }, ...sessions.map((entry: any) => h('option', { key: entry.id, value: entry.id },
+              `${entry.kind} · ${entry.status} · ${entry.id}`)))),
+            h('div', { style: styles.grid },
+              factLine('Status', selectedSession?.status),
+              factLine('Attempt', selectedSession?.attemptId),
+              factLine('Runner', selectedSession?.runnerId),
+              factLine('Resume', selectedSession?.capabilities?.canResume),
+              factLine('Cancel', selectedSession?.capabilities?.canCancel)),
+            h('input', {
+              style: styles.input,
+              value: resumeMessage,
+              placeholder: 'Resume message',
+              onChange: (event: any) => setResumeMessage(event.target.value)
+            }),
+            h('div', { style: styles.row },
+              button('Resume', () => {
+                if (!selectedSession) return
+                void execute('resume session', {
+                  kind: 'resumeSession', sessionId: selectedSession.id,
+                  message: resumeMessage, runner: { wait: false }
+                })
+              }, isBusy || !selectedSession?.capabilities?.canResume || !resumeMessage.trim()),
+              button('Cancel', () => {
+                if (!selectedSession) return
+                void execute('cancel session', {
+                  kind: 'cancelSession', sessionId: selectedSession.id,
+                  reason: 'Cancelled from the DSH Skill Graft page.'
+                })
+              }, isBusy || !selectedSession?.capabilities?.canCancel, styles.danger)),
+            h('pre', { style: styles.pre }, JSON.stringify({
+              steps: selectedSession?.steps || [],
+              events: selectedSession?.events || []
+            }, null, 2))),
+    ),
 
     h('section', { style: styles.card, 'data-skill-graft-section': 'skills' },
       h('h3', { style: { margin: 0 } }, 'Skills'),
@@ -329,12 +424,49 @@ function SkillGraftPanel({ api }: { api: SkillGraftApi }) {
   )
 }
 
+function SkillGraftConversationAction({ api, sessionId }: { api: SkillGraftApi; sessionId?: string }) {
+  const [label, setLabel] = React.useState('Skill Graft attach')
+  const controller = React.useRef<AbortController | null>(null)
+  React.useEffect(() => () => controller.current?.abort(), [])
+  return h('button', {
+    type: 'button',
+    title: label,
+    style: styles.button,
+    disabled: !sessionId || label === 'Starting…',
+    onClick: async () => {
+      if (!sessionId) return
+      controller.current?.abort()
+      controller.current = new AbortController()
+      const signal = controller.current.signal
+      setLabel('Starting…')
+      try {
+        const described = await api.describe(signal)
+        const workspace = described?.ok === true ? described.value?.selectedWorkspace : undefined
+        if (!workspace?.path) throw new Error('Select a Skill Graft workspace in Settings first.')
+        const result = await api.executeFromSession(sessionId, {
+          kind: 'attach',
+          worktree: workspace.path,
+          intent: 'Prepare this workspace for a trusted Skill Graft attach.',
+          runner: { wait: false }
+        }, signal)
+        if (result?.ok !== true || result.value?.ok !== true) throw new Error(rpcError(result))
+        setLabel(`Attach ${result.value.data?.session?.status || 'started'}`)
+      } catch (error) {
+        if (!signal.aborted) setLabel(error instanceof Error ? error.message : String(error))
+      }
+    }
+  }, 'Skill Graft')
+}
+
 export function apply(ctx: any): void {
   const call = (endpoint: string, payload: unknown, signal?: AbortSignal) => (
     ctx.connection.rpc.call('/skill-graft', endpoint, payload, signal)
   )
   const api: SkillGraftApi = Object.freeze({
     execute: (command, signal) => call('execute', { command }, signal),
+    executeFromSession: (parentSessionId, command, signal) => (
+      call('execute-from-session', { parentSessionId, command }, signal)
+    ),
     describe: signal => call('describe', {}, signal),
     refresh: signal => call('refresh', {}, signal),
     updateSettings: (patch, signal) => call('update-settings', { patch }, signal),
@@ -349,4 +481,10 @@ export function apply(ctx: any): void {
     order: 60,
     label: () => 'Skill Graft'
   }, () => h(SkillGraftPanel, { api })))
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions',
+    id: 'skill-graft-attach',
+    order: 70,
+    label: () => 'Skill Graft'
+  }, (props: any) => h(SkillGraftConversationAction, { ...props, api })))
 }

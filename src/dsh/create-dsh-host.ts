@@ -7,9 +7,12 @@ import {
   createLeaseLockManager,
   type LeaseProcessInspector
 } from '../adapters/lease-lock.js'
-import { createLocalDurableSchemaResolver } from '../adapters/local-durable-schema.js'
 import { createLocalMaterializationRecordPort } from '../adapters/local-materialization-records.js'
 import { createLocalMaterializer } from '../adapters/local-materializer.js'
+import {
+  createLocalLegacyAttachPort,
+  createLocalLegacyDetachPort
+} from '../adapters/local-legacy-attach-port.js'
 import { createLocalP2ApplicationPorts, localLibraryCaptureRoots } from '../adapters/local-p2-ports.js'
 import { createLocalQueryPort } from '../adapters/local-query-port.js'
 import { createLocalUseCasePorts } from '../adapters/local-use-case-ports.js'
@@ -25,11 +28,14 @@ import {
   type P3ApplicationPorts,
   type RequestLedgerPort,
   type SessionPort,
+  type SessionRunnerPort,
   type SnapshotContentPort
 } from '../application/index.js'
 import { CONTRACT_VERSION, isPortableOpaqueIdentifier, type CommandMeta } from '../contracts/index.js'
 import type { LocalHostContext } from '../adapters/host-context.js'
 import { createDshRuntimeAssetRepository } from './runtime-assets.js'
+import type { DshSessionRuntime } from './session-runtime.js'
+import { createDshDurableSchemaResolver } from './durable-schema.js'
 
 export type DshHost = {
   packageRoot: string
@@ -37,6 +43,7 @@ export type DshHost = {
   hostId: string
   context: LocalHostContext
   sessions: SessionPort
+  runner?: SessionRunnerPort
   ledger: RequestLedgerPort
   snapshots: LibrarySnapshotRepositoryPort & SnapshotContentPort
   p2: P2ApplicationPorts
@@ -55,16 +62,30 @@ export type CreateDshHostOptions = {
   leaseMs?: number
   renewalIntervalMs?: number
   leaseProcessInspector?: LeaseProcessInspector
+  createSessionRuntime?: (context: LocalHostContext) => DshSessionRuntime
 }
 
-function disabledLegacyPort(): LegacyAttachPort & LegacyDetachPort {
+/**
+ * The shared Application validates session targets through the legacy
+ * inspection shape before it creates an attach/detach task. DSH consumes only
+ * that read boundary; legacy live-link writes stay unavailable in this host.
+ */
+function inspectionOnlyLegacyPorts(
+  context: LocalHostContext,
+  inspectWorktree: ReturnType<typeof createLocalQueryPort>['inspectWorktree']
+): { legacyAttach: LegacyAttachPort; legacyDetach: LegacyDetachPort } {
   const unavailable = (): never => {
-    throw new Error('legacy live-link operations are not available in the DSH host')
+    throw new Error('legacy live-link writes are not available in the DSH host')
   }
-  return { inspect: unavailable, apply: unavailable }
+  const attach = createLocalLegacyAttachPort(context, inspectWorktree)
+  const detach = createLocalLegacyDetachPort(context, inspectWorktree)
+  return {
+    legacyAttach: { inspect: attach.inspect, apply: unavailable },
+    legacyDetach: { inspect: detach.inspect, apply: unavailable }
+  }
 }
 
-/** P6/P7 intentionally expose no runner. P8 replaces this only after P5 freezes the shared contract. */
+/** Focused P6/P7 host tests may omit DSH services; production P8 always injects a runtime. */
 function unavailableSessions(): SessionPort {
   const unavailable = (): never => {
     throw new Error('DSH SessionRunner is unavailable until the shared P5 contract is consumed')
@@ -74,6 +95,7 @@ function unavailableSessions(): SessionPort {
     get: () => null,
     start: unavailable,
     resume: unavailable,
+    cancel: unavailable,
     reap: () => [],
     completeAttach: () => ({ status: 'not-authorized', reason: 'not-found' })
   }
@@ -122,7 +144,7 @@ export function createDshHost(options: CreateDshHostOptions): DshHost {
   })
   const durable = createDurableTransactionHost({
     root: context.hubRoot,
-    schemaFor: createLocalDurableSchemaResolver(),
+    schemaFor: createDshDurableSchemaResolver(),
     lock,
     renewalIntervalMs: options.renewalIntervalMs ?? 10_000
   })
@@ -155,9 +177,10 @@ export function createDshHost(options: CreateDshHostOptions): DshHost {
     }),
     records: createLocalMaterializationRecordPort(context, durable.persist)
   }
-  const sessions = unavailableSessions()
+  const sessionRuntime = options.createSessionRuntime?.(context)
+  const sessions = sessionRuntime?.sessions || unavailableSessions()
   const ledger = createPersistentRequestLedger(context)
-  const legacy = disabledLegacyPort()
+  const legacy = inspectionOnlyLegacyPorts(context, queries.inspectWorktree)
   const recoveryIdentity = {
     scope: 'hub-global',
     key: 'hub-global',
@@ -209,8 +232,8 @@ export function createDshHost(options: CreateDshHostOptions): DshHost {
     recovery: { recover: async () => { await ensureReady(); await recoverDurable() } },
     queries,
     useCases: createLocalUseCasePorts(context),
-    legacyAttach: legacy,
-    legacyDetach: legacy,
+    legacyAttach: legacy.legacyAttach,
+    legacyDetach: legacy.legacyDetach,
     sessions,
     ledger,
     p2,
@@ -224,6 +247,7 @@ export function createDshHost(options: CreateDshHostOptions): DshHost {
     hostId,
     context,
     sessions,
+    runner: sessionRuntime?.runner,
     ledger,
     snapshots,
     p2,
@@ -240,6 +264,7 @@ export function createDshHost(options: CreateDshHostOptions): DshHost {
     },
     async dispose() {
       disposed = true
+      await sessionRuntime?.dispose()
       await Promise.allSettled([inFlightReady, inFlightRecovery].filter(Boolean) as Promise<void>[])
     }
   }

@@ -45,6 +45,8 @@
     "test:p0-source-v2": "node --test --test-concurrency=1 test/p0-source-v2.test.mjs",
     "test:real:dsh:p6": "npm run build:dsh && node --test --test-concurrency=1 test/real/dsh/p6-independent-bundle.test.mjs",
     "test:real:dsh:p7": "npm run build:dsh && node --test --test-concurrency=1 test/real/dsh/p7-workspace-ui.test.mjs",
+    "test:real:dsh:p8": "npm run build:dsh && node --test --test-concurrency=1 test/real/dsh/p8-session-runner.test.mjs",
+    "test:real:dsh:p8:agent": "node test/support/run-dsh-p8-agent-smoke.mjs",
     "test:real:local:attach": "npm run build && node --test --test-concurrency=1 test/real/local/attach.test.mjs",
     "test:real:local:p1": "npm run build && node --test --test-concurrency=1 test/real/local/p1-application.test.mjs",
     "test:real:local:p2": "npm run build && node --test --test-concurrency=1 test/real/local/p2-snapshot-pin-lock.test.mjs",

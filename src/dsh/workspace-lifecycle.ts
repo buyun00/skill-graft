@@ -80,6 +80,7 @@ export type DshWorkspaceUiState = {
   overrideSnapshotId: Sha256Identifier | null
   facts: {
     status: HubCommandResult | null
+    sessions: HubCommandResult | null
     schema: HubCommandResult | null
     inventory: HubCommandResult | null
     snapshots: HubCommandResult | null
@@ -338,6 +339,7 @@ export function createDshWorkspaceLifecycle(
     overrideSnapshotId: null,
     facts: {
       status: null,
+      sessions: null,
       schema: null,
       inventory: null,
       snapshots: null,
@@ -438,6 +440,7 @@ export function createDshWorkspaceLifecycle(
     }
 
     let status = await command('status', {}, signal)
+    const sessions = await command('listSessions', {}, signal)
     const schema = await command('inspectSchema', {}, signal)
     let inventory = await command('listSkills', {}, signal)
     const snapshots = await command('listSnapshots', {}, signal)
@@ -465,6 +468,7 @@ export function createDshWorkspaceLifecycle(
     }
     for (const [label, result] of [
       ['status', status],
+      ['sessions', sessions],
       ['schema', schema],
       ['inventory', inventory],
       ['snapshots', snapshots],
@@ -501,7 +505,7 @@ export function createDshWorkspaceLifecycle(
         ? []
         : prepared.skills.map((skill) => ({ name: skill.name, snapshotId: prepared.snapshotId as Sha256Identifier })),
       overrideSnapshotId: prepared.overrideText === null ? null : prepared.snapshotId,
-      facts: { status, schema, inventory, snapshots, history, pin, plan, sync },
+      facts: { status, sessions, schema, inventory, snapshots, history, pin, plan, sync },
       doctor: { ok: issues.length === 0, issues }
     }
     return copyState(currentState)
