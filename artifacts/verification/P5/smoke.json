@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "phase": "P5",
+  "recordedAt": "2026-08-25",
+  "branch": "codex/skill-graft-local-p5-implementation",
+  "baselineCommit": "74fbd5228c2cd0ce0f163aa14646e2a8a98c69c6",
+  "sharedContractCommit": "29ea16e32f95a6cd9e1f31b90d223d6c332cf509",
+  "applicationBoundaryCommit": "d2a96110512114c430f370ae4c21616bb83c1b13",
+  "implementationCommit": "eae42d9cb2a7356f8f0b975ab98b4cf357a023ee",
+  "run": {
+    "id": "p5-final-20260825-11af3355",
+    "markerOwned": true,
+    "markerSha256": "a9fb2efedc09ca7c267b6cfd4b9a6eb33c10fa8c819e42fd1594fa148a071f98",
+    "tarball": {
+      "name": "ozdqp-skill-hub-0.1.0.tgz",
+      "countInRun": 1,
+      "bytes": 1006866,
+      "sha256": "f7ae0a641d320d05d3c1cbeb83b50997705657f6d7025bd54ce05c88be7c12e1"
+    },
+    "realProviderControllerSha256": "d325bda58428630d840e65a577eec660799a03a0be84906cd099e37e5eeeadf0",
+    "finalSourceControllerSha256": "0153187ef861b803cd87be24cc39c84dbe1462ade496b741ca2ccccfad9da114",
+    "providerRerunAfterSafetyHardening": false
+  },
+  "isolation": {
+    "explicitNodeExecutable": true,
+    "explicitCodexModule": true,
+    "codexCmdUsed": false,
+    "credentialSource": "explicit-read-only-copy",
+    "isolatedAuthExists": true,
+    "childHomesRunOwned": true
+  },
+  "applicationAttempt": {
+    "sessionIdSha256": "99ee1f3c74858788178f6c0493ad4fa1b9b6ab3576820fecadccba32c9497472",
+    "attemptIdSha256": "1a999cf019c79c283e13407d7a5c4042745644bc18451f8287ff035fb9001804",
+    "fullInstalledTransportCompleted": false,
+    "materializationCompleted": false
+  },
+  "realInstalledControllerFallback": {
+    "reason": "production-wmi-controller-terminated-by-current-tool-audit",
+    "threadIdSha256": "14362d9662a9e209915cb11ec42d8e829fb260575c5245ce68a09b772105e2af",
+    "start": {
+      "state": "exited",
+      "exitCode": 0,
+      "controllerPid": 71320,
+      "childPid": 91848,
+      "sawTurnCompleted": true,
+      "eventTypes": [
+        "runner.controller.started",
+        "runner.process.started",
+        "thread.started",
+        "turn.started",
+        "item.completed",
+        "turn.completed",
+        "runner.process.exited"
+      ],
+      "receiptSha256": "e375b877047efeb3f3447820a7505a24213f75988076b697cc7cde0634e6d0d7",
+      "eventsSha256": "5cef9054e75bf84c0acb4775472aa8b0bbe550eee6d059f37826832a2b109a73",
+      "controllerAliveAfter": false,
+      "childAliveAfter": false
+    },
+    "resumeCancel": {
+      "state": "cancelled",
+      "exitCode": 1223,
+      "controllerPid": 60508,
+      "childPid": 99652,
+      "cancellationRequested": true,
+      "eventTypes": [
+        "runner.controller.started",
+        "runner.process.started",
+        "thread.started",
+        "turn.started",
+        "item.completed",
+        "item.started",
+        "runner.cancel.requested",
+        "runner.process.exited"
+      ],
+      "receiptSha256": "2efa55d1ad0c7a3ceef8c7a30860fbb5caca1c85cc16c4a07aa3e00518ed6b98",
+      "eventsSha256": "87f7f153bad1297fa1a93a913c6514da519589fdb0c8f04e1614779ae8707727",
+      "controllerAliveAfter": false,
+      "childAliveAfter": false
+    }
+  },
+  "probeAfter": {
+    "head": "ee7c9f775de7efb20e3fafe0069801bfa4b8c07b",
+    "tree": "ecc2b1c6369ecd30e7a03cbf08dcab67e204d5e5",
+    "dirty": false,
+    "materializationMarkerObserved": false
+  },
+  "cleanup": {
+    "loopbackPort": 50737,
+    "listenersAfter": 0,
+    "activeApplicationLeaseFilesAfter": 0,
+    "transactionStageEntriesAfter": 0,
+    "preservedBakFiles": 5
+  },
+  "verification": {
+    "releaseBuild": "pass",
+    "releaseVerify": "pass",
+    "focusedTests": {
+      "pass": 9,
+      "fail": 0
+    },
+    "v2RawHttpProjectionFocused": "pass",
+    "browserRun": false,
+    "modelTextAsserted": false
+  }
+}
