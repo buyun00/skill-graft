@@ -20,10 +20,12 @@ import {
   type HubApplication,
   type LegacyAttachPort,
   type LegacyDetachPort,
+  type LibrarySnapshotRepositoryPort,
   type P2ApplicationPorts,
   type P3ApplicationPorts,
   type RequestLedgerPort,
-  type SessionPort
+  type SessionPort,
+  type SnapshotContentPort
 } from '../application/index.js'
 import { CONTRACT_VERSION, isPortableOpaqueIdentifier, type CommandMeta } from '../contracts/index.js'
 import type { LocalHostContext } from '../adapters/host-context.js'
@@ -36,6 +38,7 @@ export type DshHost = {
   context: LocalHostContext
   sessions: SessionPort
   ledger: RequestLedgerPort
+  snapshots: LibrarySnapshotRepositoryPort & SnapshotContentPort
   p2: P2ApplicationPorts
   p3: P3ApplicationPorts
   application: HubApplication
@@ -222,6 +225,7 @@ export function createDshHost(options: CreateDshHostOptions): DshHost {
     context,
     sessions,
     ledger,
+    snapshots,
     p2,
     p3,
     application,

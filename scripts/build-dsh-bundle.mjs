@@ -35,6 +35,7 @@ await build({
   format: 'cjs',
   platform: 'browser',
   target: 'es2022',
+  external: ['react', 'react/*'],
   legalComments: 'none',
   banner: {
     js: 'window.__ModuleLoader__.load({\n  id: "@ozdqp/skill-graft-dsh",\n  factory: (require) => {\n    var module = { exports: {} };\n    var exports = module.exports;'

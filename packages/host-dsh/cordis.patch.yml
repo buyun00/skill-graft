@@ -4,7 +4,7 @@
 - insert:
     - id: skill-graft-dsh
       name: '@ozdqp/skill-graft-dsh'
-      inject: [connection]
+      inject: [connection, settings, workspaceRegistry, skills, systemPrompt]
       config:
         dataRoot: !!js dshHomePath('skill-graft')
         workspace: ''
