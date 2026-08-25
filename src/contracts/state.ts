@@ -110,6 +110,8 @@ export type WorktreeView = {
   changedAt: string
   changedAtMs: number
   attached: boolean
+  /** True when the V2 materializer has published a durable snapshot for this worktree. */
+  materialized: boolean
   doNotAuto: boolean
   officialPresent: boolean
   overrideLinked: boolean

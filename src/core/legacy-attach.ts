@@ -5,7 +5,6 @@ import type {
   LegacyAttachSourcePolicy,
   LegacyVisibilityMode
 } from '../contracts/index.js'
-import { KEPT_AGENT_SKILLS } from './constants.js'
 import {
   classifyConflict,
   decideFirstAttach,
@@ -39,20 +38,17 @@ function normalizedRelative(value: string): string {
   return value.replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase()
 }
 
-function agentSkillName(relative: string): string | null {
-  const match = normalizedRelative(relative).match(/^\.agents\/skills\/([^/]+)(?:\/|$)/)
-  return match ? match[1] : null
-}
-
-function isLegacyAssistantPath(relative: string, keptSkillNames: ReadonlySet<string>): boolean {
+function isLegacyAssistantPath(relative: string): boolean {
   const value = normalizedRelative(relative)
   if (value === '.claude' || value.startsWith('.claude/')) return true
   if (value === '.codex/agents' || value.startsWith('.codex/agents/')) return true
   if (value === '.codex/scripts' || value.startsWith('.codex/scripts/')) return true
   if (value === '.codex/skills' || value.startsWith('.codex/skills/')) return true
   if (value === '.codex/cursor-rules.env') return true
-  const skillName = agentSkillName(value)
-  return Boolean(skillName && !keptSkillNames.has(skillName))
+  // .agents/skills is project-owned unless an exact Skill is separately
+  // represented by an approved Hub artifact. Unknown private Skills are never
+  // visibility-cleanup targets.
+  return false
 }
 
 function artifactConflict(fact: LegacyAttachArtifactFact) {
@@ -148,15 +144,11 @@ export function planLegacyAttach(input: LegacyAttachPlanInput): LegacyAttachPlan
     artifacts.push({ ...fact, action: resolved.action })
   }
 
-  const adoptedNames = input.inspection.artifacts
-    .filter((artifact) => artifact.kind === 'adoptedSkill' && artifact.name)
-    .map((artifact) => String(artifact.name).toLowerCase())
-  const keptSkillNames = new Set([...KEPT_AGENT_SKILLS.map((name) => name.toLowerCase()), ...adoptedNames])
   const trackedPaths = visibility === 'disable'
-    ? input.inspection.trackedAssistantPaths.filter((relative) => isLegacyAssistantPath(relative, keptSkillNames))
+    ? input.inspection.trackedAssistantPaths.filter((relative) => isLegacyAssistantPath(relative))
     : []
   const removePaths = visibility === 'disable'
-    ? input.inspection.presentAssistantPaths.filter((relative) => isLegacyAssistantPath(relative, keptSkillNames))
+    ? input.inspection.presentAssistantPaths.filter((relative) => isLegacyAssistantPath(relative))
     : []
 
   return {

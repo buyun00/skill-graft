@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import { createServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { hubRoot, spawnHub as spawnRawHub, testHubRoot } from './helpers.mjs'
-import { createTemporaryCliPackage } from './support/test-hub.mjs'
+import { createTemporaryCliPackage, createTemporaryTestHub } from './support/test-hub.mjs'
 
 function spawnHub(args, options = {}) {
   const first = args[0]
@@ -17,7 +18,7 @@ function spawnHub(args, options = {}) {
 }
 
 function parseStdout(result, label) {
-  assert.equal(result.status, 0, `${label} stderr=${result.stderr}`)
+  assert.equal(result.status, 0, `${label} stdout=${result.stdout} stderr=${result.stderr}`)
   assert.ok(!result.stdout.startsWith('\uFEFF'), `${label} stdout has a BOM`)
   return JSON.parse(result.stdout)
 }
@@ -586,6 +587,70 @@ function markRunningWithPid(dir, session, pid, extra = {}) {
     fs.writeFileSync(path.join(dir, 'skill-review', `session-${session.id}.exit`), `${extra.exitCode}\n`)
   }
 }
+
+function markV2RunnerExited(dir, session) {
+  const file = path.join(dir, 'skill-review', 'sessions.json')
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const row = data.sessions.find((item) => item.id === session.id)
+  assert.equal(row.sessionSchemaVersion, 2)
+  row.runnerId = `local:${createHash('sha256').update(`${row.id}\n${row.attemptId}`).digest('hex').slice(0, 24)}`
+  row.status = 'running'
+  const at = new Date().toISOString()
+  fs.writeFileSync(row.runnerArtifacts.receiptPath, `${JSON.stringify({
+    executionReceiptVersion: 1,
+    sessionId: row.id,
+    attemptId: row.attemptId,
+    state: 'exited',
+    controllerPid: 0,
+    childPid: 0,
+    exitCode: 0,
+    threadId: '019cfake0-0000-7000-8000-000000000001',
+    sawTurnCompleted: true,
+    sawTurnFailed: false,
+    eventCount: 1,
+    cancellationRequested: false,
+    startedAt: at,
+    endedAt: at
+  })}\n`, 'utf8')
+  fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`)
+}
+
+test('claim reaps its completed attach session without requiring a prior session query', { timeout: 20000 }, (t) => {
+  const temporary = createTemporaryTestHub(hubRoot)
+  t.after(() => temporary.cleanup())
+  const dir = temporary.root
+  const worktree = makeRecognizedWorktree(dir, 'direct-claim-worktree')
+  const snapshot = parseStdout(spawnHub([
+    'snapshot', 'create', '--contract-v1', '--request-id', 'direct-claim-snapshot'
+  ], { env: { HUB_ROOT: dir, HUB_SPAWN_CODEX: '0' } }), 'direct-claim-snapshot')
+  const snapshotId = snapshot.data.snapshot.snapshotId
+  const runtimeRevision = JSON.parse(fs.readFileSync(path.join(hubRoot, 'package.json'), 'utf8')).version
+  fs.writeFileSync(path.join(dir, 'skill-review', 'state.json'), `${JSON.stringify({
+    schemaVersion: 2,
+    stateRevision: 1,
+    runtimeRevision,
+    librarySnapshots: [snapshotId],
+    worktrees: {},
+    items: [],
+    lastIngest: null
+  }, null, 2)}\n`, 'utf8')
+  const attach = parseStdout(spawnHub([
+    'attach', '--worktree', worktree, '--intent', 'direct claim', '--no-spawn'
+  ], { env: { HUB_ROOT: dir, HUB_SPAWN_CODEX: '0' } }), 'direct-claim-attach')
+  markV2RunnerExited(dir, attach.session)
+
+  const claimed = parseStdout(spawnHub([
+    'claim', '--worktree', worktree,
+    '--snapshot', snapshotId,
+    '--session-id', attach.session.id,
+    '--clear-skills', '--contract-v1', '--request-id', 'direct-claim'
+  ], { env: { HUB_ROOT: dir, HUB_SPAWN_CODEX: '0' } }), 'direct-claim')
+  assert.equal(claimed.commandKind, 'claimWorktree')
+  assert.equal(claimed.data.changed, true)
+  assert.deepEqual(claimed.data.pin.selectedSkills, [])
+  const ledger = JSON.parse(fs.readFileSync(path.join(dir, 'skill-review', 'application-ledger.json'), 'utf8'))
+  assert.ok(ledger.entries.some((entry) => entry.commandKind === 'reapSessions'))
+})
 
 test('attach --no-spawn --wait stays queued and does not launch Codex', (t) => {
   const dir = tempHub(t)

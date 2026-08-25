@@ -77,6 +77,9 @@ function makeSnapshot(options = {}) {
     fileFact('skills/ozdqp-ui-development/SKILL.md', 'ui-a'),
     fileFact('skills/adopted/team-skill/SKILL.md', options.adopted ?? 'adopted-a'),
     fileFact('skills/adopted/team-skill/reference.md', 'adopted-reference-a'),
+    ...(options.dynamicResident
+      ? [fileFact('skills/project-private/SKILL.md', 'project-private-a')]
+      : []),
     ...(options.adoptedResidentCollision
       ? [fileFact('skills/adopted/ozdqp-development/SKILL.md', 'collision')]
       : []),
@@ -419,6 +422,13 @@ test('selectedSkills is explicit and canonical; empty means override plus overla
   ])
   assert.equal(selected.artifacts.some((artifact) => artifact.targetRelativePath === 'AGENTS.md'), false)
   assert.equal(selected.artifacts.some((artifact) => artifact.targetRelativePath.includes('unity-skills')), false)
+
+  const dynamicSnapshot = makeSnapshot({ dynamicResident: true })
+  const dynamic = makeDesired(dynamicSnapshot, runtimeAsset, ['project-private'])
+  assert.ok(dynamic.artifacts.some((artifact) => (
+    artifact.artifactId === 'residentSkill:project-private'
+      && artifact.targetRelativePath === '.agents/skills/project-private'
+  )))
 
   for (const selection of [
     ['unity-skills'],

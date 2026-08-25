@@ -39,7 +39,8 @@ const INSTALL_ENVIRONMENT_NAMES = [
   'SG_TASK_NAME', 'SG_EXTRA_SHIM_DIR',
   'SKILL_GRAFT_INVOCATION_TRACE', 'SKILL_GRAFT_REAL_E2E', 'SKILL_GRAFT_RUN_ID', 'SKILL_GRAFT_E2E_ROOT',
   'PATH', 'DSH_HOME', 'HOME', 'XDG_CONFIG_HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP',
-  'HUB_SPAWN_CODEX', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_OPTIONAL_LOCKS'
+  'HUB_SPAWN_CODEX', 'HUB_CODEX_NODE', 'HUB_CODEX_MODULE', 'HUB_CODEX_CREDENTIAL_HOME',
+  'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_OPTIONAL_LOCKS'
 ]
 
 function createInstallHost(overrides = {}) {
@@ -277,10 +278,16 @@ test('setup pins validated trace gates only into the detached daemon launcher', 
   const installDir = path.join(gate.runRoot, 'home', 'install')
   seedRequiredDataAssets(dataRoot)
   seedPackageRuntime(packageRoot)
+  const runnerPaths = {
+    HUB_CODEX_NODE: path.join(gate.runRoot, 'runner', 'node.exe'),
+    HUB_CODEX_MODULE: path.join(gate.runRoot, 'runner', 'codex.js'),
+    HUB_CODEX_CREDENTIAL_HOME: path.join(gate.runRoot, 'runner', 'credentials')
+  }
   const env = new Map([
     ['HUB_ROOT', dataRoot],
     ['HUB_API_PORT', '21990'],
     ['SG_INSTALL_DIR', installDir],
+    ...Object.entries(runnerPaths),
     ...Object.entries(gate.env)
   ])
   const mutatedPath = path.join(gate.runRoot, 'mutated-after-preflight')
@@ -338,6 +345,16 @@ test('setup pins validated trace gates only into the detached daemon launcher', 
   }
   assert.equal((launcher.match(/^set "SKILL_GRAFT_HOME=/gm) || []).length, 1)
   assert.equal((launcher.match(/^set "HUB_ROOT=/gm) || []).length, 1)
+  const interactiveShim = fs.readFileSync(path.join(installDir, 'bin', 'sg.cmd'), 'utf8')
+  const unixShim = fs.readFileSync(path.join(installDir, 'bin', 'sg'), 'utf8')
+  for (const [name, value] of Object.entries(runnerPaths)) {
+    assert.match(launcher, new RegExp(`set "${name}=${escapeRegex(value)}"`), `${name} detached launcher pin`)
+    assert.equal((launcher.match(new RegExp(`^set "${name}=`, 'gm')) || []).length, 2, name)
+    assert.match(interactiveShim, new RegExp(`set "${name}=${escapeRegex(value)}"`), `${name} cmd shim pin`)
+    assert.equal((interactiveShim.match(new RegExp(`^set "${name}=`, 'gm')) || []).length, 2, `${name} cmd shim`)
+    assert.match(unixShim, new RegExp(`${name}='${escapeRegex(value)}'`), `${name} unix shim pin`)
+  }
+  assert.match(unixShim, /unset HUB_CODEX_NODE HUB_CODEX_MODULE HUB_CODEX_CREDENTIAL_HOME/)
   assert.doesNotMatch(launcher, new RegExp(escapeRegex(mutatedPath)))
   assert.doesNotMatch(launcher, /INVOCATION_TRACE_KEY|invocation-trace-key/)
 
@@ -646,6 +663,7 @@ test('setup bootstraps public runtime into an empty explicit data root without p
   assert.equal(fs.existsSync(path.join(dataRoot, 'skill-review', 'state.json')), true)
   assert.equal(fs.existsSync(path.join(packageRoot, 'skill-review')), false)
   assert.equal(fs.existsSync(path.join(dataRoot, '.skill-graft-data-root.json')), true)
+  assert.equal(fs.statSync(path.join(dataRoot, '.skill-graft-transactions')).isDirectory(), true)
   assert.equal(fs.existsSync(path.join(dataRoot, 'AGENTS.override.md')), true)
   assert.equal(fs.existsSync(path.join(dataRoot, 'skills', 'ozdqp-development', 'SKILL.md')), false)
   assert.equal(JSON.parse(fs.readFileSync(path.join(installDir, 'install.json'), 'utf8')).port, port)
@@ -1380,7 +1398,9 @@ test('detached start preserves legacy marker evidence when launch does not publi
   const launchers = renderShims(launcherPaths, undefined, {
     HOME: root,
     USERPROFILE: root,
-    LOCALAPPDATA: root
+    LOCALAPPDATA: root,
+    HUB_CODEX_NODE: process.execPath,
+    HUB_CODEX_CREDENTIAL_HOME: path.join(root, '.codex')
   })
   fs.mkdirSync(installDir, { recursive: true })
   fs.writeFileSync(launcherPaths.silentVbs, launchers.vbs)

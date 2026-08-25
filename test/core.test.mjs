@@ -5,6 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import test from 'node:test'
 import { createHub } from '../dist/adapters/create-hub.js'
+import { localLibraryCaptureRoots } from '../dist/adapters/local-p2-ports.js'
 import { createLocalQueryPort } from '../dist/adapters/local-query-port.js'
 import {
   createMemoryRequestLedger,
@@ -12,7 +13,6 @@ import {
 } from '../dist/application/index.js'
 import { createLocalHost } from '../dist/local/create-local-host.js'
 import { CONTRACT_VERSION } from '../dist/contracts/index.js'
-import { RESIDENT_SKILLS } from '../dist/core/constants.js'
 import { recognizeWorktree } from '../dist/core/policies.js'
 import {
   projectHubStatus,
@@ -43,6 +43,11 @@ function fakeGit(handlers) {
 }
 
 let requestSequence = 0
+const FIXTURE_RESIDENT_SKILLS = [
+  'ozdqp-development',
+  'ozdqp-ui-development',
+  'ozdqp-git-workflow'
+]
 
 function projectedSkills(query) {
   return projectSkillInventory(query.listSkillFacts())
@@ -179,7 +184,7 @@ test('C3b checkout-rules can recognize .git + custom file and still exclude name
 test('C4 getStatus reads an isolated hub: 3 resident SKILL.md, inbox has queued names, counts match items', () => {
   const status = projectedStatus(createLocalQueryPort(createHub(testHubRoot)))
   assert.equal(status.hubRoot, testHubRoot)
-  assert.deepEqual(status.resident.map((node) => node.name), [...RESIDENT_SKILLS])
+  assert.deepEqual(status.resident.map((node) => node.name), [...FIXTURE_RESIDENT_SKILLS].sort())
   assert.ok(status.resident.every((node) => node.hasSkillMd))
   const queued = status.items.filter((item) => item.status === 'queued')
   assert.equal(status.counts.queued, queued.length)
@@ -187,6 +192,55 @@ test('C4 getStatus reads an isolated hub: 3 resident SKILL.md, inbox has queued 
   for (const name of queuedNames) {
     assert.ok(status.inbox.some((node) => node.name === name), `inbox should include queued name ${name}`)
   }
+})
+
+test('C4b empty corpus has zero resident Skills instead of product-name ghosts', () => {
+  const hub = path.join(os.tmpdir(), 'hub-empty-corpus-fake')
+  const skills = path.join(hub, 'skills')
+  const files = {
+    [path.resolve(skills)]: { dir: true, entries: ['adopted', 'inbox'] },
+    [path.resolve(skills, 'adopted')]: { dir: true, entries: [] },
+    [path.resolve(skills, 'inbox')]: { dir: true, entries: [] }
+  }
+  const status = projectedStatus(createLocalQueryPort(createHub(hub, {
+    fs: makeFs(files),
+    git: fakeGit({ configGet: () => null })
+  })))
+
+  assert.deepEqual(status.resident, [])
+  assert.equal(status.counts.resident, 0)
+})
+
+test('C4c resident inventory enumerates only plain top-level directories with plain SKILL.md', () => {
+  const hub = path.join(os.tmpdir(), 'hub-dynamic-corpus-fake')
+  const skills = path.join(hub, 'skills')
+  const files = {
+    [path.resolve(skills)]: {
+      dir: true,
+      entries: ['zeta-private', 'missing-skill-md', 'inbox', 'adopted', 'linked-directory', 'linked-skill-md', 'alpha-private']
+    },
+    [path.resolve(skills, 'alpha-private')]: { dir: true },
+    [path.resolve(skills, 'alpha-private', 'SKILL.md')]: { text: '# alpha\n' },
+    [path.resolve(skills, 'zeta-private')]: { dir: true },
+    [path.resolve(skills, 'zeta-private', 'SKILL.md')]: { text: '# zeta\n' },
+    [path.resolve(skills, 'missing-skill-md')]: { dir: true },
+    [path.resolve(skills, 'linked-directory')]: { dir: true, symlink: true },
+    [path.resolve(skills, 'linked-directory', 'SKILL.md')]: { text: '# linked directory\n' },
+    [path.resolve(skills, 'linked-skill-md')]: { dir: true },
+    [path.resolve(skills, 'linked-skill-md', 'SKILL.md')]: { text: '# linked file\n', symlink: true },
+    [path.resolve(skills, 'adopted')]: { dir: true, entries: [] },
+    [path.resolve(skills, 'inbox')]: { dir: true, entries: [] }
+  }
+  const context = createHub(hub, {
+    fs: makeFs(files),
+    git: fakeGit({ configGet: () => null })
+  })
+  const status = projectedStatus(createLocalQueryPort(context))
+
+  assert.deepEqual(status.resident.map((skill) => skill.name), ['alpha-private', 'zeta-private'])
+  assert.ok(status.resident.every((skill) => skill.hasSkillMd && skill.attached === false))
+  assert.equal(status.counts.resident, 2)
+  assert.deepEqual(localLibraryCaptureRoots(context), ['skills/alpha-private', 'skills/zeta-private'])
 })
 
 test('C5 listWorktrees marks attached and overrideLinked from list + inode/realpath', () => {
@@ -257,7 +311,81 @@ test('C6 listWorktrees sorts by changedAtMs descending', () => {
   const result = projectedWorktrees(createLocalQueryPort(createHub(hub, { fs: makeFs(files), git })))
   assert.equal(result.worktrees.length, 2)
   assert.deepEqual(result.worktrees.map((tree) => tree.path), [newer, older])
+  assert.ok(result.worktrees.every((tree) => tree.attached === false))
   assert.ok(result.worktrees[0].changedAtMs > result.worktrees[1].changedAtMs)
+})
+
+test('C6b V2 readback requires materialization and uses the canonical worktree identity', () => {
+  const root = path.join(os.tmpdir(), 'hub-v2-claim-fake')
+  const hub = path.join(root, 'hub')
+  const canonicalGame = path.join(root, 'canonical-v2-attached')
+  const game = path.join(root, 'ozdqp-v2-attached-alias')
+  const files = {
+    [path.resolve(hub, 'overlay', 'scan-roots.txt')]: { text: `${root}\n` },
+    [path.resolve(hub, 'overlay', 'attached-worktrees.txt')]: { text: '' },
+    [path.resolve(hub, 'overlay', 'do-not-auto-attach.txt')]: { text: '' },
+    [path.resolve(root)]: { dir: true, entries: ['ozdqp-v2-attached-alias'] },
+    [path.resolve(canonicalGame)]: { dir: true, mtimeMs: 200 },
+    [path.resolve(game)]: { dir: true, symlink: true, real: canonicalGame, mtimeMs: 200 },
+    [path.resolve(game, 'AGENTS.md')]: { text: 'x' },
+    [path.resolve(game, 'baloot_client')]: { dir: true },
+    [path.resolve(hub, 'skills')]: { dir: true, entries: ['private-skill'] },
+    [path.resolve(hub, 'skills', 'private-skill')]: { dir: true, entries: ['SKILL.md'] },
+    [path.resolve(hub, 'skills', 'private-skill', 'SKILL.md')]: { text: '# private\n' }
+  }
+  const git = fakeGit({
+    output: (cwd, args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return path.join(cwd, '.git')
+      if (args[0] === 'worktree' && args[1] === 'list') {
+        return ['worktree ' + cwd, 'HEAD feedface', 'branch refs/heads/main', ''].join('\n')
+      }
+      return ''
+    }
+  })
+  const context = createHub(hub, { fs: makeFs(files), git })
+  const digest = context.hash.sha256(context.path.comparisonKey(path.resolve(canonicalGame)))
+  const pathKey = `sha256:${digest}`
+  const worktreeId = `worktree:${digest.slice(0, 24)}`
+  const snapshotId = `sha256:${'1'.repeat(64)}`
+  files[path.resolve(hub, 'skill-review', 'state.json')] = {
+    text: JSON.stringify({
+      schemaVersion: 2,
+      stateRevision: 3,
+      runtimeRevision: 'core-test',
+      librarySnapshots: [snapshotId],
+      worktrees: {
+        [pathKey]: {
+          schemaVersion: 1,
+          pathKey,
+          worktreeId,
+          requestedSnapshot: snapshotId,
+          materializedSnapshot: snapshotId,
+          selectedSkills: ['private-skill'],
+          claimState: 'claimed'
+        }
+      },
+      items: [],
+      lastIngest: null
+    })
+  }
+
+  const query = createLocalQueryPort(context)
+  const result = projectedWorktrees(query)
+  assert.equal(result.worktrees.length, 1)
+  assert.equal(result.worktrees[0].path, canonicalGame)
+  assert.equal(result.worktrees[0].attached, true)
+  assert.equal(result.worktrees[0].materialized, true)
+  assert.equal(projectedSkills(query).resident[0].attached, true)
+  assert.equal(query.inspectWorktree(game).claimed, true)
+
+  const state = JSON.parse(files[path.resolve(hub, 'skill-review', 'state.json')].text)
+  state.worktrees[pathKey].materializedSnapshot = null
+  files[path.resolve(hub, 'skill-review', 'state.json')].text = JSON.stringify(state)
+  const claimedOnly = projectedWorktrees(query).worktrees[0]
+  assert.equal(claimedOnly.attached, false)
+  assert.equal(claimedOnly.materialized, false)
+  assert.equal(projectedSkills(query).resident[0].attached, false)
+  assert.equal(query.inspectWorktree(game).claimed, true, 'claim truth remains distinct from materialization')
 })
 
 test('C7 unreadable scan root is skipped and listWorktrees still returns', () => {
@@ -295,6 +423,10 @@ test('C7 unreadable scan root is skipped and listWorktrees still returns', () =>
 test('C8 empty gameRepo leaves resident and adopted attached false', () => {
   const hub = path.join(os.tmpdir(), 'hub-norepo-fake')
   const files = {
+    [path.resolve(hub, 'skills')]: {
+      dir: true,
+      entries: ['ozdqp-development', 'ozdqp-ui-development', 'ozdqp-git-workflow', 'adopted', 'inbox']
+    },
     [path.resolve(hub, 'skills', 'ozdqp-development')]: { dir: true },
     [path.resolve(hub, 'skills', 'ozdqp-development', 'SKILL.md')]: { text: 'x' },
     [path.resolve(hub, 'skills', 'ozdqp-ui-development')]: { dir: true },
@@ -397,7 +529,7 @@ async function attachedRepairHub(t) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const hubDir = path.join(dir, 'hub')
   const tree = path.join(dir, 'tree')
-  for (const name of RESIDENT_SKILLS) {
+  for (const name of FIXTURE_RESIDENT_SKILLS) {
     fs.mkdirSync(path.join(hubDir, 'skills', name), { recursive: true })
     fs.writeFileSync(path.join(hubDir, 'skills', name, 'SKILL.md'), `${name}\n`)
   }
@@ -438,7 +570,7 @@ test('repairLegacy rejects an unattached non-Git tree without rewriting it', asy
 
 test('repairLegacy restores a broken resident skill junction on an attached fixture', async (t) => {
   const { ctx, tree, hubDir, app } = await attachedRepairHub(t)
-  const name = RESIDENT_SKILLS[0]
+  const name = FIXTURE_RESIDENT_SKILLS[0]
   const linkPath = path.join(tree, '.agents', 'skills', name)
   const hubPath = path.join(hubDir, 'skills', name)
   ctx.link.unlink(linkPath)

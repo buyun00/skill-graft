@@ -1541,7 +1541,7 @@ test('legacy attach planner is pure, fail-closed, and emits only approved host e
   assert.deepEqual(promoted.plan.visibility, {
     mode: 'disable',
     trackedPaths: ['.claude/settings.json'],
-    removePaths: ['.codex/agents', '.agents/skills/custom-skill']
+    removePaths: ['.codex/agents']
   })
   assert.equal(promoted.plan.claim, 'create')
   assert.equal(promoted.plan.configureGit, true)

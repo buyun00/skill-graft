@@ -476,7 +476,7 @@ export function WorkspaceOperations({ worktree }: { worktree: string }) {
               value={selectedSkills}
               onChange={(event) => setSelectedSkills(event.target.value)}
               className="mt-1 w-full rounded-xl border border-ink/[0.07] bg-white/40 px-3 py-2 text-[12px] text-ink"
-              placeholder="ozdqp-development, ozdqp-ui-development"
+              placeholder="skill-a, skill-b"
             />
           </label>
         </div>

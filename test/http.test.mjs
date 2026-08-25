@@ -259,7 +259,7 @@ function fakeHost(execute, options = {}) {
     dataRoot: options.dataRoot || hubRoot,
     hostId: options.hostId || 'http-fake-host',
     localSessions: {
-      needsReap: () => false,
+      needsReap: options.needsReap || (() => false),
       getLegacy: () => null,
       readLog: (id) => options.readLog?.(id) || ''
     },
@@ -275,6 +275,99 @@ function fakeHost(execute, options = {}) {
     application: { execute }
   }
 }
+
+test('typed session queries preserve their envelope when opportunistic reap fails', async (t) => {
+  const calls = []
+  const session = {
+    id: 'p5-reap-failure-query',
+    kind: 'chat',
+    status: 'running',
+    revision: 2,
+    attemptId: 'attempt-p5-reap-failure-query',
+    exitCode: null,
+    cancelRequested: false,
+    steps: [],
+    events: [],
+    capabilities: { canResume: false, canCancel: true }
+  }
+  const host = fakeHost(async (command) => {
+    calls.push(command)
+    if (command.kind === 'reapSessions') {
+      return {
+        contractVersion: 1,
+        requestId: command.meta.requestId,
+        commandKind: command.kind,
+        ok: false,
+        error: { code: 'PORT_ERROR', message: 'isolated reap failure', retryable: true },
+        events: [],
+        meta: { replayed: false, handler: 'application.commandBus' }
+      }
+    }
+    return {
+      contractVersion: 1,
+      requestId: command.meta.requestId,
+      commandKind: command.kind,
+      ok: true,
+      data: { session },
+      events: [],
+      meta: { replayed: false, handler: 'application.commandBus' }
+    }
+  }, { needsReap: () => true })
+  const transport = createHttpServer({ host })
+  t.after(async () => transport.close())
+  const base = await listenTransport(transport)
+
+  const response = await postJson(base, '/api/command', {
+    kind: 'getSession',
+    sessionId: session.id,
+    requestId: 'foreground-get-session'
+  })
+  assert.equal(response.ok, true)
+  assert.equal(response.commandKind, 'getSession')
+  assert.equal(response.requestId, 'foreground-get-session')
+  assert.deepEqual(calls.map((command) => command.kind), ['reapSessions', 'getSession'])
+  assert.equal(calls[0].meta.transport, 'http-session-reap')
+  assert.notEqual(calls[0].meta.requestId, calls[1].meta.requestId)
+})
+
+test('session-authorized mutations reap their scoped session before the foreground command', async (t) => {
+  const calls = []
+  const host = fakeHost(async (command) => {
+    calls.push(command)
+    return {
+      contractVersion: 1,
+      requestId: command.meta.requestId,
+      commandKind: command.kind,
+      ok: true,
+      data: command.kind === 'reapSessions'
+        ? { action: 'reapSessions', sessions: [] }
+        : { action: 'claimWorktree', changed: true },
+      events: [],
+      meta: { replayed: false, handler: 'application.commandBus' }
+    }
+  }, { needsReap: (sessionIds) => sessionIds?.[0] === 'attach-session-ready' })
+  const transport = createHttpServer({ host })
+  t.after(async () => transport.close())
+  const base = await listenTransport(transport)
+  const panel = await fetch(base)
+  const cookie = String(panel.headers.get('set-cookie') || '').split(';', 1)[0]
+  assert.match(cookie, /^skill_graft_capability=/)
+
+  const response = await postJson(base, '/api/command', {
+    kind: 'claimWorktree',
+    worktree: 'C:\\probe',
+    snapshotId: `sha256:${'a'.repeat(64)}`,
+    selectedSkills: [],
+    sessionId: 'attach-session-ready',
+    requestId: 'foreground-claim'
+  }, { Cookie: cookie })
+  assert.equal(response.ok, true)
+  assert.equal(response.commandKind, 'claimWorktree')
+  assert.equal(response.requestId, 'foreground-claim')
+  assert.deepEqual(calls.map((command) => command.kind), ['reapSessions', 'claimWorktree'])
+  assert.deepEqual(calls[0].sessionIds, ['attach-session-ready'])
+  assert.equal(calls[0].meta.transport, 'http-session-reap')
+})
 
 test('P5 structured session GET routes omit raw runner logs', async (t) => {
   const rawSecret = 'p5-raw-runner-secret-must-not-cross-http'

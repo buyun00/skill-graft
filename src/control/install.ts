@@ -35,6 +35,10 @@ import {
   resolveLocalDataRoot
 } from '../local/data-root.js'
 import {
+  describeLocalCodexRuntime,
+  resolveLocalCodexRuntime
+} from '../local/session/local-codex-runtime.js'
+import {
   API_PORT,
   DATA_ROOT_MARKER_VERSION,
   evaluateDoctor,
@@ -7015,10 +7019,11 @@ function plainPathHasKind(target: string, kind: 'file' | 'directory', boundary: 
 
 function daemonLauncherEnvironment(
   host: InstallHost,
-  environment: FrozenInstallEnvironment
+  environment: FrozenInstallEnvironment,
+  paths: Pick<InstallPaths, 'packageRoot' | 'nodePath'>
 ): DaemonLauncherEnvironment {
   const home = resolve(host.home || environment.USERPROFILE || environment.HOME || homedir())
-  return Object.freeze({
+  const authority = Object.freeze({
     HOME: home,
     USERPROFILE: home,
     ...(environment.APPDATA ? { APPDATA: resolve(environment.APPDATA) } : {}),
@@ -7027,6 +7032,28 @@ function daemonLauncherEnvironment(
       : {}),
     ...(environment.TEMP ? { TEMP: resolve(environment.TEMP) } : {}),
     ...(environment.TMP ? { TMP: resolve(environment.TMP) } : {})
+  })
+  const runtime = resolveLocalCodexRuntime({
+    packageRoot: paths.packageRoot,
+    environment: Object.freeze({ ...environment, ...authority }),
+    allowStandardPaths: true,
+    fallbackNodeExecutable: paths.nodePath
+  })
+  const fixed = {
+    HUB_CODEX_NODE: runtime.nodeExecutable,
+    HUB_CODEX_MODULE: runtime.codexModule,
+    HUB_CODEX_CREDENTIAL_HOME: runtime.credentialHome
+  } as const
+  for (const [name, value] of Object.entries(fixed)) {
+    if (value && !isAbsolute(value)) throw new Error(`${name} must be absolute`)
+  }
+  return Object.freeze({
+    ...authority,
+    ...(fixed.HUB_CODEX_NODE ? { HUB_CODEX_NODE: fixed.HUB_CODEX_NODE } : {}),
+    ...(fixed.HUB_CODEX_MODULE ? { HUB_CODEX_MODULE: fixed.HUB_CODEX_MODULE } : {}),
+    ...(fixed.HUB_CODEX_CREDENTIAL_HOME
+      ? { HUB_CODEX_CREDENTIAL_HOME: fixed.HUB_CODEX_CREDENTIAL_HOME }
+      : {})
   })
 }
 
@@ -7039,7 +7066,7 @@ function renderedArtifacts(
   const rendered = renderShims(
     paths,
     tracePreflight.daemonTrace,
-    daemonLauncherEnvironment(host, tracePreflight.baseEnvironment)
+    daemonLauncherEnvironment(host, tracePreflight.baseEnvironment, paths)
   )
   const artifacts = new Map<string, string>([
     [paths.shimCmd, rendered.sgCmd],
@@ -9883,6 +9910,12 @@ export function collectDoctorFacts(
   ]
   const gitPath = host.which('git')
   const nodePath = process.execPath || host.which('node')
+  const codexRuntime = resolveLocalCodexRuntime({
+    packageRoot,
+    environment,
+    allowStandardPaths: true,
+    fallbackNodeExecutable: nodePath
+  })
   let corpusEmpty = false
   let corpusInspectionError = ''
   try {
@@ -9914,7 +9947,9 @@ export function collectDoctorFacts(
     nodeVersion: process.version,
     gitPath,
     gitVersion: gitPath ? host.commandVersion(gitPath) : '',
-    codexPath: codexJs(),
+    codexPath: codexRuntime.codexModule,
+    codexRunnerReady: codexRuntime.ready,
+    codexRunnerDetail: describeLocalCodexRuntime(codexRuntime),
     distExists: fs.existsSync(paths.cliPath),
     cliPath: paths.cliPath,
     missingLayout,
@@ -10039,6 +10074,8 @@ export async function doctorHub(
       gitPath: '',
       gitVersion: '',
       codexPath: '',
+      codexRunnerReady: false,
+      codexRunnerDetail: 'Codex Session Runner readiness could not be inspected',
       distExists: false,
       cliPath: paths.cliPath,
       missingLayout: [paths.dataRoot],
@@ -11684,7 +11721,7 @@ async function startDaemonDetachedAfterPreflight(
     const launchers = renderShims(
       paths,
       daemonTrace,
-      daemonLauncherEnvironment(host, tracePreflight.baseEnvironment)
+      daemonLauncherEnvironment(host, tracePreflight.baseEnvironment, paths)
     )
     const expected = new Map<string, Buffer>([
       [paths.silentVbs, Buffer.from(launchers.vbs, 'utf8')],
@@ -14284,9 +14321,4 @@ function samePath(left: string, right: string, platform: NodeJS.Platform | strin
   const a = left.replace(/[\\/]+$/, '')
   const b = right.replace(/[\\/]+$/, '')
   return platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
-}
-
-function codexJs() {
-  const target = join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
-  return fs.existsSync(target) ? target : ''
 }

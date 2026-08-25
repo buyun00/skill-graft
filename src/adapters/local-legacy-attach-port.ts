@@ -11,8 +11,8 @@ import type {
   LegacyAttachInspection,
   LegacyAttachObservedArtifact
 } from '../contracts/index.js'
-import { RESIDENT_SKILLS } from '../core/constants.js'
 import type { LocalHostContext } from './host-context.js'
+import { adoptedSkillNames, residentSkillNames } from './local-skill-corpus.js'
 
 type WorktreeInspector = (worktree: string) => MaybePromise<WorktreeInspection>
 
@@ -285,16 +285,6 @@ function trackedAssistantPaths(worktree: string, isGitWorktree: boolean): string
     .filter(Boolean)
 }
 
-function adoptedNames(context: LocalHostContext): string[] {
-  const root = safeInside(context.hubRoot, 'skills/adopted')
-  const stat = lstat(root)
-  if (!stat?.isDirectory()) return []
-  return fs.readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-    .map((entry) => entry.name)
-    .sort((left, right) => left.localeCompare(right))
-}
-
 function backupStamp(context: LocalHostContext): string {
   return context.clock.nowIso().replace(/[^0-9]/g, '').slice(0, 14) || 'unknown'
 }
@@ -309,7 +299,7 @@ function artifactDefinitions(context: LocalHostContext) {
       hubRelativePath: 'AGENTS.override.md',
       expectedKind: 'file' as const
     },
-    ...RESIDENT_SKILLS.map((name) => ({
+    ...residentSkillNames(context).map((name) => ({
       id: `resident:${name}`,
       kind: 'residentSkill' as const,
       name,
@@ -318,7 +308,7 @@ function artifactDefinitions(context: LocalHostContext) {
       hubRelativePath: `skills/${name}`,
       expectedKind: 'directory' as const
     })),
-    ...adoptedNames(context).map((name) => ({
+    ...adoptedSkillNames(context).map((name) => ({
       id: `adopted:${name}`,
       kind: 'adoptedSkill' as const,
       name,

@@ -153,7 +153,7 @@ sg repair-links --worktree D:\your-checkout
 
 ```text
 sg decide --id <id> --action adopt
-sg decide --id <id> --action merge --merge-target skills/ozdqp-development
+sg decide --id <id> --action merge --merge-target skills/<skill-name>
 sg decide --id <id> --action reject
 ```
 

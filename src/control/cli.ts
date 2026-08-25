@@ -157,12 +157,16 @@ async function executeProjected(host: LocalHost, command: HubCommand): Promise<u
   return projectLegacyResult(result, host)
 }
 
-async function reapSessionState(host: LocalHost, sessionId?: string): Promise<void> {
+async function reapSessionState(
+  host: LocalHost,
+  sessionId?: string,
+  transport = 'cli'
+): Promise<void> {
   const scope = sessionId ? [sessionId] : undefined
   if (host.localSessions && !host.localSessions.needsReap(scope)) return
   await executeProjected(host, {
     kind: 'reapSessions',
-    meta: host.commandMeta('cli'),
+    meta: host.commandMeta(transport),
     sessionIds: scope
   })
 }
@@ -378,6 +382,13 @@ async function main() {
   const contractV1 = !legacyOutput
   const commandMeta = () => host.commandMeta('cli', requestId)
   const execute = async (typed: HubCommand) => {
+    const sessionId = typed.kind !== 'reapSessions'
+      && 'sessionId' in typed
+      && typeof typed.sessionId === 'string'
+      && typed.sessionId
+      ? typed.sessionId
+      : undefined
+    if (sessionId) await reapSessionState(host, sessionId, 'cli-session-reap')
     const result = await host.application.execute(typed)
     if (!result.ok) process.exitCode = 1
     if (contractV1) {

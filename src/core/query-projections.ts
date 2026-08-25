@@ -46,6 +46,7 @@ export type WorktreeProjectionFact = {
   exists: boolean
   sameAsHub: boolean
   attached: boolean
+  materialized: boolean
   doNotAuto: boolean
   officialPresent: boolean
   overrideLinked: boolean
@@ -130,6 +131,7 @@ function worktreeView(fact: WorktreeProjectionFact, cloneRoot: string): Worktree
     changedAt: fact.changedAtMs ? new Date(fact.changedAtMs).toISOString() : '',
     changedAtMs: fact.changedAtMs,
     attached: fact.attached,
+    materialized: fact.materialized,
     doNotAuto: fact.doNotAuto,
     officialPresent: fact.officialPresent,
     overrideLinked: fact.overrideLinked,

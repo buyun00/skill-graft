@@ -14,6 +14,7 @@ import type {
 } from '../../contracts/index.js'
 import type { LocalHostContext } from '../../adapters/host-context.js'
 import type { LocalSessionBinding, LocalSessionBindingPort } from './local-session-binding.js'
+import { resolveLocalCodexRuntime } from './local-codex-runtime.js'
 
 export const DEFAULT_RUNNER_PROFILE = 'gpt-5.6-luna'
 export const DEFAULT_RUNNER_QUALITY = 'max'
@@ -206,6 +207,14 @@ export function createCodexSessionRunner(
     'powershell.exe'
   )
   const controllerSpawn = options.controllerSpawn || spawnSync
+  const runtimeAvailability = () => resolveLocalCodexRuntime({
+    packageRoot: options.packageRoot,
+    environment: env,
+    nodeExecutable: options.nodeExecutable,
+    codexModule: options.codexModule,
+    credentialHome: options.credentialHome,
+    controllerPath
+  })
   const processAlive = options.processAlive || ((pid: number) => {
     if (!pid || pid <= 0) return false
     try {
@@ -310,13 +319,7 @@ export function createCodexSessionRunner(
     arguments_: readonly string[],
     startError: SessionRunnerError['code']
   ) => {
-    if (!path.isAbsolute(options.nodeExecutable)
-      || !path.isAbsolute(options.codexModule)
-      || !path.isAbsolute(options.credentialHome)
-      || !fs.existsSync(options.nodeExecutable)
-      || !fs.existsSync(options.codexModule)
-      || !fs.existsSync(path.join(options.credentialHome, 'auth.json'))
-      || !fs.existsSync(controllerPath)) {
+    if (!runtimeAvailability().available) {
       return failed<SessionRunnerSnapshot>(runnerError('RUNNER_NOT_FOUND', false))
     }
     const request = {
@@ -341,24 +344,16 @@ export function createCodexSessionRunner(
     atomicJson(binding.artifacts.requestPath, request)
     let controllerPid = 0
     try {
-      const quoteCommandLine = (value: string) => `"${value.replace(/"/g, '')}"`
       const psLiteral = (value: string) => `'${value.replace(/'/g, "''")}'`
       const controllerLog = path.join(binding.artifacts.attemptRoot, 'controller.log')
       const encodedScript = Buffer.from(
         `[IO.File]::WriteAllText(${psLiteral(controllerLog)}, 'controller launch'); & ${psLiteral(controllerPath)} -RequestPath ${psLiteral(binding.artifacts.requestPath)} *>> ${psLiteral(controllerLog)}`,
         'utf16le'
       ).toString('base64')
-      const commandLine = [
-        quoteCommandLine(powershellExecutable),
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy', 'Bypass',
-        '-EncodedCommand', encodedScript
-      ].join(' ')
       const script = [
-        `$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${psLiteral(commandLine)}; CurrentDirectory = ${psLiteral(binding.workingDirectory)} }`,
-        'if ([int]$created.ReturnValue -ne 0 -or -not $created.ProcessId) { exit 1 }',
-        '[Console]::Out.WriteLine([int]$created.ProcessId)'
+        `$created = Start-Process -FilePath ${psLiteral(powershellExecutable)} -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',${psLiteral(encodedScript)}) -WorkingDirectory ${psLiteral(binding.workingDirectory)} -WindowStyle Hidden -PassThru`,
+        'if (-not $created.Id) { exit 1 }',
+        '[Console]::Out.WriteLine([int]$created.Id)'
       ].join('; ')
       const launched = controllerSpawn(powershellExecutable, [
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script
@@ -388,16 +383,10 @@ export function createCodexSessionRunner(
 
   return {
     enabled() {
-      return env.HUB_SPAWN_CODEX !== '0'
+      return runtimeAvailability().enabled
     },
     available() {
-      return path.isAbsolute(options.nodeExecutable)
-        && path.isAbsolute(options.codexModule)
-        && path.isAbsolute(options.credentialHome)
-        && fs.existsSync(options.nodeExecutable)
-        && fs.existsSync(options.codexModule)
-        && fs.existsSync(path.join(options.credentialHome, 'auth.json'))
-        && fs.existsSync(controllerPath)
+      return runtimeAvailability().available
     },
     pidAlive(pid) {
       return processAlive(pid)

@@ -6,10 +6,11 @@ import type {
 } from '../application/ports.js'
 import { isPortableOpaqueIdentifier, type HubStateV2, type Sha256Identifier } from '../contracts/index.js'
 import { compareUtf8Bytes } from '../core/canonical.js'
-import { RESIDENT_SKILLS } from '../core/constants.js'
 import { projectWorktreeList } from '../core/query-projections.js'
 import type { LocalHostContext } from './host-context.js'
 import type { TransactionAwarePersistPort } from './durable-state.js'
+import { adoptedSkillNames, residentSkillNames } from './local-skill-corpus.js'
+import { canonicalLocalWorktreePath } from './local-worktree-path.js'
 import { worktreeTargetId } from './worktree-target.js'
 
 const FULL_SHA256 = /^[a-f0-9]{64}$/
@@ -29,18 +30,10 @@ function fullIdentifier(context: LocalHostContext, value: string): Sha256Identif
 }
 
 function identityFor(context: LocalHostContext, worktree: string): WorktreeIdentity {
-  const resolved = context.path.resolve(worktree)
-  if (!context.fs.isDirectory(resolved)) {
-    throw new Error('worktree identity requires an existing directory')
-  }
-  const firstRealpath = context.fs.realpath(resolved)
-  const secondRealpath = context.fs.realpath(resolved)
-  if (!firstRealpath || !secondRealpath
-    || context.path.comparisonKey(firstRealpath) !== context.path.comparisonKey(secondRealpath)
-    || !context.fs.isDirectory(firstRealpath)) {
+  const canonical = canonicalLocalWorktreePath(context, worktree)
+  if (!canonical) {
     throw new Error('worktree identity could not be resolved safely')
   }
-  const canonical = context.path.resolve(firstRealpath)
   const comparisonKey = context.path.comparisonKey(canonical)
   return {
     pathKey: fullIdentifier(context, comparisonKey),
@@ -48,24 +41,21 @@ function identityFor(context: LocalHostContext, worktree: string): WorktreeIdent
   }
 }
 
-function adoptedSkillNames(context: LocalHostContext): string[] {
-  const root = context.path.join(context.hubRoot, 'skills', 'adopted')
-  if (!context.fs.isDirectory(root)) return []
-  return context.fs.readDir(root)
-    .filter((entry) => entry.isDirectory && !entry.isSymbolicLink)
-    .map((entry) => entry.name)
-    .sort(compareUtf8Bytes)
-}
-
 function selectedLegacySkills(context: LocalHostContext, worktree: string): string[] {
-  const names = [...RESIDENT_SKILLS, ...adoptedSkillNames(context)]
-  return names.filter((name) => {
-    const source = RESIDENT_SKILLS.includes(name as (typeof RESIDENT_SKILLS)[number])
-      ? context.path.join(context.hubRoot, 'skills', name)
-      : context.path.join(context.hubRoot, 'skills', 'adopted', name)
+  const sources = [
+    ...residentSkillNames(context).map((name) => ({
+      name,
+      source: context.path.join(context.hubRoot, 'skills', name)
+    })),
+    ...adoptedSkillNames(context).map((name) => ({
+      name,
+      source: context.path.join(context.hubRoot, 'skills', 'adopted', name)
+    }))
+  ]
+  return sources.filter(({ name, source }) => {
     const target = context.path.join(worktree, '.agents', 'skills', name)
     return context.link.isLinked(target, source)
-  }).sort(compareUtf8Bytes)
+  }).map(({ name }) => name).sort(compareUtf8Bytes)
 }
 
 /**
@@ -76,10 +66,7 @@ export function localLibraryCaptureRoots(context: LocalHostContext): readonly st
   const roots: string[] = []
   const override = context.path.join(context.hubRoot, 'AGENTS.override.md')
   if (context.fs.isFile(override)) roots.push('AGENTS.override.md')
-  for (const name of RESIDENT_SKILLS) {
-    const relative = `skills/${name}`
-    if (context.fs.isDirectory(context.path.join(context.hubRoot, ...relative.split('/')))) roots.push(relative)
-  }
+  for (const name of residentSkillNames(context)) roots.push(`skills/${name}`)
   for (const name of adoptedSkillNames(context)) roots.push(`skills/adopted/${name}`)
   return roots.sort(compareUtf8Bytes)
 }

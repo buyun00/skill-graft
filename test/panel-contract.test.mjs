@@ -550,6 +550,51 @@ test('panel sources are typed-transport renderers and close terminal EventSource
   assert.doesNotMatch(source, /from ['\"]node:fs['\"]/)
 })
 
+test('panel stages status before blocking worktree and Runner diagnostics requests', () => {
+  const hubApp = fs.readFileSync(path.join(hubRoot, 'panel', 'src', 'components', 'HubApp.tsx'), 'utf8')
+  const secondaryStart = hubApp.indexOf('const loadSecondary = useCallback')
+  const primaryStart = hubApp.indexOf('const load = useCallback', secondaryStart + 1)
+  const primaryEnd = hubApp.indexOf('\n\n  useEffect', primaryStart)
+  assert.ok(secondaryStart >= 0, 'secondary loader')
+  assert.ok(primaryStart > secondaryStart, 'primary loader follows secondary definition')
+  assert.ok(primaryEnd > primaryStart, 'primary loader boundary')
+
+  const secondary = hubApp.slice(secondaryStart, primaryStart)
+  const primary = hubApp.slice(primaryStart, primaryEnd)
+  const worktreesIndex = secondary.indexOf('api.getWorktrees()')
+  const sessionsIndex = secondary.indexOf('api.getSessions()')
+  const settledIndex = secondary.indexOf('Promise.allSettled([worktreesRequest, sessionsRequest])')
+  const diagnosticsIndex = secondary.indexOf('api.getDiagnostics()')
+  assert.ok(worktreesIndex >= 0, 'worktree request is secondary')
+  assert.ok(sessionsIndex >= 0, 'sessions request is secondary')
+  assert.ok(settledIndex > worktreesIndex && settledIndex > sessionsIndex, 'wait for secondary requests')
+  assert.ok(diagnosticsIndex > settledIndex, 'Runner diagnostics is last')
+  assert.match(secondary, /generation !== loadGeneration\.current/)
+
+  assert.match(primary, /const stateValue = await api\.getState\(\)/)
+  assert.match(primary, /afterNextPaint\(\(\) =>/)
+  assert.match(primary, /void loadSecondary\(generation\)/)
+  assert.doesNotMatch(primary, /api\.(?:getHealth|getWorktrees|getSessions|getDiagnostics)\(/)
+  assert.match(hubApp, /正在加载技能库状态/)
+  assert.doesNotMatch(hubApp, /正在执行 typed status/)
+})
+
+test('overview UI separates library, attached Skills, repository selection, and Runner health', () => {
+  const vendorRoot = path.join(hubRoot, 'panel', 'vendor', 'graft-glass-ui', 'src', 'components', 'hub')
+  const statusBar = fs.readFileSync(path.join(vendorRoot, 'StatusBar.tsx'), 'utf8')
+  const hubShell = fs.readFileSync(path.join(vendorRoot, 'HubShell.tsx'), 'utf8')
+  const hubEmpty = fs.readFileSync(path.join(vendorRoot, 'HubEmpty.tsx'), 'utf8')
+
+  for (const label of ['技能库内容', '工作树已连接 Skill', 'Git 可用性', '当前仓库', 'Codex Runner']) {
+    assert.match(statusBar, new RegExp(label), label)
+  }
+  assert.match(statusBar, /git = \{ status: "warn", label: "检测中" \}/)
+  assert.match(statusBar, /codex = \{ status: "warn", label: "检测中" \}/)
+  assert.match(hubShell, /完成前不会判定工作区正常/)
+  assert.match(hubShell, /工作树扫描失败/)
+  assert.doesNotMatch(hubEmpty, /所有工作区均已连接/)
+})
+
 test('vendored glass dependency is content-pinned and build scripts have no adjacent-repo fallback', () => {
   const panelRoot = path.join(hubRoot, 'panel')
   const vendorRoot = path.join(panelRoot, 'vendor', 'graft-glass-ui')

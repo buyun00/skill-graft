@@ -1,4 +1,0 @@
-﻿E:\ozdqp-main-ntfs
-E:\ozdqp-main-fix
-E:\ozdqp-startup-download-trace
-E:\ozdqp-cli-attach-probe

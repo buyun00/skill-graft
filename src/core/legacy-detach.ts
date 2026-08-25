@@ -2,7 +2,6 @@ import type {
   ApprovedLegacyDetachPlan,
   LegacyDetachInspection
 } from '../contracts/index.js'
-import { KEPT_AGENT_SKILLS } from './constants.js'
 import { recognizeWorktree, type ConflictKind } from './policies.js'
 
 export type LegacyDetachPlanInput = {
@@ -27,12 +26,7 @@ function normalizedRelativeIdentity(value: string): string {
   return value.replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '')
 }
 
-function agentSkillName(relative: string): string | null {
-  const match = normalizedRelativeIdentity(relative).match(/^\.agents\/skills\/([^/]+)(?:\/|$)/i)
-  return match ? match[1].toLowerCase() : null
-}
-
-function isRestorableAssistantPath(relative: string, keptSkillNames: ReadonlySet<string>): boolean {
+function isRestorableAssistantPath(relative: string): boolean {
   // Fixed legacy assistant namespaces are intentionally classified without
   // case sensitivity. Path identity below remains case-sensitive so POSIX
   // paths such as .claude/A and .claude/a are never collapsed together.
@@ -42,8 +36,7 @@ function isRestorableAssistantPath(relative: string, keptSkillNames: ReadonlySet
   if (value === '.codex/scripts' || value.startsWith('.codex/scripts/')) return true
   if (value === '.codex/skills' || value.startsWith('.codex/skills/')) return true
   if (value === '.codex/cursor-rules.env') return true
-  const skillName = agentSkillName(value)
-  return Boolean(skillName && !keptSkillNames.has(skillName))
+  return false
 }
 
 function overlaps(left: string, right: string): boolean {
@@ -89,20 +82,16 @@ export function planLegacyDetach(input: LegacyDetachPlanInput): LegacyDetachPlan
     artifacts.push({ ...fact, action: 'unlink' })
   }
 
-  const adoptedNames = input.inspection.artifacts
-    .filter((artifact) => artifact.kind === 'adoptedSkill' && artifact.name)
-    .map((artifact) => String(artifact.name).toLowerCase())
-  const keptSkillNames = new Set([...KEPT_AGENT_SKILLS.map((name) => name.toLowerCase()), ...adoptedNames])
   const unlinkTargets = artifacts
     .filter((artifact) => artifact.action === 'unlink')
     .map((artifact) => artifact.targetRelativePath)
   const managedTargets = artifacts.map((artifact) => artifact.targetRelativePath)
   const restorePaths = uniqueSorted(input.inspection.trackedAssistantPaths.filter((relative) => (
-    isRestorableAssistantPath(relative, keptSkillNames)
+    isRestorableAssistantPath(relative)
       || managedTargets.some((target) => overlaps(relative, target))
   )))
   const unexpected = input.inspection.presentAssistantPaths
-    .filter((relative) => isRestorableAssistantPath(relative, keptSkillNames)
+    .filter((relative) => isRestorableAssistantPath(relative)
       || unlinkTargets.some((target) => overlaps(relative, target)))
     .filter((relative) => !unlinkTargets.some((target) => overlaps(relative, target)))
     .find((present) => restorePaths.some((tracked) => overlaps(present, tracked)))

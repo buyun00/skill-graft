@@ -1,10 +1,8 @@
-export const RESIDENT_SKILLS = [
-  'ozdqp-development',
-  'ozdqp-ui-development',
-  'ozdqp-git-workflow'
-] as const
+/** @deprecated Resident Skill truth is enumerated from the user's data root. */
+export const RESIDENT_SKILLS = [] as const
 
-export const KEPT_AGENT_SKILLS = [...RESIDENT_SKILLS, 'unity-skills'] as const
+/** @deprecated Project-owned unity-skills remains protected, not resident. */
+export const KEPT_AGENT_SKILLS = ['unity-skills'] as const
 
 export const EXCLUDED_CHECKOUT_NAMES = ['ozdqp-skill-hub', 'ozdqp-skill-overlay-kit'] as const
 

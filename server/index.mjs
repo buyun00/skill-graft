@@ -442,15 +442,19 @@ function createApplicationBridge(host, packageRoot, dataRoot, getDiagnostics, ge
   }
 
   async function executeTyped(command) {
-    if (command.kind === 'status' || command.kind === 'listSessions' || command.kind === 'getSession') {
-      const sessionIds = command.kind === 'getSession' && command.sessionId ? [command.sessionId] : undefined
+    const queryNeedsRefresh = command.kind === 'status'
+      || command.kind === 'listSessions'
+      || command.kind === 'getSession'
+    const scopedSessionId = command.kind !== 'reapSessions' && typeof command.sessionId === 'string'
+      && command.sessionId ? command.sessionId : ''
+    if (queryNeedsRefresh || scopedSessionId) {
+      const sessionIds = scopedSessionId ? [scopedSessionId] : undefined
       if (host.localSessions?.needsReap(sessionIds)) {
-        const reaped = await host.application.execute({
+        await host.application.execute({
           kind: 'reapSessions',
           meta: host.commandMeta('http-session-reap'),
           sessionIds
         })
-        if (!reaped.ok) return reaped
       }
     }
     return host.application.execute(command)

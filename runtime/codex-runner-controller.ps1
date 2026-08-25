@@ -12,6 +12,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -209,7 +210,7 @@ namespace SkillGraft.LocalRunner
                 sequence += 1;
                 StringBuilder text = new StringBuilder();
                 text.Append("{\"eventVersion\":1,\"sequence\":").Append(sequence);
-                text.Append(",\"at\":\"").Append(Escape(DateTime.UtcNow.ToString("o"))).Append("\"");
+                text.Append(",\"at\":\"").Append(Escape(DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))).Append("\"");
                 text.Append(",\"type\":\"").Append(Escape(type)).Append("\"");
                 Add(text, "threadId", threadId);
                 Add(text, "itemType", itemType);
@@ -245,7 +246,7 @@ namespace SkillGraft.LocalRunner
             int childPid = 0;
             int exitCode = -1;
             bool cancellationRequested = false;
-            string startedAt = DateTime.UtcNow.ToString("o");
+            string startedAt = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
             string errorText = null;
             IntPtr job = IntPtr.Zero;
             Process child = null;
@@ -380,7 +381,7 @@ namespace SkillGraft.LocalRunner
                     if (child != null) child.Dispose();
                 }
 
-                string endedAt = DateTime.UtcNow.ToString("o");
+                string endedAt = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
                 string state = cancellationRequested ? "cancelled" : errorText != null ? "failed" : "exited";
                 WriteReceipt(
                     receiptPath,

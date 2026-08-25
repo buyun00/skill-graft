@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CommandPalette,
   HubShell,
@@ -37,6 +37,14 @@ function readLoc(): Loc {
   return { path: window.location.pathname || "/", search: window.location.search || "" };
 }
 
+function afterNextPaint(run: () => void) {
+  if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(() => run());
+    return;
+  }
+  setTimeout(run, 0);
+}
+
 export function HubApp() {
   const { toast } = useToast();
   const [loc, setLoc] = useState<Loc>({ path: "/", search: "" });
@@ -48,13 +56,15 @@ export function HubApp() {
   const [busy, setBusy] = useState(false);
   const [busyPath, setBusyPath] = useState("");
   const [queued, setQueued] = useState<Record<string, ReturnType<typeof queuedSessionView>>>({});
-  const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [state, setState] = useState<Record<string, unknown> | null>(null);
   const [worktrees, setWorktrees] = useState<Record<string, unknown> | null>(null);
+  const [worktreesLoading, setWorktreesLoading] = useState(false);
+  const [worktreesError, setWorktreesError] = useState("");
   const [daemon, setDaemon] = useState<Record<string, unknown> | null>(null);
   const [diagnostics, setDiagnostics] = useState<Record<string, unknown> | null>(null);
+  const [diagnosticsChecked, setDiagnosticsChecked] = useState(false);
   const [sessionsPayload, setSessionsPayload] = useState<{ sessions?: unknown[] } | null>(null);
-  const [sessionsReachable, setSessionsReachable] = useState(false);
+  const loadGeneration = useRef(0);
 
   const push = useCallback((href: string) => {
     const url = new URL(href, window.location.origin);
@@ -71,55 +81,97 @@ export function HubApp() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const loadSecondary = useCallback(async (generation: number) => {
+    if (generation !== loadGeneration.current) return;
+
+    const worktreesRequest = api.getWorktrees()
+      .then((value) => {
+        if (generation !== loadGeneration.current) return;
+        setWorktrees(value);
+        setWorktreesError("");
+      })
+      .catch((err) => {
+        if (generation !== loadGeneration.current) return;
+        setWorktrees(null);
+        setWorktreesError(String((err as Error).message || err));
+      })
+      .finally(() => {
+        if (generation === loadGeneration.current) setWorktreesLoading(false);
+      });
+
+    const sessionsRequest = api.getSessions()
+      .then((value) => {
+        if (generation === loadGeneration.current) setSessionsPayload(value);
+      })
+      .catch(() => {
+        if (generation === loadGeneration.current) setSessionsPayload(null);
+      });
+
+    await Promise.allSettled([worktreesRequest, sessionsRequest]);
+    if (generation !== loadGeneration.current) return;
+
     try {
-      const [healthValue, stateValue, worktreesValue, diagnosticsValue] = await Promise.all([
-        api.getHealth().catch(() => ({ ok: false })),
-        api.getState(),
-        api.getWorktrees(),
-        api.getDiagnostics().catch(() => ({ ok: false })),
-      ]);
-      setHealth(healthValue);
-      setState(stateValue);
-      setWorktrees(worktreesValue);
+      const diagnosticsValue = await api.getDiagnostics();
+      if (generation !== loadGeneration.current) return;
       setDiagnostics(diagnosticsValue);
       setDaemon(
         diagnosticsValue && typeof diagnosticsValue.daemon === "object"
           ? diagnosticsValue.daemon as Record<string, unknown>
           : { ok: false },
       );
-      try {
-        const sessionsValue = await api.getSessions();
-        setSessionsPayload(sessionsValue);
-        setSessionsReachable(true);
-      } catch {
-        setSessionsPayload(null);
-        setSessionsReachable(false);
-      }
-    } catch (err) {
-      setError(String((err as Error).message || err));
+    } catch {
+      if (generation !== loadGeneration.current) return;
+      setDiagnostics(null);
+      setDaemon({ ok: false });
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setDiagnosticsChecked(true);
     }
   }, []);
 
+  const load = useCallback(async () => {
+    const generation = loadGeneration.current + 1;
+    loadGeneration.current = generation;
+    setLoading(true);
+    setError("");
+    setWorktreesLoading(false);
+    setDiagnostics(null);
+    setDiagnosticsChecked(false);
+    setDaemon(null);
+    try {
+      const stateValue = await api.getState();
+      if (generation !== loadGeneration.current) return;
+      setState(stateValue);
+      setLoading(false);
+      setWorktreesLoading(true);
+      setWorktreesError("");
+      afterNextPaint(() => {
+        if (generation === loadGeneration.current) void loadSecondary(generation);
+      });
+    } catch (err) {
+      if (generation !== loadGeneration.current) return;
+      setError(String((err as Error).message || err));
+      setLoading(false);
+    }
+  }, [loadSecondary]);
+
   useEffect(() => {
     void load();
+    return () => {
+      loadGeneration.current += 1;
+    };
   }, [load]);
 
   const overview = useMemo(
     () =>
       mapOverview({
         state,
+        stateChecked: !loading,
         worktrees,
-        health,
-        daemon,
-        sessions: sessionsPayload,
-        sessionsReachable,
+        worktreesPhase: worktreesLoading ? "loading" : worktreesError ? "error" : worktrees ? "ready" : "loading",
+        diagnostics,
+        diagnosticsChecked,
       }),
-    [state, worktrees, health, daemon, sessionsPayload, sessionsReachable],
+    [state, loading, worktrees, worktreesLoading, worktreesError, diagnostics, diagnosticsChecked],
   );
 
   const nav = navFromPath(loc.path) as HubNavId;
@@ -247,9 +299,14 @@ export function HubApp() {
     stats: overview.stats,
     attention: overview.attention,
     workspaces: overview.workspaces,
+    librarySkillCount: state ? overview.librarySkillCount : undefined,
+    connectedSkillCount: state ? overview.connectedSkillCount : undefined,
     git: overview.git as { status: HubStatus; label: string },
+    repository: overview.repository as { status: HubStatus; label: string },
     codex: overview.codex as { status: HubStatus; label: string },
     storage: overview.storage,
+    workspacesLoading: worktreesLoading,
+    workspacesError: worktreesError,
     onNavigate: (id: HubNavId) => push(hrefForNav(id)),
     onSearch: () => setPaletteOpen(true),
     onCreate: () => push("/codex"),
@@ -274,7 +331,12 @@ export function HubApp() {
 
   const inner = (() => {
     if (loading && !state) {
-      return <div className="glass rounded-[22px] p-8 text-ink/45">正在执行 typed status…</div>;
+      return (
+        <div className="glass rounded-[22px] p-8 text-ink/45">
+          <div className="text-[15px] font-[600] text-ink/65">正在加载技能库状态…</div>
+          <div className="mt-2 text-[12.5px]">阶段 1/3 · 工作树扫描与 Runner 检测将在首屏状态显示后继续。</div>
+        </div>
+      );
     }
     if (error && !state) {
       return <div className="glass rounded-[22px] p-8 text-orange-600">{error}</div>;
@@ -391,7 +453,10 @@ export function HubApp() {
         <HubShell {...shell}>
           {inner}
           <StatusBar
+            librarySkillCount={state ? overview.librarySkillCount : undefined}
+            connectedSkillCount={state ? overview.connectedSkillCount : undefined}
             git={overview.git as { status: HubStatus; label: string }}
+            repository={overview.repository as { status: HubStatus; label: string }}
             codex={overview.codex as { status: HubStatus; label: string }}
             storage={overview.storage}
             onRefresh={() => void load()}
