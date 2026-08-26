@@ -651,7 +651,7 @@ test('installed shims pass coherent primary and compatibility roots to the child
   fs.mkdirSync(path.dirname(cliPath), { recursive: true })
   fs.writeFileSync(cliPath, [
     "const fs = require('node:fs')",
-    "fs.writeFileSync(process.argv[2], JSON.stringify({ primary: process.env.SKILL_GRAFT_HOME, legacy: process.env.HUB_ROOT }))"
+    "fs.writeFileSync(process.argv[2], JSON.stringify({ primary: process.env.SKILL_GRAFT_HOME, legacy: process.env.HUB_ROOT, HUB_CODEX_NODE: process.env.HUB_CODEX_NODE ?? null, HUB_CODEX_MODULE: process.env.HUB_CODEX_MODULE ?? null, HUB_CODEX_CREDENTIAL_HOME: process.env.HUB_CODEX_CREDENTIAL_HOME ?? null }))"
   ].join('\n'))
   const paths = resolveInstallPaths(pathApi, {
     hubRoot: packageRoot,
@@ -679,23 +679,62 @@ test('installed shims pass coherent primary and compatibility roots to the child
       })
 
   const defaultMarker = path.join(root, 'default-child.json')
-  const defaultRun = run(defaultMarker, withoutDataRootEnvironment())
+  const hostileRunnerEnvironment = {
+    HUB_CODEX_NODE: path.join(root, 'hostile', 'node.exe'),
+    HUB_CODEX_MODULE: path.join(root, 'hostile', 'codex.js'),
+    HUB_CODEX_CREDENTIAL_HOME: path.join(root, 'hostile', 'credentials')
+  }
+  const defaultRun = run(defaultMarker, withoutDataRootEnvironment(hostileRunnerEnvironment))
   assert.equal(defaultRun.status, 0, defaultRun.stderr || defaultRun.stdout)
   assert.deepEqual(JSON.parse(fs.readFileSync(defaultMarker, 'utf8')), {
     primary: path.resolve(dataRoot),
-    legacy: path.resolve(dataRoot)
+    legacy: path.resolve(dataRoot),
+    HUB_CODEX_NODE: null,
+    HUB_CODEX_MODULE: null,
+    HUB_CODEX_CREDENTIAL_HOME: null
   })
 
   const legacyRoot = path.join(root, 'legacy-only')
   const legacyMarker = path.join(root, 'legacy-child.json')
-  const legacyRun = run(legacyMarker, withoutDataRootEnvironment({ HUB_ROOT: legacyRoot }))
+  const legacyRun = run(legacyMarker, withoutDataRootEnvironment({
+    HUB_ROOT: legacyRoot,
+    ...hostileRunnerEnvironment
+  }))
   assert.equal(legacyRun.status, 0, legacyRun.stderr || legacyRun.stdout)
   assert.deepEqual(
     JSON.parse(fs.readFileSync(legacyMarker, 'utf8')),
     process.platform === 'win32'
-      ? { legacy: legacyRoot }
-      : { primary: legacyRoot, legacy: legacyRoot }
+      ? {
+          legacy: legacyRoot,
+          HUB_CODEX_NODE: null,
+          HUB_CODEX_MODULE: null,
+          HUB_CODEX_CREDENTIAL_HOME: null
+        }
+      : {
+          primary: legacyRoot,
+          legacy: legacyRoot,
+          HUB_CODEX_NODE: null,
+          HUB_CODEX_MODULE: null,
+          HUB_CODEX_CREDENTIAL_HOME: null
+        }
   )
+
+  const runnerPins = {
+    HUB_CODEX_NODE: path.join(root, 'fixed', 'node.exe'),
+    HUB_CODEX_MODULE: path.join(root, 'fixed', 'codex.js'),
+    HUB_CODEX_CREDENTIAL_HOME: path.join(root, 'fixed', 'credentials')
+  }
+  const fixedShims = renderShims(paths, undefined, runnerPins)
+  fs.writeFileSync(paths.shimCmd, fixedShims.sgCmd)
+  fs.writeFileSync(paths.shimUnix, fixedShims.unix, { mode: 0o700 })
+  const fixedMarker = path.join(root, 'fixed-child.json')
+  const fixedRun = run(fixedMarker, withoutDataRootEnvironment(hostileRunnerEnvironment))
+  assert.equal(fixedRun.status, 0, fixedRun.stderr || fixedRun.stdout)
+  assert.deepEqual(JSON.parse(fs.readFileSync(fixedMarker, 'utf8')), {
+    primary: path.resolve(dataRoot),
+    legacy: path.resolve(dataRoot),
+    ...runnerPins
+  })
 })
 
 test('Unix shim single-quotes fallback roots containing shell metacharacters', (t) => {
@@ -712,7 +751,7 @@ test('Unix shim single-quotes fallback roots containing shell metacharacters', (
   fs.mkdirSync(path.dirname(cliPath), { recursive: true })
   fs.writeFileSync(cliPath, [
     "const fs = require('node:fs')",
-    "fs.writeFileSync(process.env.SG_UNIX_SHIM_MARKER, JSON.stringify({ primary: process.env.SKILL_GRAFT_HOME, legacy: process.env.HUB_ROOT }))"
+    "fs.writeFileSync(process.env.SG_UNIX_SHIM_MARKER, JSON.stringify({ primary: process.env.SKILL_GRAFT_HOME, legacy: process.env.HUB_ROOT, HUB_CODEX_NODE: process.env.HUB_CODEX_NODE ?? null, HUB_CODEX_MODULE: process.env.HUB_CODEX_MODULE ?? null, HUB_CODEX_CREDENTIAL_HOME: process.env.HUB_CODEX_CREDENTIAL_HOME ?? null }))"
   ].join('\n'))
   const basePaths = resolveInstallPaths(pathApi, {
     hubRoot: packageRoot,
@@ -730,17 +769,51 @@ test('Unix shim single-quotes fallback roots containing shell metacharacters', (
     cwd: root,
     encoding: 'utf8',
     windowsHide: true,
-    env: withoutDataRootEnvironment({ SG_UNIX_SHIM_MARKER: marker })
+    env: withoutDataRootEnvironment({
+      SG_UNIX_SHIM_MARKER: marker,
+      HUB_CODEX_NODE: '/hostile/node',
+      HUB_CODEX_MODULE: '/hostile/codex.js',
+      HUB_CODEX_CREDENTIAL_HOME: '/hostile/credentials'
+    })
   })
 
   assert.equal(result.status, 0, result.stderr || result.stdout)
   assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), {
     primary: fallbackRoot,
-    legacy: fallbackRoot
+    legacy: fallbackRoot,
+    HUB_CODEX_NODE: null,
+    HUB_CODEX_MODULE: null,
+    HUB_CODEX_CREDENTIAL_HOME: null
   })
   assert.doesNotMatch(shim, /\$\{(?:SKILL_GRAFT_HOME|HUB_ROOT):-/)
   assert.match(shim, /SKILL_GRAFT_HOME='\/tmp\/skill } space \$ ` back/)
   assert.match(shim, /'\\''/)
+
+  const fixedMarker = path.join(root, 'unix-fixed-child.json')
+  const runnerPins = {
+    HUB_CODEX_NODE: path.join(root, "fixed node's executable"),
+    HUB_CODEX_MODULE: path.join(root, 'fixed codex.js'),
+    HUB_CODEX_CREDENTIAL_HOME: path.join(root, 'fixed credentials')
+  }
+  const fixedShim = renderShims(paths, undefined, runnerPins).unix
+  fs.writeFileSync(paths.shimUnix, fixedShim, { mode: 0o700 })
+  const fixed = spawnSync(shell, [toGitBashPath(paths.shimUnix), 'probe'], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+    env: withoutDataRootEnvironment({
+      SG_UNIX_SHIM_MARKER: fixedMarker,
+      HUB_CODEX_NODE: '/hostile/node',
+      HUB_CODEX_MODULE: '/hostile/codex.js',
+      HUB_CODEX_CREDENTIAL_HOME: '/hostile/credentials'
+    })
+  })
+  assert.equal(fixed.status, 0, fixed.stderr || fixed.stdout)
+  assert.deepEqual(JSON.parse(fs.readFileSync(fixedMarker, 'utf8')), {
+    primary: fallbackRoot,
+    legacy: fallbackRoot,
+    ...runnerPins
+  })
 })
 
 test('trace run-daemon launcher assigns each data-root alias exactly once and fake CLI receives the fixed root', {
@@ -820,7 +893,7 @@ test('Windows run-daemon launcher pins lifecycle HOME authority instead of inher
   fs.mkdirSync(path.dirname(cliPath), { recursive: true })
   fs.writeFileSync(cliPath, [
     "const fs = require('node:fs')",
-    "fs.writeFileSync(process.env.SG_RUN_DAEMON_MARKER, JSON.stringify({ HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, APPDATA: process.env.APPDATA, LOCALAPPDATA: process.env.LOCALAPPDATA, TEMP: process.env.TEMP, TMP: process.env.TMP }))"
+    "fs.writeFileSync(process.env.SG_RUN_DAEMON_MARKER, JSON.stringify({ HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, APPDATA: process.env.APPDATA, LOCALAPPDATA: process.env.LOCALAPPDATA, TEMP: process.env.TEMP, TMP: process.env.TMP, HUB_CODEX_NODE: process.env.HUB_CODEX_NODE ?? null, HUB_CODEX_MODULE: process.env.HUB_CODEX_MODULE ?? null, HUB_CODEX_CREDENTIAL_HOME: process.env.HUB_CODEX_CREDENTIAL_HOME ?? null }))"
   ].join('\n'))
   const paths = resolveInstallPaths(pathApi, {
     hubRoot: packageRoot,
@@ -835,12 +908,20 @@ test('Windows run-daemon launcher pins lifecycle HOME authority instead of inher
     APPDATA: path.join(root, 'lifecycle-home', 'appdata'),
     LOCALAPPDATA: path.join(root, 'lifecycle-home', 'localappdata'),
     TEMP: path.join(root, 'lifecycle-home', 'temp'),
-    TMP: path.join(root, 'lifecycle-home', 'temp')
+    TMP: path.join(root, 'lifecycle-home', 'temp'),
+    HUB_CODEX_NODE: path.join(root, 'runtime', 'node.exe'),
+    HUB_CODEX_MODULE: path.join(root, 'runtime', 'codex.js'),
+    HUB_CODEX_CREDENTIAL_HOME: path.join(root, 'runtime', 'credentials')
   }
   fs.mkdirSync(launcherEnvironment.TEMP, { recursive: true })
   const launcher = renderShims(paths, undefined, launcherEnvironment).runDaemonCmd
+  const runnerNames = new Set(['HUB_CODEX_NODE', 'HUB_CODEX_MODULE', 'HUB_CODEX_CREDENTIAL_HOME'])
   for (const name of Object.keys(launcherEnvironment)) {
-    assert.equal((launcher.match(new RegExp(`^set "${name}=`, 'gm')) || []).length, 1, name)
+    assert.equal(
+      (launcher.match(new RegExp(`^set "${name}=`, 'gm')) || []).length,
+      runnerNames.has(name) ? 2 : 1,
+      name
+    )
   }
   assert.throws(
     () => renderShims(paths, undefined, { HOME: `${launcherEnvironment.HOME}"hostile` }),
@@ -865,12 +946,47 @@ test('Windows run-daemon launcher pins lifecycle HOME authority instead of inher
       LOCALAPPDATA: path.join(inheritedRoot, 'localappdata'),
       TEMP: path.join(inheritedRoot, 'temp'),
       TMP: path.join(inheritedRoot, 'temp'),
+      HUB_CODEX_NODE: path.join(inheritedRoot, 'node.exe'),
+      HUB_CODEX_MODULE: path.join(inheritedRoot, 'codex.js'),
+      HUB_CODEX_CREDENTIAL_HOME: path.join(inheritedRoot, 'credentials'),
       SG_RUN_DAEMON_MARKER: marker
     }
   })
 
   assert.equal(result.status, 0, result.stderr || result.stdout)
   assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), launcherEnvironment)
+
+  const {
+    HUB_CODEX_NODE: _node,
+    HUB_CODEX_MODULE: _module,
+    HUB_CODEX_CREDENTIAL_HOME: _credentialHome,
+    ...launcherWithoutRunner
+  } = launcherEnvironment
+  const failClosedLauncher = renderShims(paths, undefined, launcherWithoutRunner).runDaemonCmd
+  for (const name of runnerNames) {
+    assert.equal((failClosedLauncher.match(new RegExp(`^set "${name}=`, 'gm')) || []).length, 1, name)
+    assert.match(failClosedLauncher, new RegExp(`^set "${name}="$`, 'm'), `${name} clear`)
+  }
+  fs.writeFileSync(paths.runDaemonCmd, failClosedLauncher)
+  const failClosed = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', paths.runDaemonCmd], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+    env: {
+      ...process.env,
+      HUB_CODEX_NODE: path.join(inheritedRoot, 'hostile-node.exe'),
+      HUB_CODEX_MODULE: path.join(inheritedRoot, 'hostile-codex.js'),
+      HUB_CODEX_CREDENTIAL_HOME: path.join(inheritedRoot, 'hostile-credentials'),
+      SG_RUN_DAEMON_MARKER: marker
+    }
+  })
+  assert.equal(failClosed.status, 0, failClosed.stderr || failClosed.stdout)
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), {
+    ...launcherWithoutRunner,
+    HUB_CODEX_NODE: null,
+    HUB_CODEX_MODULE: null,
+    HUB_CODEX_CREDENTIAL_HOME: null
+  })
 
 })
 

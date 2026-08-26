@@ -109,14 +109,19 @@ test('Local release tarball is a clean built distribution without source or mach
     'C:\\Users\\win11',
     'C:/Users/win11'
   ]
+  const privateSkillMarkers = [
+    'ozdqp-development',
+    'ozdqp-ui-development',
+    'ozdqp-git-workflow'
+  ]
   for (const relative of files) {
     const file = path.join(hubRoot, ...relative.split('/'))
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue
     const bytes = fs.readFileSync(file)
     if (bytes.includes(0)) continue
     const text = bytes.toString('utf8')
-    for (const marker of privateMarkers) {
-      assert.equal(text.includes(marker), false, `${relative} contains private machine path ${marker}`)
+    for (const marker of [...privateMarkers, ...privateSkillMarkers]) {
+      assert.equal(text.includes(marker), false, `${relative} contains private release marker ${marker}`)
     }
   }
 })

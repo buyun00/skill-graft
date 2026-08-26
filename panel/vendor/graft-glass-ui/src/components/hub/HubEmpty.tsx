@@ -4,8 +4,8 @@ import { IconCheck, IconSparkle } from "@/components/icons";
 import { Button } from "@/components/ui/Button";
 
 export function HubEmpty({
-  title = "一切正常",
-  description = "没有待处理的更新或问题，所有工作区均已连接。",
+  title = "当前无待处理项",
+  description = "当前技能库更新与已识别工作树没有需要处理的问题。",
   actionLabel = "打开 Codex 助手",
   onAction,
 }: {
@@ -27,9 +27,11 @@ export function HubEmpty({
       </div>
       <h2 className="text-[20px] font-[600] tracking-[-0.02em] text-ink mb-2">{title}</h2>
       <p className="text-[14px] text-ink/45 max-w-[380px] mb-6">{description}</p>
-      <Button variant="glass" icon={<IconSparkle size={14} />} onClick={onAction}>
-        {actionLabel}
-      </Button>
+      {actionLabel ? (
+        <Button variant="glass" icon={<IconSparkle size={14} />} onClick={onAction}>
+          {actionLabel}
+        </Button>
+      ) : null}
     </section>
   );
 }

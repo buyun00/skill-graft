@@ -337,7 +337,7 @@ namespace SkillGraft.LocalRunner
 
                     child.BeginOutputReadLine();
                     child.BeginErrorReadLine();
-                    using (StreamReader prompt = new StreamReader(promptPath, Utf8, true))
+                    using (FileStream prompt = new FileStream(promptPath, FileMode.Open, FileAccess.Read, FileShare.Read))
                     {
                         // .NET Framework (used by Windows PowerShell 5.1) has no
                         // ProcessStartInfo.StandardInputEncoding.  Write UTF-8

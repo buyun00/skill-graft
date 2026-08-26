@@ -115,10 +115,16 @@ export function createLocalSessionBinding(
       const sessionRoot = path.dirname(path.dirname(attemptRoot))
       const codexHome = path.join(sessionRoot, 'codex-home')
       const isolatedHome = path.join(sessionRoot, 'home')
+      const isolatedRoaming = path.join(isolatedHome, 'AppData', 'Roaming')
+      const isolatedLocal = path.join(isolatedHome, 'AppData', 'Local')
+      const isolatedConfig = path.join(isolatedHome, '.config')
       const isolatedTemp = path.join(isolatedHome, 'Temp')
       fs.mkdirSync(attemptRoot, { recursive: true })
       fs.mkdirSync(codexHome, { recursive: true })
       fs.mkdirSync(isolatedHome, { recursive: true })
+      fs.mkdirSync(isolatedRoaming, { recursive: true })
+      fs.mkdirSync(isolatedLocal, { recursive: true })
+      fs.mkdirSync(isolatedConfig, { recursive: true })
       fs.mkdirSync(isolatedTemp, { recursive: true })
 
       const authSource = path.isAbsolute(options.credentialHome)
@@ -161,9 +167,9 @@ export function createLocalSessionBinding(
           CODEX_HOME: codexHome,
           HOME: isolatedHome,
           USERPROFILE: isolatedHome,
-          APPDATA: path.join(isolatedHome, 'AppData', 'Roaming'),
-          LOCALAPPDATA: path.join(isolatedHome, 'AppData', 'Local'),
-          XDG_CONFIG_HOME: path.join(isolatedHome, '.config'),
+          APPDATA: isolatedRoaming,
+          LOCALAPPDATA: isolatedLocal,
+          XDG_CONFIG_HOME: isolatedConfig,
           TEMP: isolatedTemp,
           TMP: isolatedTemp,
           SKILL_GRAFT_HOME: ctx.hubRoot,

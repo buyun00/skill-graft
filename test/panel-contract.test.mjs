@@ -71,6 +71,14 @@ function applicationData(kind, body) {
   switch (kind) {
     case 'status': return { hubRoot: 'C:\\hub', counts: { resident: 1, adopted: 0, queued: 0, proposed: 0 }, items: [] }
     case 'listWorktrees': return { scanRoots: [], worktrees: [] }
+    case 'registerWorktree':
+      return {
+        action: kind,
+        worktree: body.worktree,
+        changed: true,
+        scanRoots: [],
+        worktrees: [{ name: 'worktree', path: body.worktree }]
+      }
     case 'readSkill': return { path: body.path, content: '# skill' }
     case 'listHistory': return { records: [{ id: 'history-1', type: 'sync' }] }
     case 'listSessions': return { sessions: [session('chat', 'session-1')] }
@@ -192,6 +200,7 @@ test('panel API uses the typed Application envelope for Local operations', async
   assert.equal((await api.getDaemon()).ok, false)
   await api.getState()
   await api.getWorktrees()
+  await api.registerWorktree(worktree, { requestId: 'register-worktree-request' })
   await api.getSkill('skills/ozdqp-development')
   await api.getHistory()
   await api.getSessions()
@@ -210,6 +219,7 @@ test('panel API uses the typed Application envelope for Local operations', async
   const attached = await api.attachWorktree(worktree, 'contract attach')
   const detached = await api.detachWorktree(worktree, 'contract detach')
   const started = await api.startCodex({ kind: 'chat', intent: 'hello' })
+  await api.startCodex({ kind: 'chat', intent: 'worktree hello', worktree })
   const resumed = await api.resumeCodex('session-1', 'continue')
   const cancelled = await api.cancelCodex('session-1', 'panel requested cancellation')
 
@@ -222,6 +232,11 @@ test('panel API uses the typed Application envelope for Local operations', async
 
   assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'status')[0]), { kind: 'status' })
   assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'listWorktrees')[0]), { kind: 'listWorktrees' })
+  assert.deepEqual(commandBodies(seen, 'registerWorktree')[0], {
+    kind: 'registerWorktree',
+    worktree,
+    requestId: 'register-worktree-request'
+  })
   assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'readSkill')[0]), {
     kind: 'readSkill',
     path: 'skills/ozdqp-development'
@@ -295,11 +310,10 @@ test('panel API uses the typed Application envelope for Local operations', async
     worktree,
     intent: 'contract detach'
   })
-  assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'chat')[0]), {
-    kind: 'chat',
-    intent: 'hello',
-    runner: {}
-  })
+  assert.deepEqual(commandBodies(seen, 'chat').map(withoutGeneratedRequestId), [
+    { kind: 'chat', intent: 'hello', runner: {} },
+    { kind: 'chat', intent: 'worktree hello', worktree, runner: {} }
+  ])
   assert.deepEqual(withoutGeneratedRequestId(commandBodies(seen, 'resumeSession')[0]), {
     kind: 'resumeSession',
     sessionId: 'session-1',
@@ -531,6 +545,7 @@ test('panel sources are typed-transport renderers and close terminal EventSource
     'sync',
     'migrateLegacy',
     'rollbackLegacyMigration',
+    'registerWorktree',
     'listHistory'
   ]) {
     assert.match(source, new RegExp(`['\"]${kind}['\"]`), kind)
@@ -540,6 +555,10 @@ test('panel sources are typed-transport renderers and close terminal EventSource
   assert.match(source, /addEventListener\("session"/)
   assert.match(source, /addEventListener\("end"/)
   assert.match(source, /cancelSession/)
+  assert.match(source, /添加并选择/)
+  assert.match(source, /具体 Git 工作树根目录的绝对路径/)
+  assert.match(source, /只登记这个工作树，不会扫描同级目录/)
+  assert.match(source, /Hub 闲聊（无需工作树）/)
   assert.match(source, /source\.close\(\)/)
   assert.doesNotMatch(source, /\/api\/(?:state|worktrees|decide|analyze|codex\/start|codex\/resume|worktree\/attach|worktree\/detach)/)
   assert.doesNotMatch(source, /src\/core/)
@@ -548,6 +567,51 @@ test('panel sources are typed-transport renderers and close terminal EventSource
   assert.doesNotMatch(source, /认仓/)
   assert.doesNotMatch(source, /createHub/)
   assert.doesNotMatch(source, /from ['\"]node:fs['\"]/)
+})
+
+test('panel stages status before blocking worktree and Runner diagnostics requests', () => {
+  const hubApp = fs.readFileSync(path.join(hubRoot, 'panel', 'src', 'components', 'HubApp.tsx'), 'utf8')
+  const secondaryStart = hubApp.indexOf('const loadSecondary = useCallback')
+  const primaryStart = hubApp.indexOf('const load = useCallback', secondaryStart + 1)
+  const primaryEnd = hubApp.indexOf('\n\n  useEffect', primaryStart)
+  assert.ok(secondaryStart >= 0, 'secondary loader')
+  assert.ok(primaryStart > secondaryStart, 'primary loader follows secondary definition')
+  assert.ok(primaryEnd > primaryStart, 'primary loader boundary')
+
+  const secondary = hubApp.slice(secondaryStart, primaryStart)
+  const primary = hubApp.slice(primaryStart, primaryEnd)
+  const worktreesIndex = secondary.indexOf('api.getWorktrees()')
+  const sessionsIndex = secondary.indexOf('api.getSessions()')
+  const settledIndex = secondary.indexOf('Promise.allSettled([worktreesRequest, sessionsRequest])')
+  const diagnosticsIndex = secondary.indexOf('api.getDiagnostics()')
+  assert.ok(worktreesIndex >= 0, 'worktree request is secondary')
+  assert.ok(sessionsIndex >= 0, 'sessions request is secondary')
+  assert.ok(settledIndex > worktreesIndex && settledIndex > sessionsIndex, 'wait for secondary requests')
+  assert.ok(diagnosticsIndex > settledIndex, 'Runner diagnostics is last')
+  assert.match(secondary, /generation !== loadGeneration\.current/)
+
+  assert.match(primary, /const stateValue = await api\.getState\(\)/)
+  assert.match(primary, /afterNextPaint\(\(\) =>/)
+  assert.match(primary, /void loadSecondary\(generation\)/)
+  assert.doesNotMatch(primary, /api\.(?:getHealth|getWorktrees|getSessions|getDiagnostics)\(/)
+  assert.match(hubApp, /正在加载技能库状态/)
+  assert.doesNotMatch(hubApp, /正在执行 typed status/)
+})
+
+test('overview UI separates library, attached Skills, repository selection, and Runner health', () => {
+  const vendorRoot = path.join(hubRoot, 'panel', 'vendor', 'graft-glass-ui', 'src', 'components', 'hub')
+  const statusBar = fs.readFileSync(path.join(vendorRoot, 'StatusBar.tsx'), 'utf8')
+  const hubShell = fs.readFileSync(path.join(vendorRoot, 'HubShell.tsx'), 'utf8')
+  const hubEmpty = fs.readFileSync(path.join(vendorRoot, 'HubEmpty.tsx'), 'utf8')
+
+  for (const label of ['技能库内容', '工作树已连接 Skill', 'Git 可用性', '当前仓库', 'Codex Runner']) {
+    assert.match(statusBar, new RegExp(label), label)
+  }
+  assert.match(statusBar, /git = \{ status: "warn", label: "检测中" \}/)
+  assert.match(statusBar, /codex = \{ status: "warn", label: "检测中" \}/)
+  assert.match(hubShell, /完成前不会判定工作区正常/)
+  assert.match(hubShell, /工作树扫描失败/)
+  assert.doesNotMatch(hubEmpty, /所有工作区均已连接/)
 })
 
 test('vendored glass dependency is content-pinned and build scripts have no adjacent-repo fallback', () => {

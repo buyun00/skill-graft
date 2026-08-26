@@ -25,7 +25,8 @@ export type {
   SessionRunnerPort,
   SessionRunnerResumeRequest,
   SessionRunnerStartRequest,
-  SessionRunnerStatusRequest
+  SessionRunnerStatusRequest,
+  WorktreeRegistryPort
 } from './application/index.js'
 export { createLocalHost, openLocalHost } from './local/create-local-host.js'
 export type { CreateLocalHostOptions, LocalHost } from './local/create-local-host.js'

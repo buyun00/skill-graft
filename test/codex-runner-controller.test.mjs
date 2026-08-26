@@ -32,7 +32,8 @@ async function waitFor(read, timeoutMs = 15000) {
 
 function makeRequest(root, mode) {
   const artifacts = Object.fromEntries([
-    'prompt', 'stdout', 'stderr', 'events', 'last', 'cancel', 'status', 'receipt', 'grandchild', 'environment'
+    'prompt', 'stdout', 'stderr', 'events', 'last', 'cancel', 'status', 'receipt', 'grandchild', 'environment',
+    'receivedPrompt'
   ].map((name) => [name, path.join(root, name)]))
   fs.writeFileSync(artifacts.prompt, 'controller prompt\n', 'utf8')
   return {
@@ -41,7 +42,9 @@ function makeRequest(root, mode) {
       sessionId: `controller-${mode}`,
       attemptId: 'attempt-1',
       executable: process.execPath,
-      arguments: [emitter, mode, artifacts.grandchild, artifacts.last, artifacts.environment],
+      arguments: [
+        emitter, mode, artifacts.grandchild, artifacts.last, artifacts.environment, artifacts.receivedPrompt
+      ],
       environment: {
         CODEX_HOME: root,
         HOME: root,
@@ -69,6 +72,34 @@ function makeRequest(root, mode) {
     }
   }
 }
+
+test('Codex controller preserves non-ASCII prompt bytes as UTF-8', { skip: process.platform !== 'win32' }, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p5-controller-utf8-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const request = makeRequest(root, 'capture-utf8')
+  const prompt = '开启一个中文闲聊，保留标点与 emoji：你好，世界！\n'
+  fs.writeFileSync(request.artifacts.prompt, prompt, 'utf8')
+  const requestPath = path.join(root, 'request.json')
+  fs.writeFileSync(requestPath, `${JSON.stringify(request.value)}\n`, 'utf8')
+
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', controller, '-RequestPath', requestPath
+  ], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30000
+  })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  assert.deepEqual(
+    fs.readFileSync(request.artifacts.receivedPrompt),
+    Buffer.from(prompt, 'utf8')
+  )
+
+  const receipt = JSON.parse(fs.readFileSync(request.artifacts.receipt, 'utf8'))
+  assert.equal(receipt.state, 'exited')
+  assert.equal(receipt.exitCode, 0)
+  assert.equal(receipt.sawTurnCompleted, true)
+})
 
 test('Codex controller records structured completion and bounded UTF-8 streams', { skip: process.platform !== 'win32' }, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p5-controller-complete-'))

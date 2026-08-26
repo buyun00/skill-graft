@@ -71,6 +71,22 @@ test('renderShims bake node, coherent data-root aliases, and daemon run into the
   assert.match(shims.runDaemonCmd, /SKILL_GRAFT_HOME/)
   assert.match(shims.runDaemonCmd, /HUB_ROOT/)
   assert.match(shims.unix, /export SKILL_GRAFT_HOME HUB_ROOT HUB_API_PORT/)
+  assert.match(shims.unix, /unset HUB_CODEX_NODE HUB_CODEX_MODULE HUB_CODEX_CREDENTIAL_HOME/)
+  for (const name of ['HUB_CODEX_NODE', 'HUB_CODEX_MODULE', 'HUB_CODEX_CREDENTIAL_HOME']) {
+    assert.equal((shims.sgCmd.match(new RegExp(`^set "${name}=`, 'gm')) || []).length, 1, `${name} omitted clear`)
+    assert.match(shims.sgCmd, new RegExp(`^set "${name}="$`, 'm'))
+  }
+  const runnerPins = {
+    HUB_CODEX_NODE: 'C:\\runner\\node.exe',
+    HUB_CODEX_MODULE: 'C:\\runner\\codex.js',
+    HUB_CODEX_CREDENTIAL_HOME: 'C:\\runner\\credentials'
+  }
+  const fixed = renderShims(paths, undefined, runnerPins)
+  for (const [name, value] of Object.entries(runnerPins)) {
+    assert.equal((fixed.sgCmd.match(new RegExp(`^set "${name}=`, 'gm')) || []).length, 2, `${name} clear then pin`)
+    assert.equal(fixed.sgCmd.includes(`set "${name}=${value}"`), true)
+    assert.equal(fixed.unix.includes(`${name}='${value}'`), true)
+  }
   assert.equal(toGitBashPath('E:\\ozdqp-skill-hub\\dist\\control\\cli.js'), '/e/ozdqp-skill-hub/dist/control/cli.js')
 })
 
@@ -106,7 +122,7 @@ test('evaluateDoctor treats missing node as an error and a down daemon as a warn
   assert.equal(missingNode.ok, false)
   assert.ok(missingNode.issues.some((issue) => issue.level === 'error' && /Node/.test(issue.message)))
 
-  const healthy = evaluateDoctor(paths, {
+  const healthyFacts = {
     hubRoot: 'E:\\hub',
     nodePath: 'C:\\node.exe',
     nodeVersion: 'v22.0.0',
@@ -139,7 +155,20 @@ test('evaluateDoctor treats missing node as an error and a down daemon as a warn
     installedVersion: '1.0.0',
     versionMatch: true,
     corpusEmpty: false
-  })
+  }
+  const healthy = evaluateDoctor(paths, healthyFacts)
   assert.equal(healthy.ok, true)
   assert.equal(healthy.issues.length, 0)
+
+  const cliOnly = evaluateDoctor(paths, {
+    ...healthyFacts,
+    codexRunnerReady: false,
+    codexRunnerDetail: 'Codex credentials are unavailable'
+  })
+  assert.equal(cliOnly.codex.ok, false)
+  assert.equal(cliOnly.codex.path, 'C:\\codex.js')
+  assert.equal(cliOnly.codex.version, 'cli-present')
+  assert.equal(cliOnly.codex.detail, 'Codex credentials are unavailable')
+  assert.ok(cliOnly.issues.some((issue) => issue.level === 'warn'
+    && issue.message === 'Codex credentials are unavailable'))
 })

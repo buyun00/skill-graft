@@ -813,6 +813,7 @@ function createContext() {
     path: {
       join: (...parts) => posix.join(...parts.map((part) => String(part).replaceAll('\\', '/'))),
       resolve: (...parts) => posix.resolve(...parts.map((part) => String(part).replaceAll('\\', '/'))),
+      isAbsolute: (value) => posix.isAbsolute(String(value).replaceAll('\\', '/')),
       dirname: (value) => posix.dirname(String(value).replaceAll('\\', '/')),
       basename: (value) => posix.basename(String(value).replaceAll('\\', '/')),
       comparisonKey: (value) => normalized(value),
@@ -1211,6 +1212,7 @@ test('contracts publish one stable version, complete command corpora, audit type
     'planSync'
   ])
   assert.deepEqual(WRITE_COMMAND_KINDS, [
+    'registerWorktree',
     'repairLegacy',
     'applyLegacyAttach',
     'applyLegacyDetach',
@@ -1222,6 +1224,7 @@ test('contracts publish one stable version, complete command corpora, audit type
     'chat',
     'analyze',
     'resumeSession',
+    'cancelSession',
     'reapSessions',
     'createSnapshot',
     'setPin',
@@ -1231,7 +1234,7 @@ test('contracts publish one stable version, complete command corpora, audit type
     'migrateLegacy',
     'rollbackLegacyMigration'
   ])
-  assert.equal(new Set([...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_KINDS]).size, 31)
+  assert.equal(new Set([...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_KINDS]).size, 33)
   assert.deepEqual(HUB_ERROR_CODES, [
     'UNSUPPORTED_CONTRACT_VERSION',
     'INVALID_COMMAND_META',
@@ -1541,7 +1544,7 @@ test('legacy attach planner is pure, fail-closed, and emits only approved host e
   assert.deepEqual(promoted.plan.visibility, {
     mode: 'disable',
     trackedPaths: ['.claude/settings.json'],
-    removePaths: ['.codex/agents', '.agents/skills/custom-skill']
+    removePaths: ['.codex/agents']
   })
   assert.equal(promoted.plan.claim, 'create')
   assert.equal(promoted.plan.configureGit, true)
@@ -3223,6 +3226,7 @@ test('every command kind rejects malformed runtime payloads before ports, handle
     ['getSnapshot', { snapshotId: 'not-a-snapshot' }],
     ['getPin', { worktree: '' }],
     ['planSync', { worktree: '' }],
+    ['registerWorktree', { worktree: 42 }],
     ['repairLegacy', { worktree: null }],
     ['applyLegacyAttach', { worktree: '/game-tree', sourcePolicy: 'force' }],
     ['applyLegacyDetach', { worktree: '/game-tree', sessionId: [] }],
@@ -3234,6 +3238,7 @@ test('every command kind rejects malformed runtime payloads before ports, handle
     ['chat', { intent: 42 }],
     ['analyze', { runner: { start: 'yes' } }],
     ['resumeSession', { sessionId: 'waiting-1', message: '' }],
+    ['cancelSession', { sessionId: [] }],
     ['reapSessions', { sessionIds: ['running-1', 42] }],
     ['createSnapshot', { unexpected: true }],
     ['setPin', { worktree: '/game-tree', snapshotId: 'invalid' }],
@@ -3264,7 +3269,15 @@ test('every command kind rejects malformed runtime payloads before ports, handle
   assert.deepEqual(ledger.calls, { read: 0, begin: 0, complete: 0, listEvents: 0 })
   assert.equal(ledger.entries.length, 0)
   assert.equal(ledger.events.length, 0)
-  assert.deepEqual(sessions.calls, { list: 0, get: 0, start: 0, resume: 0, reap: 0, completeAttach: 0 })
+  assert.deepEqual(sessions.calls, {
+    list: 0,
+    get: 0,
+    start: 0,
+    resume: 0,
+    cancel: 0,
+    reap: 0,
+    completeAttach: 0
+  })
 })
 
 test('Application invocation trace emits exact entry/result pairs for success, replay, conflict, and failure', async () => {

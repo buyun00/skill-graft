@@ -16,6 +16,7 @@ import {
 } from '../core/materialization.js'
 import { verifyLibrarySnapshotManifest } from '../core/snapshot.js'
 import type { DurableJsonSchema, DurableSchemaResolver } from './durable-state.js'
+import { validateWorktreeRegistry } from './local-worktree-registry.js'
 
 const COMMAND_KINDS = new Set<string>([...QUERY_COMMAND_KINDS, ...WRITE_COMMAND_KINDS])
 const AUDIT_TYPES = new Set<string>(AUDIT_EVENT_TYPES)
@@ -328,7 +329,13 @@ const SCHEMAS = {
   history: { name: 'history record', validate: validateHistory },
   snapshot: { name: 'library snapshot manifest', validate: validateSnapshot },
   materializationCurrent: { name: 'materialization commit record', validate: validateMaterializationCurrent },
-  legacyMigration: { name: 'legacy migration record', validate: validateLegacyMigration }
+  legacyMigration: { name: 'legacy migration record', validate: validateLegacyMigration },
+  worktreeRegistry: {
+    name: 'worktree registry',
+    validate: (value: unknown) => validateWorktreeRegistry(value)
+      ? ok()
+      : invalid('worktree registry failed frozen validation')
+  }
 } satisfies Record<string, DurableJsonSchema>
 
 export function createLocalDurableSchemaResolver(): DurableSchemaResolver {
@@ -338,6 +345,7 @@ export function createLocalDurableSchemaResolver(): DurableSchemaResolver {
       case 'skill-review/application-ledger.json': return SCHEMAS.ledger
       case 'skill-review/application-audit.json': return SCHEMAS.audit
       case 'skill-review/sessions.json': return SCHEMAS.sessions
+      case 'skill-review/worktree-registry.json': return SCHEMAS.worktreeRegistry
       default:
         if (HISTORY_DOCUMENT.test(relativePath)) return SCHEMAS.history
         if (SNAPSHOT_DOCUMENT.test(relativePath)) return SCHEMAS.snapshot

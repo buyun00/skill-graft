@@ -153,7 +153,7 @@ If a worktree has the hub hooks installed, `fetch`/`pull` of official Skills onl
 
 ```text
 sg decide --id <id> --action adopt
-sg decide --id <id> --action merge --merge-target skills/ozdqp-development
+sg decide --id <id> --action merge --merge-target skills/<skill-name>
 sg decide --id <id> --action reject
 ```
 

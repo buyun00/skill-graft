@@ -87,7 +87,7 @@ function SkillGraftPanel({ api }: { api: SkillGraftApi }) {
   const [selectedSkills, setSelectedSkills] = React.useState('')
   const [inboxPayload, setInboxPayload] = React.useState('')
   const [inboxGameRepo, setInboxGameRepo] = React.useState('')
-  const [mergeTarget, setMergeTarget] = React.useState('ozdqp-development')
+  const [mergeTarget, setMergeTarget] = React.useState('')
   const [skillDetail, setSkillDetail] = React.useState<any>(null)
   const [sessionIntent, setSessionIntent] = React.useState('')
   const [resumeMessage, setResumeMessage] = React.useState('Continue this Skill Graft task.')

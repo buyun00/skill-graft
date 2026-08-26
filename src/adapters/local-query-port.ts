@@ -3,8 +3,12 @@ import type {
   SkillReadPortResult,
   WorktreeInspection
 } from '../application/ports.js'
-import { validateHubStateV2, type HistoryRecordView, type SkillKind } from '../contracts/index.js'
-import { RESIDENT_SKILLS } from '../core/constants.js'
+import {
+  validateHubStateV2,
+  type HistoryRecordView,
+  type SkillKind,
+  type WorktreePinV1
+} from '../contracts/index.js'
 import type {
   HubStatusFacts,
   SkillHostFact,
@@ -21,7 +25,10 @@ import {
   type GitWorktreeFact
 } from '../core/worktree-facts.js'
 import type { LocalHostContext } from './host-context.js'
+import { adoptedSkillNames, residentSkillNames } from './local-skill-corpus.js'
+import { canonicalLocalWorktreePath } from './local-worktree-path.js'
 import { worktreeTargetId } from './worktree-target.js'
+import { readRegisteredWorktrees } from './local-worktree-registry.js'
 
 function resolveSkillTarget(context: LocalHostContext, requested: string): SkillReadPortResult {
   const root = context.path.resolve(context.hubRoot)
@@ -58,7 +65,8 @@ function skillGroupFacts(
   relative: string,
   source: SkillKind,
   startOrdinal: number,
-  gameRepo: string | null
+  gameRepo: string | null,
+  materializedSkills: ReadonlySet<string>
 ): SkillHostFact[] {
   const absolute = context.path.join(context.hubRoot, ...relative.split('/'))
   if (!context.fs.exists(absolute) || !context.fs.isDirectory(absolute)) return []
@@ -69,29 +77,48 @@ function skillGroupFacts(
       name: entry.name,
       path: `${relative.replaceAll('\\', '/')}/${entry.name}`,
       hasSkillMd: context.fs.exists(context.path.join(absolute, entry.name, 'SKILL.md')),
-      attached: Boolean(source === 'adopted' && gameRepo && context.link.isLinked(
-        context.path.join(gameRepo, '.agents', 'skills', entry.name),
-        context.path.join(context.hubRoot, 'skills', 'adopted', entry.name)
-      )),
+      attached: source === 'adopted' && (
+        materializedSkills.has(entry.name)
+        || Boolean(gameRepo && context.link.isLinked(
+          context.path.join(gameRepo, '.agents', 'skills', entry.name),
+          context.path.join(context.hubRoot, 'skills', 'adopted', entry.name)
+        ))
+      ),
       ordinal: startOrdinal + index
     }))
 }
 
 function listSkillFacts(context: LocalHostContext): SkillHostFact[] {
   const gameRepo = gameRepoOf(context)
-  const resident: SkillHostFact[] = RESIDENT_SKILLS.map((name, ordinal) => ({
+  const materializedSkills = materializedSkillNames(context)
+  const resident: SkillHostFact[] = residentSkillNames(context).map((name, ordinal) => ({
     source: 'resident',
     name,
     path: `skills/${name}`,
-    hasSkillMd: context.fs.exists(context.path.join(context.hubRoot, 'skills', name, 'SKILL.md')),
-    attached: Boolean(gameRepo && context.link.isLinked(
+    hasSkillMd: true,
+    attached: materializedSkills.has(name) || Boolean(gameRepo && context.link.isLinked(
       context.path.join(gameRepo, '.agents', 'skills', name),
       context.path.join(context.hubRoot, 'skills', name)
     )),
     ordinal
   }))
-  const adopted = skillGroupFacts(context, 'skills/adopted', 'adopted', resident.length, gameRepo)
-  const inbox = skillGroupFacts(context, 'skills/inbox', 'inbox', resident.length + adopted.length, gameRepo)
+  const adoptedNames = new Set(adoptedSkillNames(context))
+  const adopted = skillGroupFacts(
+    context,
+    'skills/adopted',
+    'adopted',
+    resident.length,
+    gameRepo,
+    materializedSkills
+  ).filter((skill) => adoptedNames.has(skill.name))
+  const inbox = skillGroupFacts(
+    context,
+    'skills/inbox',
+    'inbox',
+    resident.length + adopted.length,
+    gameRepo,
+    materializedSkills
+  )
   return [...resident, ...adopted, ...inbox]
 }
 
@@ -114,8 +141,44 @@ function historyRecords(context: LocalHostContext, limit: number): HistoryRecord
   return records
 }
 
-function checkoutRules(context: LocalHostContext): CheckoutRules {
+function configuredCheckoutRules(context: LocalHostContext): CheckoutRules {
   return parseCheckoutRules(context.fs.readText(context.path.join(context.hubRoot, 'overlay', 'checkout-rules.txt')))
+}
+
+function effectiveCheckoutRules(context: LocalHostContext): CheckoutRules {
+  const base = configuredCheckoutRules(context)
+  return {
+    ...base,
+    paths: [...base.paths, ...readRegisteredWorktrees(context)]
+  }
+}
+
+function v2WorktreePins(context: LocalHostContext): readonly WorktreePinV1[] {
+  const stateFile = context.path.join(context.hubRoot, 'skill-review', 'state.json')
+  const raw = context.persist.readJson<unknown | null>(stateFile, null)
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+    || (raw as { schemaVersion?: unknown }).schemaVersion !== 2) return []
+  const validation = validateHubStateV2(raw)
+  if (!validation.valid) throw new Error('HubStateV2 failed shared validation')
+  return Object.values(validation.value.worktrees)
+}
+
+function claimedWorktreeIds(context: LocalHostContext): ReadonlySet<string> {
+  return new Set(v2WorktreePins(context)
+    .filter((pin) => pin.claimState === 'claimed')
+    .map((pin) => pin.worktreeId))
+}
+
+function materializedWorktreeIds(context: LocalHostContext): ReadonlySet<string> {
+  return new Set(v2WorktreePins(context)
+    .filter((pin) => pin.claimState === 'claimed' && pin.materializedSnapshot !== null)
+    .map((pin) => pin.worktreeId))
+}
+
+function materializedSkillNames(context: LocalHostContext): ReadonlySet<string> {
+  return new Set(v2WorktreePins(context)
+    .filter((pin) => pin.claimState === 'claimed' && pin.materializedSnapshot !== null)
+    .flatMap((pin) => pin.selectedSkills))
 }
 
 function cloneRootFromCommonDir(context: LocalHostContext, commonDir: string): string {
@@ -146,20 +209,26 @@ function latestLocalChangeMs(context: LocalHostContext, dir: string): number {
   return Math.max(0, ...times)
 }
 
-function discoveryCandidates(context: LocalHostContext, scanRoots: readonly string[], rules: CheckoutRules): string[] {
-  const candidates: string[] = []
+function discoveryCandidates(
+  context: LocalHostContext,
+  scanRoots: readonly string[],
+  rules: CheckoutRules,
+  registeredWorktrees: readonly string[]
+): Array<{ path: string; exact: boolean }> {
+  const candidates: Array<{ path: string; exact: boolean }> = []
   for (const root of scanRoots) {
     if (!root || !context.fs.exists(root)) continue
     try {
       for (const entry of context.fs.readDir(root)) {
         if (!entry.isDirectory && !entry.isSymbolicLink) continue
-        candidates.push(context.path.join(root, entry.name))
+        candidates.push({ path: context.path.join(root, entry.name), exact: false })
       }
     } catch {
       /* unreadable scan roots contribute no host facts */
     }
   }
-  candidates.push(...rules.paths)
+  candidates.push(...rules.paths.map((path) => ({ path, exact: false })))
+  candidates.push(...registeredWorktrees.map((path) => ({ path, exact: true })))
   return candidates
 }
 
@@ -167,26 +236,32 @@ function projectionFact(
   context: LocalHostContext,
   info: GitWorktreeFact,
   attached: readonly string[],
+  materializedIds: ReadonlySet<string>,
   blocked: readonly string[],
   ordinal: number
 ): WorktreeProjectionFact {
   const resolved = context.path.resolve(info.path)
+  const canonical = canonicalLocalWorktreePath(context, resolved) || resolved
+  const identity = worktreeTargetId(context, canonical)
+  const materialized = materializedIds.has(identity)
   return {
-    identity: worktreeTargetId(context, resolved),
+    identity,
     ordinal,
-    name: context.path.basename(resolved),
-    path: info.path,
-    branch: info.branch || context.git.output(info.path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() || '(unknown)',
-    head: info.head || context.git.output(info.path, ['rev-parse', 'HEAD']).trim(),
-    changedAtMs: latestLocalChangeMs(context, resolved),
-    exists: context.fs.exists(info.path),
-    sameAsHub: context.link.samePath(info.path, context.hubRoot),
-    attached: attached.some((item) => context.link.samePath(item, info.path)),
-    doNotAuto: blocked.some((item) => context.link.samePath(item, info.path)),
-    officialPresent: context.fs.exists(context.path.join(info.path, '.claude', 'skills'))
-      || context.fs.exists(context.path.join(info.path, '.codex', 'skills')),
+    name: context.path.basename(canonical),
+    path: canonical,
+    branch: info.branch || context.git.output(canonical, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() || '(unknown)',
+    head: info.head || context.git.output(canonical, ['rev-parse', 'HEAD']).trim(),
+    changedAtMs: latestLocalChangeMs(context, canonical),
+    exists: context.fs.exists(canonical),
+    sameAsHub: context.link.samePath(canonical, context.hubRoot),
+    attached: materialized
+      || attached.some((item) => context.link.samePath(item, canonical)),
+    materialized,
+    doNotAuto: blocked.some((item) => context.link.samePath(item, canonical)),
+    officialPresent: context.fs.exists(context.path.join(canonical, '.claude', 'skills'))
+      || context.fs.exists(context.path.join(canonical, '.codex', 'skills')),
     overrideLinked: context.link.isLinked(
-      context.path.join(info.path, 'AGENTS.override.md'),
+      context.path.join(canonical, 'AGENTS.override.md'),
       context.path.join(context.hubRoot, 'AGENTS.override.md')
     ),
     locked: Boolean(info.locked),
@@ -196,12 +271,19 @@ function projectionFact(
 
 function readWorktreeFacts(context: LocalHostContext): WorktreeDiscoveryFacts {
   const scanRoots = context.persist.readList(context.path.join(context.hubRoot, 'overlay', 'scan-roots.txt'))
-  const rules = checkoutRules(context)
+  const explicitWorktrees = readRegisteredWorktrees(context)
+  const baseRules = configuredCheckoutRules(context)
+  const rules: CheckoutRules = {
+    ...baseRules,
+    paths: [...baseRules.paths, ...explicitWorktrees]
+  }
   const attached = context.persist.readList(context.path.join(context.hubRoot, 'overlay', 'attached-worktrees.txt'))
+  const materializedIds = materializedWorktreeIds(context)
   const blocked = context.persist.readList(context.path.join(context.hubRoot, 'overlay', 'do-not-auto-attach.txt'))
   let ordinal = 0
   const observations: WorktreeCloneObservation[] = []
-  for (const candidate of discoveryCandidates(context, scanRoots, rules)) {
+  for (const candidateFact of discoveryCandidates(context, scanRoots, baseRules, explicitWorktrees)) {
+    const candidate = candidateFact.path
     const resolved = context.path.resolve(candidate)
     const rawCommon = context.git.output(candidate, ['rev-parse', '--git-common-dir']).trim()
     const common = rawCommon ? context.path.resolve(candidate, rawCommon) : context.path.resolve(candidate, '.git')
@@ -211,7 +293,7 @@ function readWorktreeFacts(context: LocalHostContext): WorktreeDiscoveryFacts {
       head: '',
       locked: false,
       prunable: false
-    }, attached, blocked, ordinal++)
+    }, attached, materializedIds, blocked, ordinal++)
     const seed: WorktreeSeedFact = {
       ...seedBase,
       recognition: {
@@ -226,8 +308,10 @@ function readWorktreeFacts(context: LocalHostContext): WorktreeDiscoveryFacts {
         }))
       }
     }
-    const listed = parseWorktreePorcelain(context.git.output(candidate, ['worktree', 'list', '--porcelain']))
-      .map((info) => projectionFact(context, info, attached, blocked, ordinal++))
+    const listed = candidateFact.exact
+      ? []
+      : parseWorktreePorcelain(context.git.output(candidate, ['worktree', 'list', '--porcelain']))
+        .map((info) => projectionFact(context, info, attached, materializedIds, blocked, ordinal++))
     observations.push({
       cloneIdentity: `clone:${context.hash.sha256(context.path.comparisonKey(common)).slice(0, 24)}`,
       cloneRoot: cloneRootFromCommonDir(context, common),
@@ -240,12 +324,14 @@ function readWorktreeFacts(context: LocalHostContext): WorktreeDiscoveryFacts {
 
 function inspectWorktree(context: LocalHostContext, worktree: string): WorktreeInspection {
   const resolvedPath = context.path.resolve(worktree)
-  const rules = checkoutRules(context)
+  const rules = effectiveCheckoutRules(context)
   const name = context.path.basename(resolvedPath).toLowerCase()
   const attached = context.persist.readList(context.path.join(context.hubRoot, 'overlay', 'attached-worktrees.txt'))
+  const canonical = canonicalLocalWorktreePath(context, resolvedPath) || resolvedPath
+  const targetId = worktreeTargetId(context, canonical)
   const blocked = context.persist.readList(context.path.join(context.hubRoot, 'overlay', 'do-not-auto-attach.txt'))
   return {
-    targetId: worktreeTargetId(context, resolvedPath),
+    targetId,
     resolvedPath,
     recognition: {
       exists: context.fs.exists(resolvedPath),
@@ -261,7 +347,8 @@ function inspectWorktree(context: LocalHostContext, worktree: string): WorktreeI
       }))
     },
     blocked: blocked.some((item) => context.link.samePath(item, resolvedPath)),
-    claimed: attached.some((item) => context.link.samePath(item, resolvedPath))
+    claimed: claimedWorktreeIds(context).has(targetId)
+      || attached.some((item) => context.link.samePath(item, resolvedPath))
   }
 }
 

@@ -41,6 +41,9 @@ export type {
   WorktreeIdentity,
   WorktreeIdentityPort,
   WorktreeInspection,
+  WorktreeRegistryInvalidReason,
+  WorktreeRegistryPort,
+  WorktreeRegistryResult,
   SnapshotContentPort
 } from './ports.js'
 export type { CreateSessionTaskInput } from './session-task.js'

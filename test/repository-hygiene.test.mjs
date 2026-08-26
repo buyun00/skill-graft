@@ -45,6 +45,13 @@ test('runtime state, session text, history, and raw verification artifacts are i
   assert.equal(tracked.stdout.trim(), '', `runtime files remain tracked:\n${tracked.stdout}`)
 })
 
+test('tracked attached-worktrees baseline is an empty machine-neutral claim file', () => {
+  const relative = 'overlay/attached-worktrees.txt'
+  const tracked = git(['ls-files', '--error-unmatch', '--', relative])
+  assert.equal(tracked.status, 0, tracked.stderr || tracked.stdout)
+  assert.equal(fs.readFileSync(path.join(hubRoot, relative)).length, 0)
+})
+
 test('default npm test cannot discover the explicitly gated real attach file', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(hubRoot, 'package.json'), 'utf8'))
   assert.equal(pkg.scripts.test, 'node test/support/run-default-suite.mjs')

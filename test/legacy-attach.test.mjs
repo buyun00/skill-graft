@@ -46,7 +46,9 @@ function createFixture(t, options = {}) {
   fs.mkdirSync(packageRoot, { recursive: true })
   fs.mkdirSync(worktree, { recursive: true })
   write(path.join(hub, 'AGENTS.override.md'), options.hubOverride || '# hub override\n')
-  for (const name of residents) write(path.join(hub, 'skills', name, 'SKILL.md'), `# ${name}\n`)
+  for (const name of options.residentNames ?? residents) {
+    write(path.join(hub, 'skills', name, 'SKILL.md'), `# ${name}\n`)
+  }
   fs.mkdirSync(path.join(hub, 'overlay'), { recursive: true })
   fs.mkdirSync(path.join(packageRoot, 'overlay', 'hooks'), { recursive: true })
   write(path.join(worktree, 'AGENTS.md'), '# isolated game tree\n')
@@ -263,6 +265,54 @@ test('isolated Local legacy adapter applies only a Core-approved plan and claims
   ), true)
   assert.match(fs.readFileSync(path.join(fixture.hub, 'overlay', 'attached-worktrees.txt'), 'utf8'), /game-tree/)
   assert.equal(fs.readFileSync(path.join(fixture.worktree, 'business.txt'), 'utf8'), 'business data must survive\n')
+})
+
+test('legacy attach uses the actual resident corpus and accepts an empty corpus', async (t) => {
+  const empty = createFixture(t, { residentNames: [] })
+  const emptyPlan = await approvedPlan(empty.port, empty.worktree)
+  assert.deepEqual(emptyPlan.artifacts.map((artifact) => artifact.id), ['agentsOverride', 'localOverlay'])
+  const emptyReport = await empty.port.apply(emptyPlan)
+  assert.equal(emptyReport.claim, 'created')
+  assert.equal(fs.existsSync(path.join(empty.worktree, '.agents', 'skills')), false)
+
+  const preserved = createFixture(t, { residentNames: [] })
+  const projectPrivate = path.join(preserved.worktree, '.agents', 'skills', 'project-private', 'SKILL.md')
+  write(projectPrivate, '# worktree-owned private Skill\n')
+  const preservedPlan = await approvedPlan(preserved.port, preserved.worktree, { visibility: 'disable' })
+  assert.equal(preservedPlan.visibility.removePaths.some((relative) => /project-private/i.test(relative)), false)
+  await preserved.port.apply(preservedPlan)
+  assert.equal(fs.readFileSync(projectPrivate, 'utf8'), '# worktree-owned private Skill\n')
+
+  const privateName = 'project-private'
+  const dynamic = createFixture(t, { residentNames: [privateName] })
+  write(path.join(dynamic.worktree, '.agents', 'skills', privateName, 'SKILL.md'), `# ${privateName}\n`)
+  const dynamicPlan = await approvedPlan(dynamic.port, dynamic.worktree, { visibility: 'disable' })
+  assert.ok(dynamicPlan.artifacts.some((artifact) => artifact.id === `resident:${privateName}`))
+  assert.equal(dynamicPlan.visibility.removePaths.some((relative) => relative.includes(privateName)), false)
+  await dynamic.port.apply(dynamicPlan)
+  assert.equal(dynamic.context.link.isLinked(
+    path.join(dynamic.worktree, '.agents', 'skills', privateName),
+    path.join(dynamic.hub, 'skills', privateName)
+  ), true)
+
+  const protectedUnity = createFixture(t, { residentNames: ['unity-skills'] })
+  const unityFile = path.join(protectedUnity.worktree, '.agents', 'skills', 'unity-skills', 'SKILL.md')
+  write(unityFile, '# worktree-owned Unity Skill\n')
+  const unityPlan = await approvedPlan(protectedUnity.port, protectedUnity.worktree, { visibility: 'disable' })
+  assert.equal(unityPlan.artifacts.some((artifact) => artifact.id === 'resident:unity-skills'), false)
+  await protectedUnity.port.apply(unityPlan)
+  assert.equal(fs.readFileSync(unityFile, 'utf8'), '# worktree-owned Unity Skill\n')
+
+  const linkedTree = createFixture(t, { residentNames: ['linked-private'] })
+  const external = path.join(linkedTree.root, 'external-skill-content')
+  fs.mkdirSync(external, { recursive: true })
+  fs.symlinkSync(
+    external,
+    path.join(linkedTree.hub, 'skills', 'linked-private', 'nested-link'),
+    process.platform === 'win32' ? 'junction' : 'dir'
+  )
+  const linkedPlan = await approvedPlan(linkedTree.port, linkedTree.worktree)
+  assert.equal(linkedPlan.artifacts.some((artifact) => artifact.id === 'resident:linked-private'), false)
 })
 
 test('full legacy transaction commits every artifact action while preserving unity and adopted Skills', async (t) => {
@@ -554,6 +604,9 @@ test('attach prompt defers claim/materialization until exit-zero waiting while l
   assert.match(prompt, /claim.*plan-sync.*sync/s)
   assert.match(prompt, /--session-id "\{\{SESSION_ID\}\}"/)
   assert.match(prompt, /materializedSnapshot.*marker/s)
+  assert.match(prompt, /selectedSkills=\[\.\.\.\].*snapshot\.files/s)
+  assert.match(prompt, /没有任何 Skill.*\[\]/)
+  assert.doesNotMatch(prompt, /selectedSkills=\[ozdqp-/)
   assert.doesNotMatch(prompt, /sg apply-legacy-attach|attach-library\.ps1|manage-skill-visibility\.ps1|Set-Content|Copy-Item|Remove-Item/)
 
   assert.match(detachPrompt, /\{\{SESSION_ID\}\}/)

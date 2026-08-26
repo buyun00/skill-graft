@@ -58,11 +58,11 @@
     },
     {
       "path": "src/components/hub/HubEmpty.tsx",
-      "sha256": "fbcabf2e7ab559aea58116e54d54087c00d05b844c6d700df31a01f496ac0d62"
+      "sha256": "66ee93e09499010d09e83b6473691586f5526871d6e438a85aea1921d1750d2d"
     },
     {
       "path": "src/components/hub/HubShell.tsx",
-      "sha256": "f9deaf333c86a613f8fe441c7c7b21e66ccacb8cc0138bdefa2cde58527a8018"
+      "sha256": "f3d023ffec1b41331ba7bf0670e5b44d3ceb971358fa6f5a71f7910c025f1a98"
     },
     {
       "path": "src/components/hub/HubSidebar.tsx",
@@ -70,7 +70,7 @@
     },
     {
       "path": "src/components/hub/StatusBar.tsx",
-      "sha256": "a08894e267f3aaecbf2be2afb698ced7130a5af88450277f3378f2e649296fb5"
+      "sha256": "6a348cfa89fc6d112f96035c4720e9eda86361920878939b687f1dc9537a6080"
     },
     {
       "path": "src/components/hub/StatusPill.tsx",

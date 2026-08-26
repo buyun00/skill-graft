@@ -207,6 +207,9 @@ function createTransactionalFixture(options = {}) {
     inspect: () => { throw new Error('legacy detach unavailable') },
     apply: () => { throw new Error('legacy detach unavailable') }
   }
+  const worktreeRegistry = {
+    register: () => ({ status: 'invalid', reason: 'not-found' })
+  }
   const sessions = {
     list: () => clone(model.sessions),
     get: (sessionId) => clone(model.sessions.find((entry) => entry.id === sessionId) ?? null),
@@ -280,6 +283,7 @@ function createTransactionalFixture(options = {}) {
     runtime,
     recovery: options.recovery,
     queries,
+    worktreeRegistry,
     useCases,
     legacyAttach,
     legacyDetach,
@@ -410,6 +414,7 @@ test('command classification keeps every query lock-free and sends every write t
     planSync: { worktree: '/probe' }
   }
   const commands = {
+    registerWorktree: { worktree: '/probe' },
     repairLegacy: { worktree: '/probe' },
     applyLegacyAttach: { worktree: '/probe' },
     applyLegacyDetach: { worktree: '/probe' },
@@ -421,6 +426,7 @@ test('command classification keeps every query lock-free and sends every write t
     chat: {},
     analyze: {},
     resumeSession: { sessionId: 'missing', message: 'continue' },
+    cancelSession: { sessionId: 'missing' },
     reapSessions: {},
     createSnapshot: {},
     setPin: { worktree: '/probe', snapshotId },
@@ -470,6 +476,7 @@ test('an unsupported future state version rejects the complete write corpus befo
   })
   const snapshotId = fixture.model.snapshots[0].snapshotId
   const commands = {
+    registerWorktree: { worktree: '/probe' },
     repairLegacy: { worktree: '/probe' },
     applyLegacyAttach: { worktree: '/probe' },
     applyLegacyDetach: { worktree: '/probe' },
@@ -481,6 +488,7 @@ test('an unsupported future state version rejects the complete write corpus befo
     chat: {},
     analyze: {},
     resumeSession: { sessionId: 'missing', message: 'continue' },
+    cancelSession: { sessionId: 'missing' },
     reapSessions: {},
     createSnapshot: {},
     setPin: { worktree: '/probe', snapshotId },

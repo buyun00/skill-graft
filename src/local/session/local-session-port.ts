@@ -25,6 +25,7 @@ import {
   type LocalSessionRunner,
   type LocalSessionRunnerOptions
 } from './codex-session-runner.js'
+import { resolveLocalCodexRuntime } from './local-codex-runtime.js'
 import {
   createLocalSessionBinding,
   type LocalSessionBindingPort
@@ -281,12 +282,19 @@ function refreshLastMessage(
 export function createLocalSessionPort(ctx: HubContext, options: LocalSessionPortOptions = {}): LocalSessionPort {
   const env = options.environment || process.env
   const packageRoot = options.packageRoot || ctx.hubRoot
-  const nodeExecutable = options.nodeExecutable || env.HUB_CODEX_NODE || process.execPath
-  // Provider code and credentials must be explicit. In particular, an
-  // isolated APPDATA/HOME must never silently fall back to the daemon user's
-  // global Codex installation or credential store.
-  const codexModule = options.codexModule || env.HUB_CODEX_MODULE || ''
-  const credentialHome = options.credentialHome || env.HUB_CODEX_CREDENTIAL_HOME || ''
+  // Resolution stays inside the supplied composition/environment authority.
+  // Isolated APPDATA/USERPROFILE values therefore cannot fall back to the
+  // daemon user's global Codex installation or credential store.
+  const runtime = resolveLocalCodexRuntime({
+    packageRoot,
+    environment: env,
+    nodeExecutable: options.nodeExecutable,
+    fallbackNodeExecutable: process.execPath,
+    codexModule: options.codexModule,
+    credentialHome: options.credentialHome,
+    controllerPath: options.runnerOptions?.controllerPath
+  })
+  const { nodeExecutable, codexModule, credentialHome } = runtime
   const binding = options.binding || createLocalSessionBinding(ctx, {
     packageRoot,
     nodeExecutable,
@@ -407,18 +415,14 @@ export function createLocalSessionPort(ctx: HubContext, options: LocalSessionPor
 
   const port: LocalSessionPort = {
     async list() {
-      const result: SessionView[] = []
-      for (const session of repository.list()) {
-        const current = await refresh(session)
-        result.push(isV2(current) ? projectV2(current) : legacySessionView(ctx, current))
-      }
-      return result
+      return repository.list().map((session) => isV2(session)
+        ? projectV2(session)
+        : legacySessionView(ctx, session))
     },
     async get(sessionId) {
       const session = repository.read(sessionId)
       if (!session) return null
-      const current = await refresh(session)
-      return isV2(current) ? projectV2(current) : legacySessionView(ctx, current)
+      return isV2(session) ? projectV2(session) : legacySessionView(ctx, session)
     },
     async start(input: SessionStartRequest) {
       if (!input.task || input.task.id.length === 0 || input.task.kind !== input.kind) throw portFault('invalid-request')

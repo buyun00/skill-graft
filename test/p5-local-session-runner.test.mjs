@@ -32,7 +32,63 @@ function task(id, intent) {
   })
 }
 
-test('P5 Local runner binds tasks and maps real controller start/resume receipts', { skip: process.platform !== 'win32' }, async (t) => {
+test('P5 Local runner uses launcher-pinned paths without explicit composition options', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p5-local-locator-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const userProfile = path.join(root, 'profile')
+  const appData = path.join(userProfile, 'AppData', 'Roaming')
+  const codexModule = path.join(appData, 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
+  const credentialHome = path.join(userProfile, '.codex')
+  fs.mkdirSync(path.dirname(codexModule), { recursive: true })
+  fs.copyFileSync(fakeCodex, codexModule)
+  fs.mkdirSync(credentialHome, { recursive: true })
+  fs.writeFileSync(path.join(credentialHome, 'auth.json'), '{"fixture":true}\n', 'utf8')
+  let controllerCalls = 0
+  let controllerLaunchScript = ''
+  const port = createLocalSessionPort(createHub(root), {
+    packageRoot,
+    environment: {
+      APPDATA: appData,
+      USERPROFILE: userProfile,
+      HUB_CODEX_NODE: process.execPath,
+      HUB_CODEX_MODULE: codexModule,
+      HUB_CODEX_CREDENTIAL_HOME: credentialHome,
+      HUB_SPAWN_CODEX: '1'
+    },
+    runnerOptions: {
+      controllerSpawn(_executable, args) {
+        controllerCalls += 1
+        controllerLaunchScript = String(args.at(-1) || '')
+        return { stdout: '4242\n' }
+      }
+    }
+  })
+
+  const started = await port.start({
+    task: task('p5-launcher-pinned-locator', 'launcher-pinned locator'),
+    kind: 'chat',
+    target: { kind: 'hub', id: 'hub' },
+    intent: 'launcher-pinned locator',
+    options: { wait: false }
+  })
+
+  assert.equal(started.status, 'running', JSON.stringify(started))
+  assert.equal(controllerCalls, 1)
+  assert.match(controllerLaunchScript, /Start-Process/)
+  assert.match(controllerLaunchScript, /-WindowStyle Hidden/)
+  assert.doesNotMatch(controllerLaunchScript, /Invoke-CimMethod/)
+  const stored = JSON.parse(fs.readFileSync(path.join(root, 'skill-review', 'sessions.json'), 'utf8'))
+    .sessions.find((session) => session.id === started.id)
+  const request = JSON.parse(fs.readFileSync(stored.runnerArtifacts.requestPath, 'utf8'))
+  assert.equal(request.executable, process.execPath)
+  assert.equal(request.arguments[0], codexModule)
+  assert.equal(fs.existsSync(path.join(stored.runnerArtifacts.codexHome, 'auth.json')), true)
+  for (const name of ['APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'TEMP']) {
+    assert.equal(fs.statSync(request.environment[name]).isDirectory(), true, `${name} is precreated`)
+  }
+})
+
+test('P5 Local runner binds tasks and maps real controller start/resume receipts with UTF-8 prompts', { skip: process.platform !== 'win32' }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-graft-p5-local-runner-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const credentials = path.join(root, 'credential-source')
@@ -51,10 +107,12 @@ test('P5 Local runner binds tasks and maps real controller start/resume receipts
           .find((entry) => entry.endsWith(`${path.sep}request.json`)
             && !fs.existsSync(path.join(path.dirname(entry), 'receipt.json')))
         assert.ok(requestPath, 'prepared controller request')
+        const controller = path.join(packageRoot, 'runtime', 'codex-runner-controller.ps1')
+        const quote = (value) => String(value).replaceAll("'", "''")
         const result = spawnSync('powershell.exe', [
           '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-          '-File', path.join(packageRoot, 'runtime', 'codex-runner-controller.ps1'),
-          '-RequestPath', requestPath
+          '-Command',
+          `[Threading.Thread]::CurrentThread.CurrentCulture=[Globalization.CultureInfo]::GetCultureInfo('th-TH'); & '${quote(controller)}' -RequestPath '${quote(requestPath)}'`
         ], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
         assert.equal(result.status, 0, result.stderr || result.stdout)
         return { stdout: `${process.pid}\n` }
@@ -65,27 +123,31 @@ test('P5 Local runner binds tasks and maps real controller start/resume receipts
   })
 
   const started = await port.start({
-    task: task('p5-start-resume', 'structured start'),
+    task: task('p5-start-resume', '请开启中文闲聊：你好，世界！'),
     kind: 'chat',
     target: { kind: 'hub', id: 'hub' },
-    intent: 'structured start',
+    intent: '请开启中文闲聊：你好，世界！',
     options: { wait: true }
   })
   assert.equal(started.status, 'completed', JSON.stringify(started))
   assert.equal(started.exitCode, 0)
+  assert.match(started.startedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  assert.match(started.endedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  assert.equal(new Date(started.startedAt).getUTCFullYear(), new Date().getUTCFullYear())
   assert.equal(started.continuationToken, '019cfake0-0000-7000-8000-000000000001')
   assert.equal(started.events.some((event) => event.type === 'runner.status'), true)
   assert.equal(JSON.stringify(started.events).includes('ignored model text'), false)
 
   const resumed = await port.resume({
     sessionId: started.id,
-    task: task(started.id, 'structured resume'),
-    message: 'structured resume',
+    task: task(started.id, '继续中文对话：再见！'),
+    message: '继续中文对话：再见！',
     options: { wait: true }
   })
   assert.equal(resumed.status, 'completed', JSON.stringify(resumed))
   assert.notEqual(resumed.attemptId, started.attemptId)
   assert.equal(resumed.revision > started.revision, true)
+  assert.equal(fs.existsSync(path.join(root, 'Microsoft')), false, 'PowerShell cache stays inside the isolated home')
 })
 
 test('P5 Local cancel remains requested until the runner confirms terminal cancellation', async (t) => {
@@ -137,10 +199,14 @@ test('P5 Local cancel remains requested until the runner confirms terminal cance
   assert.equal(requested.status, 'running')
   assert.equal(cancelCalls, 1)
   runnerState = 'cancelled'
-  const cancelled = await waitFor(
-    () => port.get(running.id),
-    (session) => session?.status === 'cancelled'
-  )
+  const sessionsFile = path.join(root, 'skill-review', 'sessions.json')
+  const beforeQuery = fs.readFileSync(sessionsFile, 'utf8')
+  assert.equal((await port.get(running.id)).status, 'running')
+  assert.equal((await port.list()).find((session) => session.id === running.id)?.status, 'running')
+  assert.equal(fs.readFileSync(sessionsFile, 'utf8'), beforeQuery, 'session queries must not refresh durable state')
+  const reaped = await port.reap([running.id])
+  assert.equal(reaped.length, 1)
+  const cancelled = await port.get(running.id)
   assert.equal(cancelled.status, 'cancelled')
   assert.equal(cancelled.capabilities.canCancel, false)
   assert.equal(cancelled.events.some((event) => event.type === 'session.cancel-requested'), true)

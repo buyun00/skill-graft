@@ -34,8 +34,29 @@ const busyState = {
     },
     { id: 'adopted-old', name: 'old-skill', status: 'adopted', oldCommit: '111', newCommit: '222' }
   ],
-  resident: [{ name: 'ozdqp-development', path: 'skills/ozdqp-development', kind: 'resident' }],
-  adopted: [{ name: 'extra', path: 'skills/adopted/extra', kind: 'adopted' }]
+  resident: [
+    {
+      name: 'ozdqp-development',
+      path: 'skills/ozdqp-development',
+      kind: 'resident',
+      hasSkillMd: true,
+      attached: true
+    },
+    {
+      name: 'missing-project-skill',
+      path: 'skills/missing-project-skill',
+      kind: 'resident',
+      hasSkillMd: false,
+      attached: true
+    }
+  ],
+  adopted: [{
+    name: 'extra',
+    path: 'skills/adopted/extra',
+    kind: 'adopted',
+    hasSkillMd: true,
+    attached: false
+  }]
 }
 
 const busyWorktrees = {
@@ -96,16 +117,21 @@ test('overview mapper builds 有事件 cards, stats, and version chips from API 
   const mapped = mapOverview({
     state: busyState,
     worktrees: busyWorktrees,
-    health: { ok: true },
-    daemon: { ok: true },
-    sessions: { sessions: [] }
+    worktreesPhase: 'ready',
+    diagnostics: { git: { ok: true }, codex: { ok: true } },
+    diagnosticsChecked: true
   })
 
-  assert.equal(mapped.skillCount, 4)
+  assert.equal(mapped.skillCount, 2)
+  assert.equal(mapped.librarySkillCount, 2)
+  assert.equal(mapped.connectedSkillCount, 1)
   assert.equal(mapped.worktreeCount, 3)
+  assert.equal(mapped.attachedWorktreeCount, 2)
   assert.equal(mapped.pending, 3)
-  assert.match(mapped.stats, /4 Skills/)
-  assert.match(mapped.stats, /3 Worktrees/)
+  assert.match(mapped.stats, /技能库内容 2/)
+  assert.match(mapped.stats, /工作树已连接 Skill 1/)
+  assert.match(mapped.stats, /已识别工作树 3/)
+  assert.match(mapped.stats, /已连接工作树 2/)
   assert.match(mapped.stats, /3 待处理/)
   assert.equal(mapped.overviewPrimary, '需要你处理')
   assert.equal(overviewPrimary(mapped.attention), '需要你处理')
@@ -137,7 +163,11 @@ test('overview mapper builds 有事件 cards, stats, and version chips from API 
   assert.equal(tools.overrideLinked, false)
   assert.equal(tools.officialPresent, false)
   assert.equal(mapped.git.status, 'ok')
+  assert.equal(mapped.git.label, '可用')
+  assert.equal(mapped.repository.status, 'ok')
+  assert.equal(mapped.repository.label, '已选择')
   assert.equal(mapped.codex.status, 'ok')
+  assert.equal(mapped.codex.label, '可用')
   assert.match(mapped.storage, /本机 hub/)
   assert.match(mapped.storage, /E:\\hub/)
   assert.equal(mapped.displayName, '本机')
@@ -148,9 +178,9 @@ test('overview mapper 空白 path has empty attention and no 需要修复 rows',
   const mapped = mapOverview({
     state: emptyState,
     worktrees: emptyWorktrees,
-    health: { ok: true },
-    daemon: { ok: false },
-    sessions: { sessions: [] },
+    worktreesPhase: 'ready',
+    diagnostics: { git: { ok: true }, codex: { ok: true } },
+    diagnosticsChecked: true,
     userName: '  '
   })
   assert.equal(mapped.attention.length, 0)
@@ -158,8 +188,11 @@ test('overview mapper 空白 path has empty attention and no 需要修复 rows',
   assert.equal(mapped.overviewPrimary, '一切正常')
   assert.equal(overviewPrimary(mapped.attention), '一切正常')
   assert.doesNotMatch(mapped.stats, /待处理/)
-  assert.equal(mapped.skillCount, 2)
+  assert.equal(mapped.skillCount, 1)
+  assert.equal(mapped.librarySkillCount, 1)
+  assert.equal(mapped.connectedSkillCount, 0)
   assert.equal(mapped.worktreeCount, 2)
+  assert.equal(mapped.attachedWorktreeCount, 1)
   assert.equal(mapped.displayName, '本机')
   for (const row of mapped.workspaces) {
     assert.notEqual(row.statusLabel, '需要修复')
@@ -167,24 +200,97 @@ test('overview mapper 空白 path has empty attention and no 需要修复 rows',
   }
   assert.equal(mapped.git.status, 'ok')
   assert.equal(mapped.codex.status, 'ok')
-  assert.equal(mapped.codex.label, '可访问')
+  assert.equal(mapped.codex.label, '可用')
 })
 
-test('git / codex / username / storage rules follow API fields only', () => {
-  const noGit = mapOverview({
+test('overview treats a durable V2 materialization as connected without requiring a legacy link', () => {
+  const mapped = mapOverview({
+    state: { ...emptyState, resident: [], counts: { resident: 0, adopted: 0, queued: 0, proposed: 0 } },
+    worktrees: {
+      worktrees: [{
+        name: 'v2-probe',
+        path: 'C:\\v2-probe',
+        attached: true,
+        materialized: true,
+        overrideLinked: false,
+        officialPresent: false
+      }]
+    },
+    worktreesPhase: 'ready'
+  })
+  assert.equal(mapped.attention.length, 0)
+  assert.equal(mapped.workspaces[0].statusLabel, '正常')
+  assert.equal(mapped.workspaces[0].materialized, true)
+})
+
+test('git / repository / Codex Runner statuses use independent authoritative fields', () => {
+  const beforeStatus = mapOverview({
+    state: null,
+    stateChecked: false,
+    diagnostics: null,
+    diagnosticsChecked: false
+  })
+  assert.deepEqual(beforeStatus.repository, { status: 'warn', label: '读取中' })
+
+  const statusFailed = mapOverview({
+    state: null,
+    stateChecked: true,
+    diagnostics: null,
+    diagnosticsChecked: false
+  })
+  assert.deepEqual(statusFailed.repository, { status: 'warn', label: '读取失败' })
+
+  const checking = mapOverview({
     state: { hubRoot: 'H', counts: { resident: 0, adopted: 0, queued: 0, proposed: 0 }, items: [] },
     worktrees: { worktrees: [] },
+    worktreesPhase: 'ready',
     health: { ok: true },
-    daemon: { ok: false },
-    sessions: null,
-    sessionsReachable: false,
+    daemon: { ok: true },
+    sessions: { sessions: [] },
+    sessionsReachable: true,
+    diagnostics: null,
+    diagnosticsChecked: false,
     userName: 'Ada'
   })
-  assert.equal(noGit.git.status, 'off')
-  assert.equal(noGit.codex.status, 'off')
-  assert.equal(noGit.displayName, 'Ada')
-  assert.equal(noGit.storage, '本机 hub · H')
-  assert.equal(noGit.skillCount, 0)
+  assert.deepEqual(checking.git, { status: 'warn', label: '检测中' })
+  assert.deepEqual(checking.repository, { status: 'off', label: '未选择' })
+  assert.deepEqual(checking.codex, { status: 'warn', label: '检测中' })
+  assert.equal(checking.displayName, 'Ada')
+  assert.equal(checking.storage, '本机 hub · H')
+  assert.equal(checking.skillCount, 0)
+
+  const availableWithoutRepository = mapOverview({
+    state: { hubRoot: 'H', gameRepo: null, counts: {}, items: [] },
+    worktrees: { worktrees: [] },
+    worktreesPhase: 'ready',
+    diagnostics: { git: { ok: true }, codex: { ok: false } },
+    diagnosticsChecked: true
+  })
+  assert.deepEqual(availableWithoutRepository.git, { status: 'ok', label: '可用' })
+  assert.deepEqual(availableWithoutRepository.repository, { status: 'off', label: '未选择' })
+  assert.deepEqual(availableWithoutRepository.codex, { status: 'off', label: '不可用' })
+
+  const unavailableWithRepository = mapOverview({
+    state: { hubRoot: 'H', gameRepo: 'E:\\selected', counts: {}, items: [] },
+    worktrees: { worktrees: [] },
+    worktreesPhase: 'ready',
+    diagnostics: { git: { ok: false }, codex: { ok: true } },
+    diagnosticsChecked: true
+  })
+  assert.deepEqual(unavailableWithRepository.git, { status: 'off', label: '不可用' })
+  assert.deepEqual(unavailableWithRepository.repository, { status: 'ok', label: '已选择' })
+  assert.deepEqual(unavailableWithRepository.codex, { status: 'ok', label: '可用' })
+
+  const failed = mapOverview({
+    state: { hubRoot: 'H', counts: {}, items: [] },
+    worktrees: { worktrees: [] },
+    worktreesPhase: 'error',
+    diagnostics: { ok: false },
+    diagnosticsChecked: true
+  })
+  assert.deepEqual(failed.git, { status: 'warn', label: '检测失败' })
+  assert.deepEqual(failed.codex, { status: 'warn', label: '检测失败' })
+  assert.match(failed.stats, /工作树扫描失败/)
 })
 
 test('queuedSessionView unwraps the real CLI {ok,action,session} envelope', () => {

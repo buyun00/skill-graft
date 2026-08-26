@@ -177,6 +177,11 @@ export function createPanelApi(options = {}) {
     commandEnvelope,
     getState: () => command('status'),
     getWorktrees: () => command('listWorktrees'),
+    registerWorktree: (worktree, commandOptions = {}) => command(
+      'registerWorktree',
+      { worktree },
+      commandOptions
+    ),
     getSkill: (skillPath) => command('readSkill', { path: skillPath || '' }),
     getHistory: (input = {}) => command('listHistory', { limit: 50, ...input }),
     getSessions: (input = {}) => command('listSessions', input),

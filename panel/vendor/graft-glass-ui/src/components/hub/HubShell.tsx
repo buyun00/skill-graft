@@ -20,9 +20,14 @@ export function HubShell({
   stats,
   attention,
   workspaces,
+  librarySkillCount,
+  connectedSkillCount,
   git,
+  repository,
   codex,
   storage,
+  workspacesLoading,
+  workspacesError,
   contained,
   children,
   onNavigate,
@@ -45,9 +50,14 @@ export function HubShell({
   stats?: string;
   attention?: AttentionItem[];
   workspaces?: WorkspaceRow[];
+  librarySkillCount?: number;
+  connectedSkillCount?: number;
   git?: { status: HubStatus; label: string };
+  repository?: { status: HubStatus; label: string };
   codex?: { status: HubStatus; label: string };
   storage?: string;
+  workspacesLoading?: boolean;
+  workspacesError?: string;
   contained?: boolean;
   children?: ReactNode;
   onNavigate?: (id: HubNavId) => void;
@@ -63,6 +73,19 @@ export function HubShell({
   onRefresh?: () => void;
 }) {
   const items = attention ?? [];
+  const workspacesFailed = Boolean(workspacesError);
+  const workspacesPending = workspacesLoading === true;
+  const workspacePhase = workspacesPending
+    ? {
+        title: "技能库已加载",
+        description: "阶段 2/3 · 正在扫描工作树连接状态；完成前不会判定工作区正常。",
+      }
+    : workspacesFailed
+      ? {
+          title: "工作树状态未知",
+          description: "工作树扫描失败，请刷新后重试。",
+        }
+      : null;
   return (
     <div className={contained ? "relative min-h-[760px]" : undefined}>
       <HubSidebar
@@ -86,6 +109,12 @@ export function HubShell({
               envLabel={envLabel}
               stats={stats}
             />
+            {workspacePhase && items.length ? (
+              <div className="glass mb-4 rounded-[18px] px-5 py-4 text-[13px] text-ink/55">
+                <div className="font-[600] text-ink/70">{workspacePhase.title}</div>
+                <div className="mt-1">{workspacePhase.description}</div>
+              </div>
+            ) : null}
             <div className="grid grid-cols-1 xl:grid-cols-[1fr_280px] gap-4 items-start">
               {items.length ? (
                 <AttentionList
@@ -95,7 +124,12 @@ export function HubShell({
                   onSeeAll={onSeeAllAttention}
                 />
               ) : (
-                <HubEmpty onAction={onEmptyAction} />
+                <HubEmpty
+                  title={workspacePhase?.title}
+                  description={workspacePhase?.description}
+                  actionLabel={workspacePhase ? "" : undefined}
+                  onAction={onEmptyAction}
+                />
               )}
               <WorkspacePanel
                 items={workspaces ?? []}
@@ -103,7 +137,15 @@ export function HubShell({
                 onSelect={onSelectWorkspace}
               />
             </div>
-            <StatusBar git={git} codex={codex} storage={storage} onRefresh={onRefresh} />
+            <StatusBar
+              librarySkillCount={librarySkillCount}
+              connectedSkillCount={connectedSkillCount}
+              git={git}
+              repository={repository}
+              codex={codex}
+              storage={storage}
+              onRefresh={onRefresh}
+            />
           </>
         )}
       </main>

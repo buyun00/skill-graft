@@ -32,6 +32,7 @@ export function makeFs(files) {
     exists: (target) => Object.prototype.hasOwnProperty.call(files, resolveKey(target)),
     isDirectory: (target) => Boolean(files[resolveKey(target)]?.dir),
     isFile: (target) => Boolean(files[resolveKey(target)] && !files[resolveKey(target)].dir),
+    isSymbolicLink: (target) => Boolean(files[resolveKey(target)]?.symlink),
     readDir: (target) => {
       const rec = files[resolveKey(target)]
       if (rec?.readDirError) throw new Error(rec.readDirError)

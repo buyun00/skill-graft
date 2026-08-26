@@ -99,6 +99,7 @@ import type {
   RequestLedgerPort,
   SessionPort,
   SessionStartRequest,
+  WorktreeRegistryPort,
   WorktreeIdentity
 } from './ports.js'
 import type { HubStateRepositoryPort } from './use-case-ports.js'
@@ -138,6 +139,7 @@ export type HubApplicationOptions = {
   runtime: ApplicationRuntimePort
   recovery?: ApplicationRecoveryPort
   queries: HubQueryPort
+  worktreeRegistry: WorktreeRegistryPort
   useCases: SharedUseCasePorts
   legacyAttach: LegacyAttachPort
   legacyDetach: LegacyDetachPort
@@ -417,6 +419,10 @@ function validatePayload(command: HubCommand) {
     case 'listSnapshots':
     case 'createSnapshot':
       assertAllowedFields(value, [])
+      return
+    case 'registerWorktree':
+      assertAllowedFields(value, ['worktree'])
+      requireString(value, 'worktree')
       return
     case 'readSkill':
       assertAllowedFields(value, ['path'])
@@ -2424,6 +2430,7 @@ async function executeMigration(
 async function executeHandler(
   runtime: ApplicationRuntimePort,
   queries: HubQueryPort,
+  worktreeRegistry: WorktreeRegistryPort,
   useCases: SharedUseCasePorts,
   legacyAttach: LegacyAttachPort,
   legacyDetach: LegacyDetachPort,
@@ -2530,6 +2537,39 @@ async function executeHandler(
     }
     case 'planSync':
       return executePlanSync(p2, p3, command)
+    case 'registerWorktree': {
+      const registered = await worktreeRegistry.register(command.worktree)
+      if (registered.status === 'invalid') {
+        const messages = {
+          'invalid-path': 'worktree path is invalid',
+          'not-absolute': 'worktree path must be absolute',
+          'not-found': 'worktree path does not exist',
+          'not-directory': 'worktree path must be a directory',
+          'cannot-canonicalize': 'worktree path cannot be resolved safely',
+          'not-git-worktree': 'path is not a Git worktree',
+          'not-exact-worktree': 'select the exact Git worktree root',
+          'hub-root': 'the Hub data root cannot be registered as a worktree',
+          'not-recognized': 'worktree is excluded by the existing discovery policy',
+          'too-many-worktrees': 'too many worktrees are registered'
+        } as const
+        throw new ApplicationFault('INVALID_ARGUMENT', messages[registered.reason])
+      }
+      const view = projectWorktreeList(await queries.readWorktreeFacts())
+      if (!view.worktrees.some((worktree) => worktree.path === registered.worktree)) {
+        throw new ApplicationFault('INVALID_ARGUMENT', 'registered worktree is not visible under the existing discovery policy')
+      }
+      if (registered.changed) {
+        businessEvents.push(stateChangedEvent(runtime, command, hashedSubject(runtime, 'worktree', registered.worktree), {
+          change: 'worktree-registered'
+        }))
+      }
+      return {
+        action: 'registerWorktree' as const,
+        worktree: registered.worktree,
+        changed: registered.changed,
+        ...view
+      }
+    }
     case 'repairLegacy': {
       if (!command.worktree?.trim()) throw new ApplicationFault('INVALID_ARGUMENT', 'worktree is required')
       return executeLegacyRepair(legacyAttach, command.worktree)
@@ -2836,6 +2876,7 @@ export function createHubApplication(options: HubApplicationOptions): HubApplica
     runtime,
     recovery,
     queries,
+    worktreeRegistry,
     useCases,
     legacyAttach,
     legacyDetach,
@@ -2857,6 +2898,7 @@ export function createHubApplication(options: HubApplicationOptions): HubApplica
           await executeHandler(
             runtime,
             queries,
+            worktreeRegistry,
             useCases,
             legacyAttach,
             legacyDetach,
@@ -2963,6 +3005,7 @@ export function createHubApplication(options: HubApplicationOptions): HubApplica
         data = await executeHandler(
           runtime,
           queries,
+          worktreeRegistry,
           useCases,
           legacyAttach,
           legacyDetach,

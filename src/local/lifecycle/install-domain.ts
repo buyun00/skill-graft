@@ -431,6 +431,9 @@ export type DoctorFacts = {
   gitPath: string
   gitVersion: string
   codexPath: string
+  /** Optional so host-independent DoctorFacts fixtures retain their legacy projection. */
+  codexRunnerReady?: boolean
+  codexRunnerDetail?: string
   distExists: boolean
   cliPath: string
   missingLayout: string[]
@@ -543,6 +546,9 @@ export function layoutSpec(hubRoot: string, path: PathPort): { dirs: string[]; f
   const review = path.join(hubRoot, 'skill-review')
   return {
     dirs: [
+      // Durable-state recovery must not lazily add a data-root child after the
+      // daemon has frozen its startup authority.
+      path.join(hubRoot, '.skill-graft-transactions'),
       overlay,
       skills,
       path.join(skills, 'inbox'),
@@ -624,7 +630,15 @@ export function toGitBashPath(winPath: string): string {
 }
 
 export type DaemonLauncherEnvironment = Readonly<Partial<Record<
-  'HOME' | 'USERPROFILE' | 'APPDATA' | 'LOCALAPPDATA' | 'TEMP' | 'TMP',
+  | 'HOME'
+  | 'USERPROFILE'
+  | 'APPDATA'
+  | 'LOCALAPPDATA'
+  | 'TEMP'
+  | 'TMP'
+  | 'HUB_CODEX_NODE'
+  | 'HUB_CODEX_MODULE'
+  | 'HUB_CODEX_CREDENTIAL_HOME',
   string
 >>>
 
@@ -644,11 +658,25 @@ export function renderShims(
   const dataRoot = stripTrailingSep(paths.dataRoot)
   const node = stripTrailingSep(paths.nodePath)
   const cli = stripTrailingSep(paths.cliPath)
-  const sgCmd = renderCmdShim(dataRoot, node, cli, paths.port, paths.installDir, paths.taskName)
   const unixNode = toGitBashPath(node)
   const unixCli = toGitBashPath(cli)
   const unixData = toGitBashPath(dataRoot)
-  const launcherEnvironmentLines = (['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP'] as const)
+  const runnerEnvironmentNames = [
+    'HUB_CODEX_NODE',
+    'HUB_CODEX_MODULE',
+    'HUB_CODEX_CREDENTIAL_HOME'
+  ] as const
+  const launcherEnvironmentLines = ([
+    'HOME',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'TEMP',
+    'TMP',
+    'HUB_CODEX_NODE',
+    'HUB_CODEX_MODULE',
+    'HUB_CODEX_CREDENTIAL_HOME'
+  ] as const)
     .flatMap((name) => {
       const value = launcherEnvironment[name]
       if (value === undefined) return []
@@ -657,8 +685,40 @@ export function renderShims(
       }
       return [`set "${name}=${batEnvironment(value)}"`]
     })
+  const clearedRunnerEnvironmentLines = [
+    'set "HUB_CODEX_NODE="',
+    'set "HUB_CODEX_MODULE="',
+    'set "HUB_CODEX_CREDENTIAL_HOME="'
+  ]
+  const pinnedRunnerEnvironmentLines = runnerEnvironmentNames.flatMap((name) => {
+    const value = launcherEnvironment[name]
+    return value === undefined ? [] : [`set "${name}=${batEnvironment(value)}"`]
+  })
+  const interactiveCmdRunnerEnvironmentLines = [
+    ...clearedRunnerEnvironmentLines,
+    ...pinnedRunnerEnvironmentLines
+  ]
+  const sgCmd = renderCmdShim(
+    dataRoot,
+    node,
+    cli,
+    paths.port,
+    paths.installDir,
+    paths.taskName,
+    interactiveCmdRunnerEnvironmentLines
+  )
+  const unixRunnerEnvironmentLines = [
+    `unset ${runnerEnvironmentNames.join(' ')}`,
+    ...runnerEnvironmentNames.flatMap((name) => {
+      const value = launcherEnvironment[name]
+      return value === undefined
+        ? []
+        : [`${name}=${shellSingleQuote(value)}`, `export ${name}`]
+    })
+  ]
   const unix = [
     '#!/bin/sh',
+    ...unixRunnerEnvironmentLines,
     'if [ -z "${SKILL_GRAFT_HOME-}" ] && [ -z "${HUB_ROOT-}" ]; then',
     `  SKILL_GRAFT_HOME=${shellSingleQuote(unixData)}`,
     `  HUB_ROOT=${shellSingleQuote(unixData)}`,
@@ -692,6 +752,7 @@ export function renderShims(
     `set "HUB_API_PORT=${paths.port}"`,
     `set "SG_INSTALL_DIR=${bat(paths.installDir)}"`,
     `set "SG_TASK_NAME=${bat(paths.taskName)}"`,
+    ...clearedRunnerEnvironmentLines,
     ...launcherEnvironmentLines,
     ...(daemonTrace ? [
       'for /f "tokens=1 delims==" %%G in (\'set GIT_ 2^>nul\') do set "%%G="',
@@ -753,13 +814,17 @@ export function evaluateDoctor(paths: InstallPaths, facts: DoctorFacts): DoctorR
   const reviewActive = facts.reviewLockActive || 0
   const reviewStale = facts.reviewLockStale || 0
   const reviewUnverifiable = facts.reviewLockUnverifiable || 0
+  const codexRunnerReady = facts.codexRunnerReady ?? Boolean(facts.codexPath)
   if (!nodeOk) issues.push({ level: 'error', message: 'Node.js is not installed or not on PATH' })
   if (!gitOk) issues.push({ level: 'error', message: 'Git is not installed or not on PATH' })
   if (!distOk) issues.push({ level: 'error', message: `CLI is not built (${paths.cliPath}). Run setup.cmd or npm run build` })
   if (!layoutOk) issues.push({ level: 'error', message: `Missing hub directories: ${facts.missingLayout.join(', ')}` })
   if (!shimsOk) issues.push({ level: 'warn', message: `sg is not installed. Run:  ${paths.cliPath ? 'sg setup' : 'setup.cmd'}` })
   if (shimsOk && expected?.path && !pathOk) issues.push({ level: 'warn', message: `User PATH does not include ${paths.binDir}. Open a new terminal after setup` })
-  if (!facts.codexPath) issues.push({ level: 'warn', message: 'Codex CLI is not installed; attach/edit/chat cannot spawn a conversation' })
+  if (!codexRunnerReady) issues.push({
+    level: 'warn',
+    message: facts.codexRunnerDetail || 'Codex Session Runner is unavailable; attach/edit/chat cannot spawn a conversation'
+  })
   if (expected?.task && !facts.taskRegistered) issues.push({ level: 'warn', message: `Logon task ${paths.taskName} is not registered` })
   if (expected?.daemon && !facts.daemonAlive) issues.push({ level: 'warn', message: 'Keep-alive daemon is not running' })
   else if (expected?.daemon && !facts.apiHealthy) issues.push({ level: 'warn', message: `API is down (${paths.apiUrl})` })
@@ -798,7 +863,12 @@ export function evaluateDoctor(paths: InstallPaths, facts: DoctorFacts): DoctorR
     node: { ok: nodeOk, path: facts.nodePath, version: facts.nodeVersion },
     git: { ok: gitOk, path: facts.gitPath, version: facts.gitVersion },
     dist: { ok: distOk, path: paths.cliPath, version: distOk ? facts.packageVersion || 'unknown' : '' },
-    codex: { ok: Boolean(facts.codexPath), path: facts.codexPath, version: facts.codexPath ? 'present' : '' },
+    codex: {
+      ok: codexRunnerReady,
+      path: facts.codexPath,
+      version: codexRunnerReady ? 'runner-ready' : facts.codexPath ? 'cli-present' : '',
+      ...(facts.codexRunnerDetail ? { detail: facts.codexRunnerDetail } : {})
+    },
     layout: { ok: layoutOk, missing: facts.missingLayout },
     shims: {
       ok: shimsOk,
@@ -953,7 +1023,8 @@ function renderCmdShim(
   cliPath: string,
   port: number,
   installDir: string,
-  taskName: string
+  taskName: string,
+  runnerEnvironmentLines: readonly string[]
 ): string {
   return [
     '@echo off',
@@ -962,6 +1033,7 @@ function renderCmdShim(
     `if not defined HUB_API_PORT set "HUB_API_PORT=${port}"`,
     `set "SG_INSTALL_DIR=${bat(installDir)}"`,
     `set "SG_TASK_NAME=${bat(taskName)}"`,
+    ...runnerEnvironmentLines,
     `"${bat(nodePath)}" "${bat(cliPath)}" %*`,
     ''
   ].join('\r\n')

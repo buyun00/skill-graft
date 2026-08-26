@@ -56,7 +56,6 @@ import {
   validateVisibilityOwnershipStateV1,
   validateWorktreePinV1
 } from '../contracts/index.js'
-import { RESIDENT_SKILLS } from './constants.js'
 import {
   canonicalJson,
   compareUtf8Bytes,
@@ -530,7 +529,7 @@ function snapshotSkillCatalog(snapshot: LibrarySnapshotManifestV1): Map<string, 
       continue
     }
     match = file.path.match(/^skills\/([^/]+)\/SKILL\.md$/u)
-    if (match && RESIDENT_SKILLS.includes(match[1] as (typeof RESIDENT_SKILLS)[number])) {
+    if (match && !['adopted', 'inbox'].includes(portableName(match[1]))) {
       add({
         name: match[1],
         owner: 'residentSkill',

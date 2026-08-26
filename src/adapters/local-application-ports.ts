@@ -1,9 +1,16 @@
-import type { ApplicationRuntimePort, HubQueryPort, LegacyAttachPort, LegacyDetachPort } from '../application/ports.js'
+import type {
+  ApplicationRuntimePort,
+  HubQueryPort,
+  LegacyAttachPort,
+  LegacyDetachPort,
+  WorktreeRegistryPort
+} from '../application/ports.js'
 import type { SharedUseCasePorts } from '../application/use-case-ports.js'
 import type { LocalHostContext } from './host-context.js'
 import { createLocalLegacyAttachPort, createLocalLegacyDetachPort } from './local-legacy-attach-port.js'
 import { createLocalQueryPort } from './local-query-port.js'
 import { createLocalUseCasePorts } from './local-use-case-ports.js'
+import { createLocalWorktreeRegistryPort } from './local-worktree-registry.js'
 
 export type LocalApplicationPorts = {
   runtime: ApplicationRuntimePort
@@ -11,6 +18,7 @@ export type LocalApplicationPorts = {
   useCases: SharedUseCasePorts
   legacyAttach: LegacyAttachPort
   legacyDetach: LegacyDetachPort
+  worktreeRegistry: WorktreeRegistryPort
 }
 
 export type LocalApplicationPortsOptions = {
@@ -38,6 +46,7 @@ export function createLocalApplicationPorts(
     legacyAttach: createLocalLegacyAttachPort(context, queries.inspectWorktree, {
       packageRoot: options.packageRoot
     }),
-    legacyDetach: createLocalLegacyDetachPort(context, queries.inspectWorktree)
+    legacyDetach: createLocalLegacyDetachPort(context, queries.inspectWorktree),
+    worktreeRegistry: createLocalWorktreeRegistryPort(context)
   }
 }

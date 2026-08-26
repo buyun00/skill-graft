@@ -16,6 +16,7 @@ import {
 import { createLocalP2ApplicationPorts, localLibraryCaptureRoots } from '../adapters/local-p2-ports.js'
 import { createLocalQueryPort } from '../adapters/local-query-port.js'
 import { createLocalUseCasePorts } from '../adapters/local-use-case-ports.js'
+import { createLocalWorktreeRegistryPort } from '../adapters/local-worktree-registry.js'
 import { createPersistentRequestLedger } from '../adapters/persistent-request-ledger.js'
 import { createSnapshotRepository } from '../adapters/snapshot-repository.js'
 import {
@@ -231,6 +232,7 @@ export function createDshHost(options: CreateDshHostOptions): DshHost {
     },
     recovery: { recover: async () => { await ensureReady(); await recoverDurable() } },
     queries,
+    worktreeRegistry: createLocalWorktreeRegistryPort(context),
     useCases: createLocalUseCasePorts(context),
     legacyAttach: legacy.legacyAttach,
     legacyDetach: legacy.legacyDetach,
