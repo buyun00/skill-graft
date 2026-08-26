@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { openLocalHost } from '../dist/local/create-local-host.js'
 import { projectLegacyResult } from '../dist/local/compat/legacy-projector.js'
 import { daemonStatus, doctorHub, resolveDataRoot as resolveInstallDataRoot } from '../dist/control/install.js'
+import { createProductService } from './product-service.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const hubRoot = path.resolve(__dirname, '..')
@@ -622,6 +623,12 @@ export function createHttpServer(options = {}) {
   if (!capability) throw new TypeError('options.capability must come from createHttpCapability()')
   const activeStreams = new Set()
   const bridge = createApplicationBridge(host, packageRoot, dataRoot, getDiagnostics, getDaemonStatus)
+  const productService = createProductService({
+    packageRoot,
+    dataRoot,
+    host,
+    executeTyped: bridge.executeTyped
+  })
   const serveWeb = createWebResponder(servedWebRoot, capability)
 
   function requireCapability(req) {
@@ -773,6 +780,52 @@ export function createHttpServer(options = {}) {
       const url = new URL(req.url || '/', 'http://loopback.invalid')
 
       if (url.pathname.startsWith('/api/')) {
+        const isProductRoute = url.pathname === '/api/product' || url.pathname.startsWith('/api/product/')
+        if (isProductRoute) {
+          const method = req.method || 'GET'
+          if (method !== 'GET' && method !== 'POST') {
+            throw new HttpTransportError(
+              405,
+              'HTTP_METHOD_NOT_ALLOWED',
+              `${method} is not allowed for ${url.pathname}`,
+              { headers: { Allow: 'GET, POST' } }
+            )
+          }
+
+          let body = {}
+          if (method === 'POST') {
+            requireCapability(req)
+            if (!isJsonContentType(req.headers?.['content-type'])) {
+              throw new HttpTransportError(
+                415,
+                'HTTP_UNSUPPORTED_MEDIA_TYPE',
+                'POST requests require Content-Type: application/json'
+              )
+            }
+            body = await readJsonBody(req, bodyLimitBytes)
+          }
+
+          try {
+            const productPathname = url.pathname.slice('/api/product'.length) || '/'
+            const data = await productService.handle({
+              method,
+              pathname: productPathname,
+              body,
+              searchParams: url.searchParams
+            })
+            sendJson(res, 200, data)
+          } catch (error) {
+            if (error instanceof HttpTransportError) throw error
+            throw new HttpTransportError(
+              Number(error?.status) || 500,
+              typeof error?.code === 'string' && error.code ? error.code : 'HTTP_INTERNAL',
+              error?.message || String(error),
+              { details: error?.details }
+            )
+          }
+          return
+        }
+
         const allowed = API_METHODS.get(url.pathname)
         if (!allowed) throw new HttpTransportError(404, 'HTTP_NOT_FOUND', 'API route not found')
         if (!allowed.includes(req.method || 'GET')) {

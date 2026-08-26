@@ -4,16 +4,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const vendoredGlassRoot = path.resolve(__dirname, 'vendor/graft-glass-ui')
-
-function glassSrcDir() {
-  return path.join(vendoredGlassRoot, 'src')
-}
 
 const PANEL_BUILD_INPUTS = [
   'lib',
   'src',
-  'vendor',
   'next.config.mjs',
   'package-lock.json',
   'package.json',
@@ -57,16 +51,7 @@ const nextConfig = {
   ...(isDev ? {} : { output: 'export' }),
   trailingSlash: false,
   images: { unoptimized: true },
-  transpilePackages: ['graft-glass-ui'],
   generateBuildId: async () => panelBuildId(),
-  webpack: (config) => {
-    config.resolve.alias = {
-      ...config.resolve.alias,
-      'graft-glass-ui': vendoredGlassRoot,
-      '@': glassSrcDir()
-    }
-    return config
-  }
 }
 
 if (isDev) {

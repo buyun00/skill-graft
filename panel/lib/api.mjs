@@ -76,6 +76,36 @@ export function createPanelApi(options = {}) {
     })
   }
 
+  // Product routes are intentionally kept separate from the legacy command
+  // transport.  The product UI deals in user-facing objects and accepts both
+  // the direct response shape and the common { ok, data } envelope emitted by
+  // the product server.
+  function unwrapProduct(value) {
+    if (value && typeof value === 'object' && value.ok === false) {
+      const error = new Error(transportMessage(value, value.status || 400))
+      error.code = value.error?.code || 'PRODUCT_ERROR'
+      error.data = value
+      throw error
+    }
+    if (
+      value
+      && typeof value === 'object'
+      && value.ok === true
+      && Object.prototype.hasOwnProperty.call(value, 'data')
+    ) {
+      return value.data
+    }
+    return value
+  }
+
+  function productGet(path) {
+    return request(path).then(unwrapProduct)
+  }
+
+  function productPost(path, body = {}) {
+    return post(path, body).then(unwrapProduct)
+  }
+
   async function commandEnvelope(kind, input = {}, commandOptions = {}) {
     const requestId = commandOptions.requestId || createPanelRequestId(kind)
     const envelope = assertEnvelope(kind, await post(API_PATHS.command, {
@@ -105,9 +135,43 @@ export function createPanelApi(options = {}) {
 
   const getDiagnostics = () => request(API_PATHS.diagnostics)
 
+  const productApi = {
+    overview: () => productGet('/api/product/overview'),
+    pickFolder: (input = {}) => productPost('/api/product/pick-folder', input),
+    analyze: (input = {}) => productPost('/api/product/analyze', input),
+    initializeLibrary: (input = {}) => productPost('/api/product/library/initialize', input),
+    library: () => productGet('/api/product/library'),
+    libraryFile: (input = {}) => {
+      const query = new URLSearchParams()
+      Object.entries(input).forEach(([key, value]) => {
+        if (value != null && value !== '') query.set(key, String(value))
+      })
+      return productGet(`/api/product/library/file${query.toString() ? `?${query}` : ''}`)
+    },
+    libraryDraft: (input = {}) => productPost('/api/product/library/draft', input),
+    compare: (input = {}) => productPost('/api/product/compare', input),
+    versionCompare: (input = {}) => productPost('/api/product/version/compare', input),
+    comparison: (id) => productGet(`/api/product/comparison?comparisonId=${encodeURIComponent(id || '')}`),
+    draft: (id) => productGet(`/api/product/draft?draftId=${encodeURIComponent(id || '')}`),
+    draftFile: (input = {}) => productPost('/api/product/draft/file', input),
+    draftConfirm: (input = {}) => productPost('/api/product/draft/confirm', input),
+    draftAi: (input = {}) => productPost('/api/product/draft/ai', input),
+    draftCommit: (input = {}) => productPost('/api/product/draft/commit', input),
+    rollbackVersion: (input = {}) => productPost('/api/product/version/rollback', input),
+    takeoverPreview: (input = {}) => productPost('/api/product/takeover/preview', input),
+    takeoverApply: (input = {}) => productPost('/api/product/takeover/apply', input),
+    takeoverRollback: (input = {}) => productPost('/api/product/takeover/rollback', input),
+    workspaceCheck: (input = {}) => productPost('/api/product/workspace/check', input),
+    chat: (input = {}) => productPost('/api/product/chat', input),
+    chatStatus: (sessionId) => productGet(
+      `/api/product/chat/status?sessionId=${encodeURIComponent(sessionId || '')}`,
+    ),
+  }
+
   return {
     getHealth: () => request(API_PATHS.health),
     getDiagnostics,
+    productApi,
     getDaemon: async () => (await getDiagnostics())?.daemon || null,
     command,
     commandEnvelope,

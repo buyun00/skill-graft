@@ -81,9 +81,9 @@ const shippedText = files
   .filter((file) => /\.(?:html|js|css)$/.test(file))
   .map((file) => fs.readFileSync(file, 'utf8'))
   .join('\n')
-if (!shippedText.includes('/api/command')) throw new Error('production export is missing the typed command endpoint')
-if (/\.\.[\\/]\.\.[\\/]graft-glass-ui|[A-Za-z]:[\\/][^\n]*graft-glass-ui/i.test(shippedText)) {
-  throw new Error('production export contains an adjacent-repository glass dependency')
+if (!shippedText.includes('/api/product/overview')) throw new Error('production export is missing the product overview endpoint')
+if (/graft-glass-ui/i.test(shippedText)) {
+  throw new Error('production export contains graft-glass-ui')
 }
 
 console.log(`verified ${htmlFiles.length} HTML files and ${files.length} exported files for ${expectedBuildId}`)

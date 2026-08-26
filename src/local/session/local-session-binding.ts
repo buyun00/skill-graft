@@ -147,12 +147,15 @@ export function createLocalSessionBinding(
       const additionalDirectories = input.locator?.kind === 'worktree'
         ? [input.locator.value]
         : []
+      const workingDirectory = input.task.kind === 'chat' && input.locator?.kind === 'worktree'
+        ? path.resolve(input.locator.value)
+        : ctx.hubRoot
       const value: LocalSessionBinding = {
         sessionId: input.sessionId,
         attemptId: input.attemptId,
         task: input.task,
         locator: input.locator,
-        workingDirectory: ctx.hubRoot,
+        workingDirectory,
         additionalDirectories,
         environment: {
           CODEX_HOME: codexHome,

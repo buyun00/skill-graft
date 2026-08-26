@@ -121,6 +121,8 @@ function projectV2(session: HubSession): SessionView {
     endedAt: session.endedAt || undefined,
     exitCode: session.exitCode,
     error: session.runnerErrorCode || undefined,
+    summary: session.summary || undefined,
+    lastMessage: session.lastMessage || undefined,
     canResume: capabilities.canResume,
     steps: (session.steps || []).map((step) => ({ ...step })),
     events: (session.events || []).map((event) => ({ ...event })),
@@ -226,6 +228,56 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
+const MAX_LAST_MESSAGE_BYTES = 1_000_000
+
+function readBoundLastMessage(
+  ctx: HubContext,
+  binding: LocalSessionBindingPort,
+  session: HubSession
+): string | undefined {
+  if (!session.lastFile || !session.attemptId) return undefined
+
+  let bound: ReturnType<LocalSessionBindingPort['read']>
+  try {
+    bound = binding.read(session.id, session.attemptId)
+  } catch {
+    return undefined
+  }
+  const artifacts = bound?.artifacts
+  if (!artifacts?.attemptRoot || !artifacts.lastMessagePath) return undefined
+
+  try {
+    const attemptRoot = ctx.path.resolve(artifacts.attemptRoot)
+    const expected = ctx.path.resolve(attemptRoot, 'last-message.txt')
+    const boundLastFile = ctx.path.resolve(artifacts.lastMessagePath)
+    const sessionLastFile = ctx.path.resolve(session.lastFile)
+    const samePath = (left: string, right: string) =>
+      ctx.path.comparisonKey(left) === ctx.path.comparisonKey(right)
+    if (!samePath(boundLastFile, expected) || !samePath(sessionLastFile, expected)) return undefined
+    if (ctx.fs.isSymbolicLink?.(expected) || !ctx.fs.isFile(expected)) return undefined
+    const realExpected = ctx.fs.realpath(expected)
+    if (!realExpected || !samePath(realExpected, expected)) return undefined
+
+    const content = ctx.fs.readText(expected)
+    if (typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > MAX_LAST_MESSAGE_BYTES) {
+      return undefined
+    }
+    return content
+  } catch {
+    return undefined
+  }
+}
+
+function refreshLastMessage(
+  ctx: HubContext,
+  binding: LocalSessionBindingPort,
+  session: HubSession
+): void {
+  const content = readBoundLastMessage(ctx, binding, session)
+  if (content !== undefined) session.lastMessage = content
+  else delete session.lastMessage
+}
+
 export function createLocalSessionPort(ctx: HubContext, options: LocalSessionPortOptions = {}): LocalSessionPort {
   const env = options.environment || process.env
   const packageRoot = options.packageRoot || ctx.hubRoot
@@ -267,30 +319,33 @@ export function createLocalSessionPort(ctx: HubContext, options: LocalSessionPor
   }
 
   const synchronize = async (input: HubSession): Promise<HubSession> => {
-    if (!isV2(input) || !input.runnerId || !input.attemptId || !ACTIVE_STATUSES.has(input.status)) return input
-    const request = {
-      sessionId: input.id,
-      attemptId: input.attemptId,
-      runnerId: input.runnerId
-    }
-    const status = await runner.status(request)
-    const events = await runner.events({ ...request, afterSequence: input.runnerEventSequence || 0 })
+    if (!isV2(input)) return input
     const before = JSON.stringify(input)
     const next = clone(input)
-    if (events.ok) {
-      for (const event of events.value.events) applyRunnerEvent(next, event)
-      next.runnerEventSequence = Math.max(next.runnerEventSequence || 0, events.value.nextSequence)
-    }
-    if (status.ok) applyRunnerSnapshot(next, status.value, ctx.clock.nowIso())
-    else {
-      applyRunnerSnapshot(next, {
-        runnerId: input.runnerId,
+    if (input.runnerId && input.attemptId && ACTIVE_STATUSES.has(input.status)) {
+      const request = {
+        sessionId: input.id,
         attemptId: input.attemptId,
-        state: 'failed',
-        error: status.error
-      }, ctx.clock.nowIso())
+        runnerId: input.runnerId
+      }
+      const status = await runner.status(request)
+      const events = await runner.events({ ...request, afterSequence: input.runnerEventSequence || 0 })
+      if (events.ok) {
+        for (const event of events.value.events) applyRunnerEvent(next, event)
+        next.runnerEventSequence = Math.max(next.runnerEventSequence || 0, events.value.nextSequence)
+      }
+      if (status.ok) applyRunnerSnapshot(next, status.value, ctx.clock.nowIso())
+      else {
+        applyRunnerSnapshot(next, {
+          runnerId: input.runnerId,
+          attemptId: input.attemptId,
+          state: 'failed',
+          error: status.error
+        }, ctx.clock.nowIso())
+      }
+      if (!events.ok) next.runnerErrorCode = events.error.code
     }
-    if (!events.ok) next.runnerErrorCode = events.error.code
+    refreshLastMessage(ctx, binding, next)
     if (JSON.stringify(next) === before) return input
     return update(input, (stored) => Object.assign(stored, next))
   }
@@ -456,6 +511,7 @@ export function createLocalSessionPort(ctx: HubContext, options: LocalSessionPor
         next.promptFile = prepared.artifacts.promptPath
         next.logFile = prepared.artifacts.stdoutPath
         next.lastFile = prepared.artifacts.lastMessagePath
+        next.lastMessage = undefined
         next.runnerArtifacts = prepared.artifacts
         next.steps = input.task.steps.map((step) => ({ ...step, status: 'pending' }))
         appendEvent(next, {

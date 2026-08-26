@@ -341,24 +341,16 @@ export function createCodexSessionRunner(
     atomicJson(binding.artifacts.requestPath, request)
     let controllerPid = 0
     try {
-      const quoteCommandLine = (value: string) => `"${value.replace(/"/g, '')}"`
       const psLiteral = (value: string) => `'${value.replace(/'/g, "''")}'`
       const controllerLog = path.join(binding.artifacts.attemptRoot, 'controller.log')
       const encodedScript = Buffer.from(
         `[IO.File]::WriteAllText(${psLiteral(controllerLog)}, 'controller launch'); & ${psLiteral(controllerPath)} -RequestPath ${psLiteral(binding.artifacts.requestPath)} *>> ${psLiteral(controllerLog)}`,
         'utf16le'
       ).toString('base64')
-      const commandLine = [
-        quoteCommandLine(powershellExecutable),
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy', 'Bypass',
-        '-EncodedCommand', encodedScript
-      ].join(' ')
       const script = [
-        `$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${psLiteral(commandLine)}; CurrentDirectory = ${psLiteral(binding.workingDirectory)} }`,
-        'if ([int]$created.ReturnValue -ne 0 -or -not $created.ProcessId) { exit 1 }',
-        '[Console]::Out.WriteLine([int]$created.ProcessId)'
+        `$created = Start-Process -FilePath ${psLiteral(powershellExecutable)} -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',${psLiteral(encodedScript)}) -WorkingDirectory ${psLiteral(binding.workingDirectory)} -WindowStyle Hidden -PassThru`,
+        'if (-not $created -or -not $created.Id) { exit 1 }',
+        '[Console]::Out.WriteLine([int]$created.Id)'
       ].join('; ')
       const launched = controllerSpawn(powershellExecutable, [
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script

@@ -11,6 +11,7 @@ Add-Type -ReferencedAssemblies 'System.Web.Extensions.dll' -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -24,6 +25,13 @@ namespace SkillGraft.LocalRunner
         private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
         private const int JobObjectExtendedLimitInformation = 9;
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false);
+
+        private static string IsoNow()
+        {
+            // Match JavaScript Date#toISOString and the durable schema: UTC
+            // with exactly three fractional digits.
+            return DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
@@ -209,7 +217,7 @@ namespace SkillGraft.LocalRunner
                 sequence += 1;
                 StringBuilder text = new StringBuilder();
                 text.Append("{\"eventVersion\":1,\"sequence\":").Append(sequence);
-                text.Append(",\"at\":\"").Append(Escape(DateTime.UtcNow.ToString("o"))).Append("\"");
+                text.Append(",\"at\":\"").Append(Escape(IsoNow())).Append("\"");
                 text.Append(",\"type\":\"").Append(Escape(type)).Append("\"");
                 Add(text, "threadId", threadId);
                 Add(text, "itemType", itemType);
@@ -245,7 +253,7 @@ namespace SkillGraft.LocalRunner
             int childPid = 0;
             int exitCode = -1;
             bool cancellationRequested = false;
-            string startedAt = DateTime.UtcNow.ToString("o");
+            string startedAt = IsoNow();
             string errorText = null;
             IntPtr job = IntPtr.Zero;
             Process child = null;
@@ -331,7 +339,13 @@ namespace SkillGraft.LocalRunner
                     child.BeginErrorReadLine();
                     using (StreamReader prompt = new StreamReader(promptPath, Utf8, true))
                     {
-                        child.StandardInput.Write(prompt.ReadToEnd());
+                        // .NET Framework (used by Windows PowerShell 5.1) has no
+                        // ProcessStartInfo.StandardInputEncoding.  Write UTF-8
+                        // bytes directly so detached sessions do not fall back
+                        // to the machine ANSI/OEM code page for Chinese text.
+                        byte[] promptBytes = Utf8.GetBytes(prompt.ReadToEnd());
+                        child.StandardInput.BaseStream.Write(promptBytes, 0, promptBytes.Length);
+                        child.StandardInput.BaseStream.Flush();
                     }
                     child.StandardInput.Close();
                     events.Lifecycle("runner.process.started");
@@ -380,7 +394,7 @@ namespace SkillGraft.LocalRunner
                     if (child != null) child.Dispose();
                 }
 
-                string endedAt = DateTime.UtcNow.ToString("o");
+                string endedAt = IsoNow();
                 string state = cancellationRequested ? "cancelled" : errorText != null ? "failed" : "exited";
                 WriteReceipt(
                     receiptPath,
