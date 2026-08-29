@@ -12,20 +12,9 @@ export const HUB_PATHS = {
 
 export const API_PATHS = {
   health: '/api/health',
-  state: '/api/state',
-  daemon: '/api/daemon',
-  worktrees: '/api/worktrees',
-  skill: '/api/skill',
-  history: '/api/history',
-  sessions: '/api/codex/sessions',
-  session: '/api/codex/session',
+  diagnostics: '/api/host/diagnostics',
+  command: '/api/command',
   stream: '/api/codex/session/stream',
-  decide: '/api/decide',
-  analyze: '/api/analyze',
-  start: '/api/codex/start',
-  resume: '/api/codex/resume',
-  attach: '/api/worktree/attach',
-  detach: '/api/worktree/detach'
 }
 
 export function shortHash(value) {
@@ -36,11 +25,15 @@ export function shortHash(value) {
 }
 
 export function needsRepair(tree) {
-  return tree != null && tree.attached === true && (tree.overrideLinked === false || tree.officialPresent === true)
+  return tree != null && tree.attached === true && (
+    tree.officialPresent === true
+    || (tree.materialized !== true && tree.overrideLinked === false)
+  )
 }
 
 export function workspaceStatus(tree) {
-  if (tree && tree.attached === true && tree.overrideLinked === true && tree.officialPresent === false) {
+  if (tree && tree.attached === true && tree.officialPresent === false
+    && (tree.materialized === true || tree.overrideLinked === true)) {
     return { status: 'ok', statusLabel: '正常' }
   }
   if (!tree || tree.attached === false) {
@@ -94,6 +87,7 @@ export function mapWorkspaceRow(tree) {
     name: (tree && tree.name) || '',
     path: tree && tree.path,
     attached: tree && tree.attached,
+    materialized: tree && tree.materialized,
     overrideLinked: tree && tree.overrideLinked,
     officialPresent: tree && tree.officialPresent,
     status: status.status,
@@ -110,11 +104,24 @@ export function overviewPrimary(attention) {
   return (attention && attention.length) ? '需要你处理' : '一切正常'
 }
 
+function diagnosticStatus(diagnostics, key, checked) {
+  if (checked !== true) return { status: 'warn', label: '检测中' }
+  const record = diagnostics && typeof diagnostics === 'object' ? diagnostics[key] : null
+  if (record && typeof record === 'object' && record.ok === true) {
+    return { status: 'ok', label: '可用' }
+  }
+  if (record && typeof record === 'object' && record.ok === false) {
+    return { status: 'off', label: '不可用' }
+  }
+  return { status: 'warn', label: '检测失败' }
+}
+
 export function sessionFromEnvelope(payload) {
   if (!payload || typeof payload !== 'object') return null
-  const nested = payload.session
+  const body = payload.data && typeof payload.data === 'object' ? payload.data : payload
+  const nested = body.session
   if (nested && typeof nested === 'object') return nested
-  if (payload.id || payload.status) return payload
+  if (body.id || body.status) return body
   return null
 }
 
@@ -136,15 +143,16 @@ export function codexSessionHref(payload) {
 }
 
 export function mapOverview(input = {}) {
+  const stateAvailable = input.state != null && typeof input.state === 'object'
   const state = input.state || {}
   const worktreesPayload = input.worktrees || {}
-  const health = input.health || {}
-  const daemon = input.daemon || {}
   const items = Array.isArray(state.items) ? state.items : []
   const trees = Array.isArray(worktreesPayload.worktrees) ? worktreesPayload.worktrees : []
+  const residentSkills = Array.isArray(state.resident) ? state.resident : []
+  const adoptedSkills = Array.isArray(state.adopted) ? state.adopted : []
+  const librarySkills = [...residentSkills, ...adoptedSkills]
+    .filter((skill) => skill && skill.hasSkillMd !== false)
   const counts = state.counts || {}
-  const resident = Number(counts.resident || 0)
-  const adopted = Number(counts.adopted || 0)
   const queued = Number(counts.queued || 0)
   const proposed = Number(counts.proposed || 0)
 
@@ -152,35 +160,54 @@ export function mapOverview(input = {}) {
   const repairTrees = trees.filter(needsRepair)
   const attention = [...updateItems.map(mapUpdateAttention), ...repairTrees.map(mapRepairAttention)]
   const pending = queued + proposed + repairTrees.length
-  const skillCount = resident + adopted
+  const librarySkillCount = librarySkills.length
+  const connectedSkillCount = librarySkills.filter((skill) => skill.attached === true).length
   const worktreeCount = trees.length
+  const attachedWorktreeCount = trees.filter((tree) => tree && tree.attached === true).length
+  const worktreesPhase = input.worktreesPhase || (input.worktrees ? 'ready' : 'loading')
 
-  const statsParts = [`${skillCount} Skills`, `${worktreeCount} Worktrees`]
+  const statsParts = [
+    `技能库内容 ${librarySkillCount}`,
+    `工作树已连接 Skill ${connectedSkillCount}`
+  ]
+  if (worktreesPhase === 'ready') {
+    statsParts.push(`已识别工作树 ${worktreeCount}`, `已连接工作树 ${attachedWorktreeCount}`)
+  } else if (worktreesPhase === 'error') {
+    statsParts.push('工作树扫描失败')
+  } else {
+    statsParts.push('工作树扫描中')
+  }
   if (pending > 0) statsParts.push(`${pending} 待处理`)
 
   const displayName = displayNameOf(input.userName)
   const hubRoot = state.hubRoot || ''
   const gameRepo = state.gameRepo || null
-  const gitOk = Boolean(health.ok && gameRepo)
-  const sessionsReachable = input.sessionsReachable === true || (input.sessions != null && typeof input.sessions === 'object')
-  const daemonGreen = Boolean(daemon.ok)
-  const codexOk = daemonGreen || sessionsReachable
+  const repositorySelected = typeof gameRepo === 'string' && gameRepo.trim().length > 0
+  const stateChecked = input.stateChecked === true || stateAvailable
 
   return {
     displayName,
     envLabel: `${displayName} 开发环境`,
     stats: statsParts.join(' · '),
     pending,
-    skillCount,
+    skillCount: librarySkillCount,
+    librarySkillCount,
+    connectedSkillCount,
     worktreeCount,
+    attachedWorktreeCount,
     attention,
     workspaces: trees.map(mapWorkspaceRow),
     updateCount: updateItems.length,
     overviewPrimary: overviewPrimary(attention),
-    git: gitOk ? { status: 'ok', label: '正常' } : { status: 'off', label: '未连接' },
-    codex: codexOk
-      ? { status: 'ok', label: daemonGreen ? '正常' : '可访问' }
-      : { status: 'off', label: '未连接' },
+    git: diagnosticStatus(input.diagnostics, 'git', input.diagnosticsChecked),
+    repository: !stateChecked
+      ? { status: 'warn', label: '读取中' }
+      : !stateAvailable
+        ? { status: 'warn', label: '读取失败' }
+        : repositorySelected
+          ? { status: 'ok', label: '已选择' }
+          : { status: 'off', label: '未选择' },
+    codex: diagnosticStatus(input.diagnostics, 'codex', input.diagnosticsChecked),
     storage: hubRoot ? `本机 hub · ${hubRoot}` : '本机 hub',
     hubRoot,
     gameRepo,

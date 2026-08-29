@@ -42,24 +42,26 @@ The idea is not bound to one kind of project. The current "do we recognize this 
 | Decide inbox | `sg decide --id … --action adopt\|merge\|reject` | Adopt / merge-in / reject |
 | Edit Skill / chat / detach | `sg edit` / `chat` / `detach` / `resume` | Also enqueued as Codex sessions |
 | Keep-alive | `sg daemon status` / `GET /api/daemon` | Windowless daemon guarding the local HTTP API (:18765), restarts if killed |
-| HTTP / web | Started by the daemon; or `npm run api` | `:18765` API plus the current glass panel; transport is still CLI-oriented and will move to the shared Application |
+| HTTP / web | Started by the daemon; or `npm run api` | `:18765` API plus the glass panel; CLI, HTTP, and web enter the same in-process Application without a CLI child process |
 
-Current pre-migration funnel:
+Current local-distribution call chain:
 
 ```text
 Human / HTTP / Git hook
         │
         ▼
-   sg / ozdqp-hub (CLI)   ← current local entry point
+ CLI / HTTP / web / hook (Local transports)
         ▼
-      core
+  HubApplication.execute(command)
         ▼
-     adapters (paths / fs / links / git)
+  pure Core rules and plans
+        ▼
+  low-level ports → Local adapters (paths / fs / links / git / runner)
 ```
 
-The target is not to make DSH call this external CLI. The single business contract will be shared `HubApplication.execute(command)`: the complete local distribution calls it through CLI/HTTP/web adapters, while the complete DSH distribution composes it in-process. Only host adapters, lifecycle, UI, and packaging differ; neither distribution is a runtime prerequisite for the other.
+Shared `Contracts`, pure `Core`, and `HubApplication.execute(command)` are now the Local distribution's single business contract; the CLI and legacy HTTP shapes are compatibility projections. The target is not to make DSH call this external CLI: the future complete DSH distribution will compose the same Application in-process. Only host adapters, lifecycle, UI, SessionRunner, and packaging differ; neither distribution is a runtime prerequisite for the other.
 
-The first graft is driven by a conversation: recon → `manage-skill-visibility -Mode Disable` → `attach-library -ConfigureGit -PreferLibrary` → acceptance. After the CLI process exits the conversation keeps running (on Windows it is launched via WMI so it is not killed off together with the Job Object).
+First graft and detach still begin with a background Codex session, but the prompt may only call session-bound typed commands: `sg apply-legacy-attach` / `sg apply-legacy-detach`. Core produces the plan, Application checks the session and idempotency key, and the Local adapter executes a rollback-capable transaction. Reachable business policy no longer lives in the legacy PowerShell files. The conversation may continue after the CLI process exits.
 
 ---
 
@@ -124,7 +126,7 @@ On success stdout is UTF-8 JSON. You can also set `HUB_ROOT` to point at another
 sg attach --worktree D:\your-checkout
 ```
 
-The CLI returns a session immediately (`status: running`, with a pid); Codex does the detachment and claim in the background (today: creating links). Options:
+The CLI returns a session immediately (normally `queued` / `running`, with a pid once started); Codex performs reconnaissance and submits a session-authorized typed apply command in the background (materialization still uses links today). Options:
 
 ```text
 --intent "…"           extra intent
@@ -151,11 +153,11 @@ If a worktree has the hub hooks installed, `fetch`/`pull` of official Skills onl
 
 ```text
 sg decide --id <id> --action adopt
-sg decide --id <id> --action merge --merge-target skills/ozdqp-development
+sg decide --id <id> --action merge --merge-target skills/<skill-name>
 sg decide --id <id> --action reject
 ```
 
-### HTTP (no web UI)
+### HTTP and web
 
 The installer hands the API over to the daemon for keep-alive. You can also run it in the foreground:
 
@@ -163,7 +165,7 @@ The installer hands the API over to the daemon for keep-alive. You can also run 
 npm run api
 ```
 
-`GET http://127.0.0.1:18765/api/health`, `/api/state`, `/api/worktrees`, `/api/daemon`. The management page has been removed and will be redone later.
+Open `http://127.0.0.1:18765/` for the management page. `GET /api/health`, `/api/state`, `/api/worktrees`, and `/api/daemon` remain compatible; typed writes use `POST /api/command`. Legacy routes such as `/api/decide` return deprecation metadata but still enter the in-process Application and never spawn the CLI.
 
 ```text
 sg daemon status
@@ -176,7 +178,7 @@ sg daemon start
 ```text
 npm test              # tsc + layered tests
 npm run test:cli      # CLI only
-npm run test:http     # HTTP forwarding and field parity
+npm run test:http     # HTTP/Application and compatibility-field parity
 ```
 
 ---
@@ -195,15 +197,13 @@ The public repo only holds the graft runtime. Moving to another machine: clone s
 
 ## Roadmap
 
-What has stabilized is the query surface and "the CLI is the only control plane". What comes next, in rough dependency order:
+Shared `Contracts/Core/Application` and a complete Local composition are now in place; CLI, HTTP, web, and compatibility PowerShell façades no longer own separate business policy. The dual-host plan continues in this order:
 
-1. **Configurable tree-recognition rules.** Drop the hard-coded `AGENTS.md` + `baloot_client`; use a list or probe rule to graft any Git worktree.
-2. **Fold disk-writing commands back into core.** `repair-links` / `ingest` / `decide` still shell out to `.ps1`; fold them into the Node ports so Windows / macOS / Linux share one set of verbs.
-3. **Observable sessions.** Have Codex write back to `sessions.json` when it finishes (a detached process exiting can currently leave the state stuck on running); optional `hub attach --wait` that blocks until the conversation ends and prints acceptance.
-4. **detach / edit on par with attach.** Detaching and editing a single Skill are both background conversations, with acceptance fields aligned to the query JSON.
-5. **A fuller inbox.** Suggestions (adopt / merge / reject) filled in by the analysis conversation; the panel only renders the shape the CLI gives.
-6. **Multi-machine / small team.** Runtime on GitHub, corpus via a separate private sync (or a future team service) — never push someone else's project details into the public repo.
-7. **A new management page.** Consumes only CLI/HTTP JSON and no longer computes "is it attached" in the frontend.
+1. **P2: snapshots, pins, state migration, and cross-process locks.** Establish a content-addressed version-library truth and crash-recoverable transactions.
+2. **P3: pin-based copy materialization.** Replace live Junction / HardLink projection with ordinary files, including conflict, drift, rollback, and path-safety handling.
+3. **P4–P6: a complete independent DSH distribution.** Compose the same Application in the DSH process, then add a host-native Runner, lifecycle, and DSH UI.
+4. **P7–P8: migration, compatibility, and dual-host coexistence.** Prove Local-only, DSH-only, and both hosts on one machine without runtime dependency on one another.
+5. **P9–P10: upgrade, uninstall, rollback, and final release.** Seal a traceable release candidate with real packages, processes, and UI acceptance.
 
 For finer layer boundaries see section 9 of `docs/系统设计与理念.md`; the query spec for this stage is in `docs/三层本阶段规格.md`.
 

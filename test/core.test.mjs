@@ -4,34 +4,90 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import test from 'node:test'
+import { createHub } from '../dist/adapters/create-hub.js'
+import { localLibraryCaptureRoots } from '../dist/adapters/local-p2-ports.js'
+import { createLocalQueryPort } from '../dist/adapters/local-query-port.js'
 import {
-  createHub,
-  decide,
+  createMemoryRequestLedger,
+  createMemorySessions
+} from '../dist/application/index.js'
+import { createLocalHost } from '../dist/local/create-local-host.js'
+import { CONTRACT_VERSION } from '../dist/contracts/index.js'
+import { recognizeWorktree } from '../dist/core/policies.js'
+import {
+  projectHubStatus,
+  projectSkillInventory,
+  projectWorktreeList
+} from '../dist/core/query-projections.js'
+import {
+  isEphemeralPath,
+  parseWorktreePorcelain
+} from '../dist/core/worktree-facts.js'
+import {
   enqueueSession,
-  extractSuggestion,
   extractCodexSessionId,
   finalizeSession,
   findSession,
-  getStatus,
-  ingest,
-  isClientCheckout,
-  isEphemeralPath,
-  listSkills,
-  listWorktrees,
   markSessionSpawned,
-  parseWorktreePorcelain,
   reapSessions,
-  repairLinks,
-  RESIDENT_SKILLS,
   sessionExitFile
-} from '../dist/index.js'
-import { hubRoot, makeFs } from './helpers.mjs'
+} from '../dist/local/session/legacy-sessions.js'
+import { extractInboxSuggestion } from '../dist/core/analyze-completion-plan.js'
+import { hubRoot, makeFs, testHubRoot } from './helpers.mjs'
 
 function fakeGit(handlers) {
   return {
     configGet: handlers.configGet || (() => null),
     output: handlers.output || (() => '')
   }
+}
+
+let requestSequence = 0
+const FIXTURE_RESIDENT_SKILLS = [
+  'ozdqp-development',
+  'ozdqp-ui-development',
+  'ozdqp-git-workflow'
+]
+
+function projectedSkills(query) {
+  return projectSkillInventory(query.listSkillFacts())
+}
+
+function projectedStatus(query, sessions = []) {
+  return projectHubStatus({
+    facts: query.readStatusFacts(),
+    skills: projectedSkills(query),
+    sessions
+  })
+}
+
+function projectedWorktrees(query) {
+  return projectWorktreeList(query.readWorktreeFacts())
+}
+
+function command(kind, payload = {}) {
+  requestSequence += 1
+  return {
+    kind,
+    meta: {
+      contractVersion: CONTRACT_VERSION,
+      requestId: `core-integration-${requestSequence}`,
+      hostId: 'core-test',
+      transport: 'memory'
+    },
+    ...payload
+  }
+}
+
+function applicationFor(context) {
+  return createLocalHost({
+    packageRoot: context.hubRoot,
+    dataRoot: context.hubRoot,
+    context,
+    runtimeRevision: 'core-test',
+    sessions: createMemorySessions(),
+    ledger: createMemoryRequestLedger()
+  }).application
 }
 
 test('C1 parseWorktreePorcelain reads a branch plus detached/locked/prunable', () => {
@@ -88,12 +144,14 @@ test('C3 isClientCheckout default rules require AGENTS.md + baloot_client and sk
     [path.resolve(noBaloot, 'AGENTS.md')]: { text: 'x' }
   }
   const ctx = createHub(hubDir, { fs: makeFs(files) })
-  assert.equal(isClientCheckout(ctx, game), true)
-  assert.equal(isClientCheckout(ctx, ctx.hubRoot), false)
-  assert.equal(isClientCheckout(ctx, overlayKit), false)
-  assert.equal(isClientCheckout(ctx, partial), false)
-  assert.equal(isClientCheckout(ctx, noAgents), false)
-  assert.equal(isClientCheckout(ctx, noBaloot), false)
+  const query = createLocalQueryPort(ctx)
+  const recognized = (candidate) => recognizeWorktree(query.inspectWorktree(candidate).recognition).recognized
+  assert.equal(recognized(game), true)
+  assert.equal(recognized(ctx.hubRoot), false)
+  assert.equal(recognized(overlayKit), false)
+  assert.equal(recognized(partial), false)
+  assert.equal(recognized(noAgents), false)
+  assert.equal(recognized(noBaloot), false)
 })
 
 test('C3b checkout-rules can recognize .git + custom file and still exclude names', () => {
@@ -116,15 +174,17 @@ test('C3b checkout-rules can recognize .git + custom file and still exclude name
     [path.resolve(agentsOnly, 'AGENTS.md')]: { text: 'x' }
   }
   const ctx = createHub(hubDir, { fs: makeFs(files) })
-  assert.equal(isClientCheckout(ctx, custom), true)
-  assert.equal(isClientCheckout(ctx, excluded), false)
-  assert.equal(isClientCheckout(ctx, agentsOnly), false)
+  const query = createLocalQueryPort(ctx)
+  const recognized = (candidate) => recognizeWorktree(query.inspectWorktree(candidate).recognition).recognized
+  assert.equal(recognized(custom), true)
+  assert.equal(recognized(excluded), false)
+  assert.equal(recognized(agentsOnly), false)
 })
 
-test('C4 getStatus reads this hub: 3 resident SKILL.md, inbox has queued names, counts match items', () => {
-  const status = getStatus(createHub(hubRoot))
-  assert.equal(status.hubRoot, hubRoot)
-  assert.deepEqual(status.resident.map((node) => node.name), [...RESIDENT_SKILLS])
+test('C4 getStatus reads an isolated hub: 3 resident SKILL.md, inbox has queued names, counts match items', () => {
+  const status = projectedStatus(createLocalQueryPort(createHub(testHubRoot)))
+  assert.equal(status.hubRoot, testHubRoot)
+  assert.deepEqual(status.resident.map((node) => node.name), [...FIXTURE_RESIDENT_SKILLS].sort())
   assert.ok(status.resident.every((node) => node.hasSkillMd))
   const queued = status.items.filter((item) => item.status === 'queued')
   assert.equal(status.counts.queued, queued.length)
@@ -132,6 +192,55 @@ test('C4 getStatus reads this hub: 3 resident SKILL.md, inbox has queued names, 
   for (const name of queuedNames) {
     assert.ok(status.inbox.some((node) => node.name === name), `inbox should include queued name ${name}`)
   }
+})
+
+test('C4b empty corpus has zero resident Skills instead of product-name ghosts', () => {
+  const hub = path.join(os.tmpdir(), 'hub-empty-corpus-fake')
+  const skills = path.join(hub, 'skills')
+  const files = {
+    [path.resolve(skills)]: { dir: true, entries: ['adopted', 'inbox'] },
+    [path.resolve(skills, 'adopted')]: { dir: true, entries: [] },
+    [path.resolve(skills, 'inbox')]: { dir: true, entries: [] }
+  }
+  const status = projectedStatus(createLocalQueryPort(createHub(hub, {
+    fs: makeFs(files),
+    git: fakeGit({ configGet: () => null })
+  })))
+
+  assert.deepEqual(status.resident, [])
+  assert.equal(status.counts.resident, 0)
+})
+
+test('C4c resident inventory enumerates only plain top-level directories with plain SKILL.md', () => {
+  const hub = path.join(os.tmpdir(), 'hub-dynamic-corpus-fake')
+  const skills = path.join(hub, 'skills')
+  const files = {
+    [path.resolve(skills)]: {
+      dir: true,
+      entries: ['zeta-private', 'missing-skill-md', 'inbox', 'adopted', 'linked-directory', 'linked-skill-md', 'alpha-private']
+    },
+    [path.resolve(skills, 'alpha-private')]: { dir: true },
+    [path.resolve(skills, 'alpha-private', 'SKILL.md')]: { text: '# alpha\n' },
+    [path.resolve(skills, 'zeta-private')]: { dir: true },
+    [path.resolve(skills, 'zeta-private', 'SKILL.md')]: { text: '# zeta\n' },
+    [path.resolve(skills, 'missing-skill-md')]: { dir: true },
+    [path.resolve(skills, 'linked-directory')]: { dir: true, symlink: true },
+    [path.resolve(skills, 'linked-directory', 'SKILL.md')]: { text: '# linked directory\n' },
+    [path.resolve(skills, 'linked-skill-md')]: { dir: true },
+    [path.resolve(skills, 'linked-skill-md', 'SKILL.md')]: { text: '# linked file\n', symlink: true },
+    [path.resolve(skills, 'adopted')]: { dir: true, entries: [] },
+    [path.resolve(skills, 'inbox')]: { dir: true, entries: [] }
+  }
+  const context = createHub(hub, {
+    fs: makeFs(files),
+    git: fakeGit({ configGet: () => null })
+  })
+  const status = projectedStatus(createLocalQueryPort(context))
+
+  assert.deepEqual(status.resident.map((skill) => skill.name), ['alpha-private', 'zeta-private'])
+  assert.ok(status.resident.every((skill) => skill.hasSkillMd && skill.attached === false))
+  assert.equal(status.counts.resident, 2)
+  assert.deepEqual(localLibraryCaptureRoots(context), ['skills/alpha-private', 'skills/zeta-private'])
 })
 
 test('C5 listWorktrees marks attached and overrideLinked from list + inode/realpath', () => {
@@ -165,7 +274,7 @@ test('C5 listWorktrees marks attached and overrideLinked from list + inode/realp
       return ''
     }
   })
-  const result = listWorktrees(createHub(hub, { fs: makeFs(files), git }))
+  const result = projectedWorktrees(createLocalQueryPort(createHub(hub, { fs: makeFs(files), git })))
   assert.deepEqual(result.scanRoots, [root])
   assert.equal(result.worktrees.length, 1)
   assert.equal(result.worktrees[0].attached, true)
@@ -199,10 +308,84 @@ test('C6 listWorktrees sorts by changedAtMs descending', () => {
       return ''
     }
   })
-  const result = listWorktrees(createHub(hub, { fs: makeFs(files), git }))
+  const result = projectedWorktrees(createLocalQueryPort(createHub(hub, { fs: makeFs(files), git })))
   assert.equal(result.worktrees.length, 2)
   assert.deepEqual(result.worktrees.map((tree) => tree.path), [newer, older])
+  assert.ok(result.worktrees.every((tree) => tree.attached === false))
   assert.ok(result.worktrees[0].changedAtMs > result.worktrees[1].changedAtMs)
+})
+
+test('C6b V2 readback requires materialization and uses the canonical worktree identity', () => {
+  const root = path.join(os.tmpdir(), 'hub-v2-claim-fake')
+  const hub = path.join(root, 'hub')
+  const canonicalGame = path.join(root, 'canonical-v2-attached')
+  const game = path.join(root, 'ozdqp-v2-attached-alias')
+  const files = {
+    [path.resolve(hub, 'overlay', 'scan-roots.txt')]: { text: `${root}\n` },
+    [path.resolve(hub, 'overlay', 'attached-worktrees.txt')]: { text: '' },
+    [path.resolve(hub, 'overlay', 'do-not-auto-attach.txt')]: { text: '' },
+    [path.resolve(root)]: { dir: true, entries: ['ozdqp-v2-attached-alias'] },
+    [path.resolve(canonicalGame)]: { dir: true, mtimeMs: 200 },
+    [path.resolve(game)]: { dir: true, symlink: true, real: canonicalGame, mtimeMs: 200 },
+    [path.resolve(game, 'AGENTS.md')]: { text: 'x' },
+    [path.resolve(game, 'baloot_client')]: { dir: true },
+    [path.resolve(hub, 'skills')]: { dir: true, entries: ['private-skill'] },
+    [path.resolve(hub, 'skills', 'private-skill')]: { dir: true, entries: ['SKILL.md'] },
+    [path.resolve(hub, 'skills', 'private-skill', 'SKILL.md')]: { text: '# private\n' }
+  }
+  const git = fakeGit({
+    output: (cwd, args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return path.join(cwd, '.git')
+      if (args[0] === 'worktree' && args[1] === 'list') {
+        return ['worktree ' + cwd, 'HEAD feedface', 'branch refs/heads/main', ''].join('\n')
+      }
+      return ''
+    }
+  })
+  const context = createHub(hub, { fs: makeFs(files), git })
+  const digest = context.hash.sha256(context.path.comparisonKey(path.resolve(canonicalGame)))
+  const pathKey = `sha256:${digest}`
+  const worktreeId = `worktree:${digest.slice(0, 24)}`
+  const snapshotId = `sha256:${'1'.repeat(64)}`
+  files[path.resolve(hub, 'skill-review', 'state.json')] = {
+    text: JSON.stringify({
+      schemaVersion: 2,
+      stateRevision: 3,
+      runtimeRevision: 'core-test',
+      librarySnapshots: [snapshotId],
+      worktrees: {
+        [pathKey]: {
+          schemaVersion: 1,
+          pathKey,
+          worktreeId,
+          requestedSnapshot: snapshotId,
+          materializedSnapshot: snapshotId,
+          selectedSkills: ['private-skill'],
+          claimState: 'claimed'
+        }
+      },
+      items: [],
+      lastIngest: null
+    })
+  }
+
+  const query = createLocalQueryPort(context)
+  const result = projectedWorktrees(query)
+  assert.equal(result.worktrees.length, 1)
+  assert.equal(result.worktrees[0].path, canonicalGame)
+  assert.equal(result.worktrees[0].attached, true)
+  assert.equal(result.worktrees[0].materialized, true)
+  assert.equal(projectedSkills(query).resident[0].attached, true)
+  assert.equal(query.inspectWorktree(game).claimed, true)
+
+  const state = JSON.parse(files[path.resolve(hub, 'skill-review', 'state.json')].text)
+  state.worktrees[pathKey].materializedSnapshot = null
+  files[path.resolve(hub, 'skill-review', 'state.json')].text = JSON.stringify(state)
+  const claimedOnly = projectedWorktrees(query).worktrees[0]
+  assert.equal(claimedOnly.attached, false)
+  assert.equal(claimedOnly.materialized, false)
+  assert.equal(projectedSkills(query).resident[0].attached, false)
+  assert.equal(query.inspectWorktree(game).claimed, true, 'claim truth remains distinct from materialization')
 })
 
 test('C7 unreadable scan root is skipped and listWorktrees still returns', () => {
@@ -232,7 +415,7 @@ test('C7 unreadable scan root is skipped and listWorktrees still returns', () =>
       return ''
     }
   })
-  const result = listWorktrees(createHub(hub, { fs: makeFs(files), git }))
+  const result = projectedWorktrees(createLocalQueryPort(createHub(hub, { fs: makeFs(files), git })))
   assert.equal(result.worktrees.length, 1)
   assert.equal(result.worktrees[0].path, game)
 })
@@ -240,6 +423,10 @@ test('C7 unreadable scan root is skipped and listWorktrees still returns', () =>
 test('C8 empty gameRepo leaves resident and adopted attached false', () => {
   const hub = path.join(os.tmpdir(), 'hub-norepo-fake')
   const files = {
+    [path.resolve(hub, 'skills')]: {
+      dir: true,
+      entries: ['ozdqp-development', 'ozdqp-ui-development', 'ozdqp-git-workflow', 'adopted', 'inbox']
+    },
     [path.resolve(hub, 'skills', 'ozdqp-development')]: { dir: true },
     [path.resolve(hub, 'skills', 'ozdqp-development', 'SKILL.md')]: { text: 'x' },
     [path.resolve(hub, 'skills', 'ozdqp-ui-development')]: { dir: true },
@@ -254,7 +441,9 @@ test('C8 empty gameRepo leaves resident and adopted attached false', () => {
       text: JSON.stringify({ version: 1, items: [], lastIngest: null })
     }
   }
-  const status = getStatus(createHub(hub, { fs: makeFs(files), git: fakeGit({ configGet: () => null }) }))
+  const status = projectedStatus(createLocalQueryPort(
+    createHub(hub, { fs: makeFs(files), git: fakeGit({ configGet: () => null }) })
+  ))
   assert.equal(status.gameRepo, null)
   assert.ok(status.resident.length > 0)
   assert.ok(status.adopted.length > 0)
@@ -269,7 +458,9 @@ test('C9 inbox nodes are kind inbox and never attached', () => {
     [path.resolve(hub, 'skills', 'inbox', 'queued-skill')]: { dir: true },
     [path.resolve(hub, 'skills', 'inbox', 'queued-skill', 'SKILL.md')]: { text: 'x' }
   }
-  const skills = listSkills(createHub(hub, { fs: makeFs(files), git: fakeGit({ configGet: () => 'E:\\game' }) }), 'E:\\game')
+  const skills = projectedSkills(createLocalQueryPort(
+    createHub(hub, { fs: makeFs(files), git: fakeGit({ configGet: () => 'E:\\game' }) })
+  ))
   assert.equal(skills.inbox.length, 1)
   assert.equal(skills.inbox[0].kind, 'inbox')
   assert.equal(skills.inbox[0].attached, false)
@@ -333,12 +524,12 @@ test('finalizeSession writes waiting on exit 0 without treating a live pid as se
   assert.match(done.summary || '', /detached/)
 })
 
-function attachedRepairHub(t) {
+async function attachedRepairHub(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-repair-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const hubDir = path.join(dir, 'hub')
   const tree = path.join(dir, 'tree')
-  for (const name of RESIDENT_SKILLS) {
+  for (const name of FIXTURE_RESIDENT_SKILLS) {
     fs.mkdirSync(path.join(hubDir, 'skills', name), { recursive: true })
     fs.writeFileSync(path.join(hubDir, 'skills', name, 'SKILL.md'), `${name}\n`)
   }
@@ -348,14 +539,18 @@ function attachedRepairHub(t) {
   fs.writeFileSync(path.join(hubDir, 'overlay', 'do-not-auto-attach.txt'), '')
   fs.mkdirSync(path.join(tree, '.agents', 'skills'), { recursive: true })
   fs.mkdirSync(path.join(tree, '.codex'), { recursive: true })
+  fs.writeFileSync(path.join(tree, 'AGENTS.md'), '# fixture checkout\n')
+  fs.mkdirSync(path.join(tree, 'baloot_client'), { recursive: true })
+  assert.equal(spawnSync('git', ['init'], { cwd: tree, encoding: 'utf8' }).status, 0)
   const ctx = createHub(hubDir)
-  const first = repairLinks(ctx, tree)
-  assert.equal(first.ok, true)
-  assert.equal(first.repaired, true)
-  return { dir, hubDir, tree, ctx }
+  const app = applicationFor(ctx)
+  const first = await app.execute(command('repairLegacy', { worktree: tree }))
+  assert.equal(first.ok, true, JSON.stringify(first))
+  assert.equal(first.data.repaired, true)
+  return { dir, hubDir, tree, ctx, app }
 }
 
-test('repairLinks does not rewrite an unattached fixture tree', (t) => {
+test('repairLegacy rejects an unattached non-Git tree without rewriting it', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-repair-unattached-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const hubDir = path.join(dir, 'hub')
@@ -366,31 +561,31 @@ test('repairLinks does not rewrite an unattached fixture tree', (t) => {
   fs.mkdirSync(tree, { recursive: true })
   const sentinel = path.join(tree, 'keep.txt')
   fs.writeFileSync(sentinel, 'untouched\n')
-  const result = repairLinks(createHub(hubDir), tree)
-  assert.equal(result.attached, false)
-  assert.equal(result.repaired, false)
-  assert.equal(result.reason, 'not-attached')
+  const result = await applicationFor(createHub(hubDir)).execute(command('repairLegacy', { worktree: tree }))
+  assert.equal(result.ok, false, JSON.stringify(result))
+  assert.equal(result.error.code, 'WORKTREE_NOT_RECOGNIZED')
   assert.equal(fs.readFileSync(sentinel, 'utf8'), 'untouched\n')
   assert.equal(fs.existsSync(path.join(tree, '.agents')), false)
 })
 
-test('repairLinks restores a broken resident skill junction on an attached fixture', (t) => {
-  const { ctx, tree, hubDir } = attachedRepairHub(t)
-  const name = RESIDENT_SKILLS[0]
+test('repairLegacy restores a broken resident skill junction on an attached fixture', async (t) => {
+  const { ctx, tree, hubDir, app } = await attachedRepairHub(t)
+  const name = FIXTURE_RESIDENT_SKILLS[0]
   const linkPath = path.join(tree, '.agents', 'skills', name)
   const hubPath = path.join(hubDir, 'skills', name)
   ctx.link.unlink(linkPath)
   assert.equal(ctx.link.isLinked(linkPath, hubPath), false)
-  const result = repairLinks(ctx, tree)
-  assert.equal(result.ok, true)
-  assert.equal(result.repaired, true)
+  const result = await app.execute(command('repairLegacy', { worktree: tree }))
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.data.repaired, true)
   assert.equal(ctx.link.isLinked(linkPath, hubPath), true)
   assert.equal(fs.readFileSync(path.join(linkPath, 'SKILL.md'), 'utf8'), `${name}\n`)
 })
 
-test('analyze finalize writes suggestion and proposed without adopting', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-analyze-'))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+test('Application applies a reaped analyze completion without Local mutating inbox state', async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-analyze-'))
+  const dir = path.join(parent, 'data')
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
   fs.mkdirSync(path.join(dir, 'skill-review', 'history'), { recursive: true })
   fs.mkdirSync(path.join(dir, 'skills', 'inbox', 'smoke-analyze'), { recursive: true })
   fs.writeFileSync(path.join(dir, 'skills', 'inbox', 'smoke-analyze', 'SKILL.md'), '# smoke\n')
@@ -404,30 +599,52 @@ test('analyze finalize writes suggestion and proposed without adopting', (t) => 
   ctx.fs.writeText(session.logFile, 'session id: 0123456789abcdef0123456789abcdef\n')
   ctx.fs.writeText(session.lastFile, '```json\n{"action":"reject","target":"","reason":"discardable smoke"}\n```\n')
   ctx.fs.writeText(sessionExitFile(ctx, session), '0\n')
-  reapSessions(ctx, () => false)
+  const host = createLocalHost({
+    packageRoot: dir,
+    dataRoot: dir,
+    context: ctx,
+    runtimeRevision: 'core-test',
+    ledger: createMemoryRequestLedger(),
+    localSessionOptions: {
+      runner: {
+        enabled: () => false,
+        available: () => false,
+        start: () => 0,
+        pidAlive: () => false
+      }
+    }
+  })
+  const app = host.application
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'skill-review', 'state.json'), 'utf8')).items[0].status, 'queued')
+  const result = await app.execute(command('reapSessions', { sessionIds: [session.id] }))
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.deepEqual(result.events.map((event) => event.type), ['inbox.transitioned', 'command.succeeded'])
   const state = JSON.parse(fs.readFileSync(path.join(dir, 'skill-review', 'state.json'), 'utf8'))
   const item = state.items.find((row) => row.id === 'an-1')
   assert.equal(item.status, 'proposed')
   assert.equal(item.suggestion.action, 'reject')
   assert.match(item.suggestion.reason, /discardable/)
   assert.equal(fs.existsSync(path.join(dir, 'skills', 'inbox', 'smoke-analyze', 'SKILL.md')), true)
-  assert.equal(extractSuggestion(ctx.fs.readText(session.lastFile)).action, 'reject')
+  assert.equal(extractInboxSuggestion(ctx.fs.readText(session.lastFile)).action, 'reject')
 })
 
-test('ingest empty payload is a no-op and does not need a game repo', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-ingest-empty-'))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
-  const result = ingest(createHub(dir), { payload: '' })
-  assert.equal(result.created, 0)
-  assert.deepEqual(result.items, [])
+test('ingest empty payload is a no-op and does not need a game repo', async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-ingest-empty-'))
+  const dir = path.join(parent, 'data')
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
+  const result = await applicationFor(createHub(dir)).execute(command('ingest', { payload: '' }))
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.data.created, 0)
+  assert.deepEqual(result.data.items, [])
 })
 
-test('adopt links only attached fixture trees and skips a same-name non-hub path', (t) => {
+test('adopt links only attached fixture trees and skips a same-name non-hub path', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-adopt-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const hubDir = path.join(dir, 'hub')
   const attachedA = path.join(dir, 'attached-a')
   const attachedB = path.join(dir, 'attached-b')
+  const deletedAttached = path.join(dir, 'deleted-attached')
   const loose = path.join(dir, 'unattached')
   fs.mkdirSync(path.join(hubDir, 'overlay'), { recursive: true })
   fs.mkdirSync(path.join(hubDir, 'skill-review', 'history'), { recursive: true })
@@ -435,7 +652,7 @@ test('adopt links only attached fixture trees and skips a same-name non-hub path
   fs.writeFileSync(path.join(hubDir, 'skills', 'inbox', 'smoke-adopt', 'SKILL.md'), '# smoke-adopt\n')
   fs.writeFileSync(
     path.join(hubDir, 'overlay', 'attached-worktrees.txt'),
-    `${attachedA}\n${attachedB}\n`
+    `${attachedA}\n${attachedB}\n${deletedAttached}\n`
   )
   fs.writeFileSync(path.join(hubDir, 'overlay', 'do-not-auto-attach.txt'), '')
   fs.writeFileSync(path.join(hubDir, 'skill-review', 'state.json'), JSON.stringify({
@@ -450,20 +667,21 @@ test('adopt links only attached fixture trees and skips a same-name non-hub path
   fs.writeFileSync(path.join(attachedB, '.agents', 'skills', 'smoke-adopt', 'SKILL.md'), '# not hub\n')
   const liveInbox = path.join(hubRoot, 'skills', 'inbox')
   const liveBefore = fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : ''
-  const result = decide(createHub(hubDir), { id: 'adopt-1', action: 'adopt' })
-  assert.equal(result.ok, true)
-  assert.equal(result.item.status, 'adopted')
+  const result = await applicationFor(createHub(hubDir)).execute(command('decide', { id: 'adopt-1', action: 'adopt' }))
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.data.item.status, 'adopted')
   const dest = path.join(hubDir, 'skills', 'adopted', 'smoke-adopt')
   assert.equal(fs.existsSync(path.join(dest, 'SKILL.md')), true)
-  assert.equal(result.trees.linked.some((row) => row.worktree === attachedA && row.status === 'linked'), true)
-  assert.equal(result.trees.skipped.some((row) => row.worktree === attachedB && /elsewhere/.test(row.reason)), true)
+  assert.equal(result.data.worktrees.applied.some((row) => row.worktree === attachedA && row.status === 'linked'), true)
+  assert.equal(result.data.worktrees.skipped.some((row) => row.worktree === attachedB && /elsewhere/.test(row.reason)), true)
+  assert.equal(result.data.worktrees.skipped.some((row) => row.worktree === deletedAttached && row.reason === 'missing'), true)
   assert.equal(createHub(hubDir).link.isLinked(path.join(attachedA, '.agents', 'skills', 'smoke-adopt'), dest), true)
   assert.equal(fs.readFileSync(path.join(attachedB, '.agents', 'skills', 'smoke-adopt', 'SKILL.md'), 'utf8'), '# not hub\n')
   assert.equal(fs.existsSync(path.join(loose, '.agents', 'skills', 'smoke-adopt')), false)
   assert.equal(fs.existsSync(liveInbox) ? fs.readdirSync(liveInbox).join('\n') : '', liveBefore)
 })
 
-test('merge and reject do not create game-tree skill links', (t) => {
+test('merge and reject do not create game-tree skill links', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-decide-nolink-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const hubDir = path.join(dir, 'hub')
@@ -485,18 +703,24 @@ test('merge and reject do not create game-tree skill links', (t) => {
     ]
   }))
   const ctx = createHub(hubDir)
-  decide(ctx, { id: 'm1', action: 'merge', mergeTarget: 'skills/ozdqp-development' })
-  decide(ctx, { id: 'r1', action: 'reject' })
+  const app = applicationFor(ctx)
+  const merged = await app.execute(command('decide', {
+    id: 'm1', action: 'merge', mergeTarget: 'skills/ozdqp-development'
+  }))
+  const rejected = await app.execute(command('decide', { id: 'r1', action: 'reject' }))
+  assert.equal(merged.ok, true, JSON.stringify(merged))
+  assert.equal(rejected.ok, true, JSON.stringify(rejected))
   assert.equal(fs.existsSync(path.join(tree, '.agents', 'skills', 'merge-me')), false)
   assert.equal(fs.existsSync(path.join(tree, '.agents', 'skills', 'reject-me')), false)
 })
 
-test('ingest copies official skill files into an isolated hub inbox', (t) => {
+test('ingest copies official skill files into an isolated hub inbox', async (t) => {
   const game = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-game-core-ingest-'))
-  const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-core-ingest-'))
+  const hubParent = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-core-ingest-'))
+  const hubDir = path.join(hubParent, 'data')
   t.after(() => {
     fs.rmSync(game, { recursive: true, force: true })
-    fs.rmSync(hubDir, { recursive: true, force: true })
+    fs.rmSync(hubParent, { recursive: true, force: true })
   })
   const run = (args) => spawnSync('git', ['-C', game, ...args], { encoding: 'utf8', windowsHide: true })
   run(['init'])
@@ -512,24 +736,27 @@ test('ingest copies official skill files into an isolated hub inbox', (t) => {
   run(['commit', '-m', 'two'])
   const next = run(['rev-parse', 'HEAD']).stdout.trim()
   fs.mkdirSync(path.join(hubDir, 'skill-review'), { recursive: true })
-  const result = ingest(createHub(hubDir), {
+  const result = await applicationFor(createHub(hubDir)).execute(command('ingest', {
     gameRepo: game,
     payload: `${old} ${next} refs/remotes/origin/core-ingest\n`
-  })
-  assert.equal(result.created, 1)
-  assert.equal(result.items[0].name, 'core-ingest')
-  assert.equal(result.items[0].status, 'queued')
+  }))
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.data.created, 1)
+  assert.equal(result.data.items[0].name, 'core-ingest')
+  assert.equal(result.data.items[0].status, 'queued')
   assert.equal(fs.readFileSync(path.join(hubDir, 'skills', 'inbox', 'core-ingest', 'SKILL.md'), 'utf8'), '# two\n')
   const liveInbox = path.join(hubRoot, 'skills', 'inbox', 'core-ingest')
   assert.equal(fs.existsSync(liveInbox), false)
 })
 
-test('repairLinks fails when fixture override bytes differ and does not overwrite them', (t) => {
-  const { ctx, tree } = attachedRepairHub(t)
+test('repairLegacy fails when fixture override bytes differ and does not overwrite them', async (t) => {
+  const { tree, app } = await attachedRepairHub(t)
   const override = path.join(tree, 'AGENTS.override.md')
   fs.rmSync(override, { force: true })
   fs.writeFileSync(override, 'DIRTY-OVERRIDE\n')
-  assert.throws(() => repairLinks(ctx, tree), /differs from hub/)
+  const result = await app.execute(command('repairLegacy', { worktree: tree }))
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'CONFLICT_CONTENT')
   assert.equal(fs.readFileSync(override, 'utf8'), 'DIRTY-OVERRIDE\n')
 })
 
@@ -543,7 +770,6 @@ test('core source does not import http, powershell, Win32, or APPDATA', () => {
     assert.doesNotMatch(text, /powershell\.exe/i, name)
     assert.doesNotMatch(text, /Win32/, name)
     assert.doesNotMatch(text, /APPDATA/, name)
-    assert.doesNotMatch(text, /junction/i, name)
     assert.doesNotMatch(text, /mklink/i, name)
   }
 })

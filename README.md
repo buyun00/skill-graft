@@ -42,24 +42,26 @@ skill-graft 把「本地工作流的权威源」放到**另一个仓库**里。�
 | 拍板 inbox | `sg decide --id … --action adopt\|merge\|reject` | 采用 / 并入 / 拒绝 |
 | 改 Skill / 闲聊 / 剥离 | `sg edit` / `chat` / `detach` / `resume` | 同样入队 Codex 会话 |
 | 保活 | `sg daemon status` / `GET /api/daemon` | 无窗口守护本地 HTTP API（:18765），挂了会拉起来 |
-| HTTP / 网页 | 守护进程自动起；也可 `npm run api` | `:18765` API + 已有玻璃控制台；当前仍以 CLI 转发为主，双宿主改造时迁到共享 Application |
+| HTTP / 网页 | 守护进程自动起；也可 `npm run api` | `:18765` API + 玻璃控制台；CLI、HTTP 和网页都进入同一进程内 Application，不经 CLI 子进程转发 |
 
-当前实现漏斗（迁移前）：
+当前本地发行调用链：
 
 ```text
 人 / HTTP / Git hook
         │
         ▼
-   sg / ozdqp-hub（CLI）  ← 当前本地入口
+ CLI / HTTP / 网页 / hook（本地 transport）
         ▼
-      core
+  HubApplication.execute(command)
         ▼
-     适配层（路径 / 盘 / 链接或复制 / git）
+  纯 Core 规则与计划
+        ▼
+  低级端口 → Local 适配层（路径 / 盘 / 链接 / git / runner）
 ```
 
-目标不是让 DSH 再调用这条 CLI。改造后唯一业务契约是共享 `HubApplication.execute(command)`：本地完整发行由 CLI/HTTP/网页装配调用，DSH 完整发行在 DSH 进程内装配调用；两边只在宿主适配、生命周期、UI 和打包上分叉，彼此不构成运行前提。
+共享 `Contracts`、纯 `Core` 与 `HubApplication.execute(command)` 已成为本地发行的唯一业务契约；CLI 和旧 HTTP 形状只是兼容投影。目标不是让 DSH 再调用这条 CLI：后续 DSH 完整发行会在 DSH 进程内装配同一 Application，两边只在宿主适配、生命周期、UI、SessionRunner 和打包上分叉，彼此不构成运行前提。
 
-第一次挂接由对话去做：侦察 → `manage-skill-visibility -Mode Disable` → `attach-library -ConfigureGit -PreferLibrary` → 验收。CLI 进程退出后对话仍在跑（Windows 上用 WMI 拉起，避免被 Job Object 一起杀掉）。
+第一次挂接和剥离仍先创建后台 Codex 会话，但提示只允许调用与该会话绑定的 typed 命令：`sg apply-legacy-attach` / `sg apply-legacy-detach`。Core 产出计划，Application 校验会话与幂等键，Local 适配器以可回滚事务执行；旧 PowerShell 文件不再承载可达的业务判断。CLI 进程退出后对话仍可继续运行。
 
 ---
 
@@ -124,7 +126,7 @@ sg --help
 sg attach --worktree D:\your-checkout
 ```
 
-CLI 立刻返回 session（`status: running`、带 pid），Codex 在后台做剥离和领取（现状：建链接）。可选：
+CLI 立刻返回 session（通常为 `queued` / `running`，启动后带 pid），Codex 在后台做侦察并提交受会话授权的 typed 应用命令（现状物化仍是链接）。可选：
 
 ```text
 --intent "…"           额外意图
@@ -151,11 +153,11 @@ sg repair-links --worktree D:\your-checkout
 
 ```text
 sg decide --id <id> --action adopt
-sg decide --id <id> --action merge --merge-target skills/ozdqp-development
+sg decide --id <id> --action merge --merge-target skills/<skill-name>
 sg decide --id <id> --action reject
 ```
 
-### HTTP（无网页）
+### HTTP 与网页
 
 配置器会把 API 交给守护进程保活。也可以前台起一份：
 
@@ -163,7 +165,7 @@ sg decide --id <id> --action reject
 npm run api
 ```
 
-`GET http://127.0.0.1:18765/api/health`、`/api/state`、`/api/worktrees`、`/api/daemon`。管理页已删除，以后重做。
+打开 `http://127.0.0.1:18765/` 使用管理页。`GET /api/health`、`/api/state`、`/api/worktrees`、`/api/daemon` 保留兼容；typed 写命令走 `POST /api/command`。旧 `/api/decide` 等入口会返回 deprecated 标记，但同样进入进程内 Application，不会 spawn CLI。
 
 ```text
 sg daemon status
@@ -176,7 +178,7 @@ sg daemon start
 ```text
 npm test              # tsc + 分层测试
 npm run test:cli      # 只跑 CLI
-npm run test:http     # HTTP 转发与字段一致
+npm run test:http     # HTTP/Application 与兼容字段一致
 ```
 
 ---
@@ -195,15 +197,13 @@ npm run test:http     # HTTP 转发与字段一致
 
 ## 展望
 
-已经站住的是查询面和「CLI 为唯一控制面」。后面想做的，按依赖大致是：
+已经站住的是共享 `Contracts/Core/Application` 和完整 Local composition；CLI、HTTP、网页与兼容 PowerShell façade 不再各自拥有业务策略。后续按双宿主实施计划继续：
 
-1. **认仓规则可配置。** 去掉写死的 `AGENTS.md` + `baloot_client`，用名单或探测规则挂任意 Git 工作树。
-2. **写盘命令收回核心。** `repair-links` / `ingest` / `decide` 现在背后还有 `.ps1`；应收成 Node 端口实现，Windows / macOS / Linux 同一套动词。
-3. **会话可观测。** Codex 结束后回写 `sessions.json`（现在 detached 进程退出后状态可能仍停在 running）；`hub attach --wait` 可选等对话结束再打印验收。
-4. **detach / edit 与 attach 同级。** 剥离、改某一条 Skill 都是后台对话，验收字段与查询 JSON 对齐。
-5. **inbox 更完整。** 建议（adopt / merge / reject）由分析会话填写；面板只展示 CLI 给出的形状。
-6. **多机 / 小团队。** 运行时在 GitHub，语料走另一条私有同步（或以后的团队服务），不要把别人的项目细节推进公开仓。
-7. **新管理页。** 只消费 CLI/HTTP JSON，不再在前端算「算不算挂上」。
+1. **P2：snapshot、pin、状态迁移与跨进程锁。** 建立内容寻址的版本库真相和崩溃可恢复事务。
+2. **P3：按 pin 复制物化。** 用普通文件树替代实时 Junction / HardLink，并完成冲突、漂移、回滚与路径安全。
+3. **P4–P6：DSH 独立完整发行。** 在 DSH 进程内装配同一 Application，补齐 host-native Runner、生命周期和 DSH UI。
+4. **P7–P8：迁移、兼容与双宿主并存。** 验证 Local-only、DSH-only 和两者同机互不依赖。
+5. **P9–P10：升级、卸载、回滚与最终发布。** 用真实安装包、真实进程和真实 UI 封口可追溯发行候选。
 
 更细的层边界见 `docs/系统设计与理念.md` 第 9 节，本阶段查询规格见 `docs/三层本阶段规格.md`。
 

@@ -1,25 +1,69 @@
 {
   "name": "ozdqp-skill-hub",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1-rc.1",
+  "license": "Apache-2.0",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "import": "./dist/contracts/index.js"
+    },
+    "./application": {
+      "types": "./dist/application/index.d.ts",
+      "import": "./dist/application/index.js"
+    },
+    "./local": {
+      "types": "./dist/local/create-local-host.d.ts",
+      "import": "./dist/local/create-local-host.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "sg": "dist/control/cli.js",
     "ozdqp-hub": "dist/control/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "setup": "npm run build && node dist/control/cli.js setup",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
+    "build:dsh": "npm run build && node scripts/build-dsh-bundle.mjs",
+    "build:release": "node scripts/build-release.mjs",
+    "build:shared": "tsc -p tsconfig.shared.json",
+    "verify:release": "node scripts/verify-release.mjs",
+    "prepack": "npm run verify:release",
+    "setup": "node dist/control/cli.js setup",
+    "setup:source": "npm run build && node dist/control/cli.js setup",
     "hub": "node dist/control/cli.js",
-    "test": "npm run build && node --test test/*.test.mjs",
-    "test:adapter": "npm run build && node --test test/adapter.test.mjs",
-    "test:core": "npm run build && node --test test/core.test.mjs",
-    "test:cli": "npm run build && node --test test/cli.test.mjs",
-    "test:http": "npm run build && node --test test/http.test.mjs",
+    "test": "node test/support/run-default-suite.mjs",
+    "test:adapter": "node test/support/run-default-suite.mjs test/adapter.test.mjs",
+    "test:core": "node test/support/run-default-suite.mjs test/core.test.mjs",
+    "test:cli": "node test/support/run-default-suite.mjs test/cli.test.mjs",
+    "test:http": "node test/support/run-default-suite.mjs test/http.test.mjs",
+    "test:safety": "node test/support/run-default-suite.mjs test/e2e-safety.test.mjs test/default-isolation.test.mjs",
+    "test:p0-source-v2": "node --test --test-concurrency=1 test/p0-source-v2.test.mjs",
+    "test:real:dsh:p6": "npm run build:dsh && node --test --test-concurrency=1 test/real/dsh/p6-independent-bundle.test.mjs",
+    "test:real:dsh:p7": "npm run build:dsh && node --test --test-concurrency=1 test/real/dsh/p7-workspace-ui.test.mjs",
+    "test:real:dsh:p8": "npm run build:dsh && node --test --test-concurrency=1 test/real/dsh/p8-session-runner.test.mjs",
+    "test:real:dsh:p8:agent": "node test/support/run-dsh-p8-agent-smoke.mjs",
+    "test:real:cross-host:p9": "node --test --test-concurrency=1 test/real/cross-host/p9-installed-interoperability.test.mjs",
+    "test:real:release:p10": "node test/real/release/p10-release-candidate.mjs",
+    "test:real:local:attach": "npm run build && node --test --test-concurrency=1 test/real/local/attach.test.mjs",
+    "test:real:local:p1": "npm run build && node --test --test-concurrency=1 test/real/local/p1-application.test.mjs",
+    "test:real:local:p2": "npm run build && node --test --test-concurrency=1 test/real/local/p2-snapshot-pin-lock.test.mjs",
+    "test:real:local:p3": "npm run build && node --test --test-concurrency=1 test/real/local/p3-installed-materialization.test.mjs",
+    "test:real:local:p4": "npm run build:release && node --test --test-concurrency=1 test/real/local/p4-installed-lifecycle.test.mjs",
+    "test:real:local:p5": "npm run build:release && node test/real/local/p5-installed-session-runner.mjs",
+    "e2e:prepare": "node test/support/prepare-run.mjs",
+    "e2e:prepare:p0-fixture": "node test/support/prepare-p0-fixture.mjs",
+    "e2e:prepare:independent-p0-source": "node test/support/prepare-independent-p0-source.mjs",
     "api": "node server/index.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.2"
   }
 }

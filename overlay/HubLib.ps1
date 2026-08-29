@@ -1,12 +1,140 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Get-HubRoot {
-    return [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
+function Get-NormalizedPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        throw 'Path must not be empty'
+    }
+    $full = [System.IO.Path]::GetFullPath($path.Trim())
+    $root = [System.IO.Path]::GetPathRoot($full)
+    if ($full.Equals($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $full
+    }
+    return $full.TrimEnd([char[]]@('\', '/'))
 }
 
-function Get-NormalizedPath([string]$path) {
-    return [System.IO.Path]::GetFullPath($path.Trim()).TrimEnd('\')
+function Resolve-SafePackageRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Locator,
+        [string]$Worktree,
+        [string]$Source = 'Package locator'
+    )
+
+    $candidate = $Locator.Trim()
+    if ($candidate -ne $Locator) {
+        throw "$Source must not have surrounding whitespace"
+    }
+    if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+        throw "$Source must be an absolute path"
+    }
+    $resolved = Get-NormalizedPath $candidate
+    if ($resolved.Equals([System.IO.Path]::GetPathRoot($resolved), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Source must not be a filesystem root"
+    }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw "$Source is not an existing directory: $resolved"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $resolved 'overlay') -PathType Container)) {
+        throw "$Source does not contain the Skill Graft overlay directory: $resolved"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $resolved 'dist\control\cli.js') -PathType Leaf)) {
+        throw "$Source does not contain the Skill Graft CLI entry: $resolved"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Worktree)) {
+        $workspace = Get-NormalizedPath $Worktree
+        $workspacePrefix = $workspace.TrimEnd([char[]]@('\', '/')) + [System.IO.Path]::DirectorySeparatorChar
+        if ($resolved.Equals($workspace, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $resolved.StartsWith($workspacePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "$Source must be outside the target worktree: $resolved"
+        }
+    }
+    return $resolved
+}
+
+function Get-SkillGraftPackageRoot {
+    [CmdletBinding()]
+    param(
+        [string]$Worktree,
+        [string]$PackageRoot
+    )
+
+    $workspace = $null
+    if (-not [string]::IsNullOrWhiteSpace($Worktree)) {
+        $workspace = Get-GameRepoRoot $Worktree
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PackageRoot)) {
+        return Resolve-SafePackageRoot -Locator $PackageRoot -Worktree $workspace -Source 'PackageRoot'
+    }
+    if ($null -eq $workspace) {
+        $workspace = Get-GameRepoRoot (Get-Location).Path
+    }
+
+    $configured = (& git -C $workspace config --get ozdqp.localOverlaySource 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$configured)) {
+        throw "Target worktree has no ozdqp.localOverlaySource: $workspace"
+    }
+    return Resolve-SafePackageRoot -Locator ([string]$configured) -Worktree $workspace -Source 'ozdqp.localOverlaySource'
+}
+
+function Resolve-SafeDataRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Locator,
+        [string]$Source = 'DataRoot'
+    )
+
+    $candidate = $Locator.Trim()
+    if ($candidate -ne $Locator) {
+        throw "$Source must not have surrounding whitespace"
+    }
+    if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+        throw "$Source must be an absolute path"
+    }
+    $resolved = Get-NormalizedPath $candidate
+    if ($resolved.Equals([System.IO.Path]::GetPathRoot($resolved), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Source must not be a filesystem root"
+    }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw "$Source is not an existing directory: $resolved"
+    }
+    return $resolved
+}
+
+function Get-SkillGraftDataRoot {
+    [CmdletBinding()]
+    param(
+        [string]$DataRoot,
+        [string]$FallbackPackageRoot
+    )
+
+    $primary = $env:SKILL_GRAFT_HOME
+    $legacy = $env:HUB_ROOT
+    $resolvedPrimary = $null
+    $resolvedLegacy = $null
+    if ($null -ne $primary -and $primary -ne '') {
+        $resolvedPrimary = Resolve-SafeDataRoot -Locator $primary -Source 'SKILL_GRAFT_HOME'
+    }
+    if ($null -ne $legacy -and $legacy -ne '') {
+        $resolvedLegacy = Resolve-SafeDataRoot -Locator $legacy -Source 'HUB_ROOT'
+    }
+    if ($null -ne $resolvedPrimary -and $null -ne $resolvedLegacy -and
+        -not $resolvedPrimary.Equals($resolvedLegacy, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'SKILL_GRAFT_HOME and HUB_ROOT resolve to different data roots'
+    }
+
+    if ($null -ne $DataRoot -and $DataRoot -ne '') {
+        return Resolve-SafeDataRoot -Locator $DataRoot -Source 'DataRoot'
+    }
+    if ($null -ne $resolvedPrimary) { return $resolvedPrimary }
+    if ($null -ne $resolvedLegacy) { return $resolvedLegacy }
+    if ([string]::IsNullOrWhiteSpace($FallbackPackageRoot)) {
+        throw 'DataRoot, SKILL_GRAFT_HOME, or HUB_ROOT is required'
+    }
+    return Resolve-SafeDataRoot -Locator $FallbackPackageRoot -Source 'default package data root'
 }
 
 function Test-SameVolume([string]$left, [string]$right) {

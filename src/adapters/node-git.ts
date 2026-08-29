@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import type { GitPort } from '../core/ports.js'
+import type { GitPort } from './host-context.js'
 
 function gitOut(cwd: string, args: string[]): string {
   const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true })

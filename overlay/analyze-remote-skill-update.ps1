@@ -11,146 +11,85 @@ param(
     [switch]$DispatchCodex
 )
 
+# Deprecated v0 compatibility facade. Ingest policy and every state, inbox,
+# history, file, Git, and session effect are owned by Application contract v1.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'HubLib.ps1')
 
-$gameRepo = Get-NormalizedPath $GameRepo
-$hubRoot = Get-NormalizedPath $HubRoot
-$watchedPathspecs = @(
-    ':(glob).agents/skills/**',
-    ':(glob).codex/skills/**',
-    ':(glob).claude/skills/**',
-    'AGENTS.md',
-    'CLAUDE.md'
-)
-
-function Test-ZeroObjectId([string]$value) { return $value -match '^0{40,64}$' }
-function Test-GitCommit([string]$repo, [string]$commit) {
-    & git -C $repo cat-file -e "$commit^{commit}" 2>$null
-    return $LASTEXITCODE -eq 0
+function Resolve-LegacyPath([string]$Value, [string]$Name) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "$Name must not be empty"
+    }
+    $candidate = $Value.Trim()
+    if ($candidate -ne $Value) {
+        throw "$Name must not have surrounding whitespace"
+    }
+    if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+        throw "$Name must be an absolute path"
+    }
+    try {
+        $resolved = [System.IO.Path]::GetFullPath($candidate)
+    } catch {
+        throw "$Name is not a valid path"
+    }
+    if (-not [System.IO.Directory]::Exists($resolved)) {
+        throw "$Name must be an existing directory"
+    }
+    return $resolved
 }
 
-function Get-UnitInfo([string]$path) {
-    $normalized = $path.Replace('\', '/')
-    if ($normalized -match '^\.(agents|codex|claude)/skills/([^/]+)(?:/|$)') {
-        $unit = ".$($Matches[1])/skills/$($Matches[2])"
-        return [pscustomobject]@{ Key = $unit; Name = $Matches[2]; Prefix = $unit }
+function Resolve-SkillGraftCommand {
+    $command = Get-Command -Name 'sg' -CommandType Application,ExternalScript -ErrorAction Stop |
+        Select-Object -First 1
+    if ($null -eq $command -or [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+        throw 'installed sg command was not found on PATH'
     }
-    return [pscustomobject]@{ Key = $normalized; Name = [System.IO.Path]::GetFileName($normalized); Prefix = $normalized }
+    return [string]$command.Source
 }
 
-function Get-Transactions {
-    if (-not [string]::IsNullOrWhiteSpace($OldCommit) -or -not [string]::IsNullOrWhiteSpace($NewCommit)) {
-        return @([pscustomobject]@{ Old = $OldCommit; New = $NewCommit; Ref = $RefName })
-    }
-    $raw = [Console]::In.ReadToEnd()
-    $list = [System.Collections.Generic.List[object]]::new()
-    foreach ($line in ($raw -split "`r?`n")) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $parts = $line.Trim() -split '\s+', 3
-        if ($parts.Count -ne 3) { continue }
-        [void]$list.Add([pscustomobject]@{ Old = $parts[0]; New = $parts[1]; Ref = $parts[2] })
-    }
-    return @($list)
+$hasOldCommit = -not [string]::IsNullOrWhiteSpace($OldCommit)
+$hasNewCommit = -not [string]::IsNullOrWhiteSpace($NewCommit)
+if ($hasOldCommit -ne $hasNewCommit) {
+    throw '-OldCommit and -NewCommit must be supplied together'
+}
+if ($hasOldCommit -and [string]::IsNullOrWhiteSpace($RefName)) {
+    throw '-RefName must not be empty when an explicit transaction is supplied'
 }
 
-function Export-UnitFiles([string]$commit, [string]$prefix, [string]$destRoot) {
-    $files = @(& git -C $gameRepo -c core.quotepath=false ls-tree -r --name-only $commit -- $prefix)
-    if ($LASTEXITCODE -ne 0) { throw "git ls-tree failed for $prefix" }
-    foreach ($file in $files) {
-        $rel = $file.Substring($prefix.Length).TrimStart('/')
-        if ([string]::IsNullOrWhiteSpace($rel)) { $rel = [System.IO.Path]::GetFileName($file) }
-        $dest = Join-Path $destRoot ($rel.Replace('/', '\'))
-        [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest))
-        $content = & git -C $gameRepo show "${commit}:${file}"
-        if ($LASTEXITCODE -ne 0) { continue }
-        $text = if ($content -is [array]) { $content -join "`n" } else { [string]$content }
-        [System.IO.File]::WriteAllText($dest, $text, [System.Text.UTF8Encoding]::new($false))
+$gameRepoPath = Resolve-LegacyPath $GameRepo 'GameRepo'
+$hubRootPath = Resolve-LegacyPath $HubRoot 'HubRoot'
+$explicitPayload = if ($hasOldCommit) {
+    "$($OldCommit.Trim()) $($NewCommit.Trim()) $($RefName.Trim())"
+} else { $null }
+
+$arguments = @('ingest', '--game-repo', $gameRepoPath)
+if ($DispatchCodex) { $arguments += '--dispatch' }
+if ($DryRun) { $arguments += '--dry-run' }
+$arguments += '--contract-v1'
+
+$sg = Resolve-SkillGraftCommand
+$hadHubRoot = Test-Path -LiteralPath 'Env:HUB_ROOT'
+$previousHubRoot = $env:HUB_ROOT
+try {
+    $env:HUB_ROOT = $hubRootPath
+    if ($null -ne $explicitPayload) {
+        $explicitPayload | & $sg @arguments
+    } else {
+        # Do not materialize or rewrite the hook stream in the facade. The
+        # installed native sg process inherits redirected stdin byte-for-byte.
+        & $sg @arguments
     }
-}
-
-$statePath = Join-Path $hubRoot 'skill-review\state.json'
-$state = Read-JsonFile $statePath ([pscustomobject]@{ version = 1; lastIngest = $null; items = @() })
-if ($null -eq $state.items) { $state | Add-Member items @() -Force }
-$created = 0
-
-foreach ($transaction in @(Get-Transactions)) {
-    if (-not $transaction.Ref.StartsWith('refs/remotes/', [System.StringComparison]::OrdinalIgnoreCase) -and $RefName -notlike 'refs/remotes/*') {
-        if ($transaction.Ref -notlike 'refs/remotes/*') { continue }
-    }
-    if (Test-ZeroObjectId $transaction.Old -or Test-ZeroObjectId $transaction.New) { continue }
-    if (-not (Test-GitCommit $gameRepo $transaction.Old) -or -not (Test-GitCommit $gameRepo $transaction.New)) { continue }
-
-    $args = @('-C', $gameRepo, '-c', 'core.quotepath=false', 'diff', '--name-status', '--find-renames', $transaction.Old, $transaction.New, '--') + $watchedPathspecs
-    $diffLines = @(& git @args 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $diffLines.Count -eq 0) { continue }
-
-    $units = @{}
-    foreach ($line in $diffLines) {
-        $parts = $line -split "`t"
-        if ($parts.Count -lt 2) { continue }
-        $status = $parts[0]
-        $path = if ($status -match '^[RC]' -and $parts.Count -ge 3) { $parts[2] } else { $parts[1] }
-        $info = Get-UnitInfo $path
-        if (-not $units.ContainsKey($info.Key)) { $units[$info.Key] = $info }
-    }
-
-    foreach ($unit in $units.Values) {
-        $id = [System.BitConverter]::ToString(
-            [System.Security.Cryptography.SHA256]::Create().ComputeHash(
-                [System.Text.Encoding]::UTF8.GetBytes("$($transaction.Ref)|$($transaction.New)|$($unit.Key)")
-            )
-        ).Replace('-', '').Substring(0, 16).ToLowerInvariant()
-        if (@($state.items) | Where-Object { $_.id -eq $id }) { continue }
-        $inboxRel = "skills/inbox/$($unit.Name)"
-        $inboxAbs = Join-Path $hubRoot ($inboxRel.Replace('/', '\'))
-        if (-not $DryRun) {
-            if (Test-Path -LiteralPath $inboxAbs) { Remove-Item -LiteralPath $inboxAbs -Recurse -Force }
-            [void](New-Item -ItemType Directory -Force -Path $inboxAbs)
-            if ($unit.Prefix -match '/skills/') {
-                Export-UnitFiles $transaction.New $unit.Prefix $inboxAbs
-            } else {
-                $text = & git -C $gameRepo show "$($transaction.New):$($unit.Prefix)" 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                    $body = if ($text -is [array]) { $text -join "`n" } else { [string]$text }
-                    [System.IO.File]::WriteAllText((Join-Path $inboxAbs ([System.IO.Path]::GetFileName($unit.Prefix))), $body, [System.Text.UTF8Encoding]::new($false))
-                }
-            }
-        }
-        $entry = [pscustomobject]@{
-            id = $id
-            name = $unit.Name
-            unit = $unit.Key
-            sourceRef = $transaction.Ref
-            oldCommit = $transaction.Old
-            newCommit = $transaction.New
-            inboxPath = $inboxRel
-            status = 'queued'
-            suggestion = [pscustomobject]@{ action = ''; target = ''; reason = ''; confidence = '' }
-            createdAt = [DateTimeOffset]::Now.ToString('o')
-            updatedAt = [DateTimeOffset]::Now.ToString('o')
-        }
-        $state.items = @($state.items) + @($entry)
-        $created++
-    }
-    $state.lastIngest = [pscustomobject]@{
-        ref = $transaction.Ref
-        old = $transaction.Old
-        new = $transaction.New
-        at = [DateTimeOffset]::Now.ToString('o')
-        gameRepo = $gameRepo
+    $sgExitCode = $LASTEXITCODE
+    $sgSucceeded = $?
+} finally {
+    if ($hadHubRoot) {
+        $env:HUB_ROOT = $previousHubRoot
+    } else {
+        Remove-Item -LiteralPath 'Env:HUB_ROOT' -ErrorAction SilentlyContinue
     }
 }
 
-if (-not $DryRun) {
-    Write-JsonFile $statePath $state
-    if ($created -gt 0) {
-        New-HistoryRecord $hubRoot @{ type = 'ingest'; count = $created; lastIngest = $state.lastIngest }
-        if ($DispatchCodex) {
-            & (Join-Path $PSScriptRoot 'dispatch-hub-codex.ps1')
-        }
-    }
+if ($null -eq $sgExitCode) {
+    $sgExitCode = if ($sgSucceeded) { 0 } else { 1 }
 }
-
-Write-Output "Ingested $created skill unit(s) into $hubRoot"
+exit ([int]$sgExitCode)

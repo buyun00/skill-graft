@@ -1,0 +1,13 @@
+Skill Graft product acceptance - final read-only check
+Captured: 2026-08-26T19:35:03+08:00
+Workspace: E:\ozdqp-main-fix
+Branch: main
+HEAD: c992cc988614aaa5f2811c28aa090496cb936d68
+Ahead / behind origin/main: 0 / 92
+Modified entries: 10
+Untracked entries: 12
+Git index SHA-256: 2a5f2d47184060dbab53778f5ecf37156c4de5b293f2db02bf8efce476538877
+Skip-worktree entries: 571
+
+Boundary: read-only inspection only. No attach, checkout, reset, clean,
+restore, merge, takeover, or workspace write was performed.

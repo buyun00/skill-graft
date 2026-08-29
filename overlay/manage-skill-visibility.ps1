@@ -3,31 +3,19 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Workspace,
     [ValidateSet('Disable', 'Restore')]
-    [string]$Mode = 'Disable'
+    [string]$Mode = 'Disable',
+    [Alias('HostRoot')]
+    [string]$PackageRoot,
+    [string]$DataRoot
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HubLib.ps1')
 
-$workspace = Get-NormalizedPath $Workspace
-$hubRoot = Get-HubRoot
-$agentSkillsRoot = Join-Path $workspace '.agents\skills'
-$keptAgentSkillNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-@(
-    'ozdqp-development',
-    'ozdqp-ui-development',
-    'ozdqp-git-workflow',
-    'unity-skills'
-) | ForEach-Object { [void]$keptAgentSkillNames.Add($_) }
-
-$adoptedRoot = Join-Path $hubRoot 'skills\adopted'
-if (Test-Path -LiteralPath $adoptedRoot) {
-    Get-ChildItem -LiteralPath $adoptedRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        [void]$keptAgentSkillNames.Add($_.Name)
-    }
-}
-
+$workspace = Get-GameRepoRoot $Workspace
+$packageRoot = Get-SkillGraftPackageRoot -Worktree $workspace -PackageRoot $PackageRoot
+$hubRoot = Get-SkillGraftDataRoot -DataRoot $DataRoot -FallbackPackageRoot $packageRoot
 $legacyRoots = @(
     (Join-Path $workspace '.claude'),
     (Join-Path $workspace '.codex\agents'),
@@ -46,15 +34,6 @@ function Assert-SafeRemovalPath([string]$path) {
     }
 }
 
-function Test-KeptAgentSkillPath([string]$relativePath) {
-    foreach ($name in $keptAgentSkillNames) {
-        if ($relativePath.StartsWith(".agents/skills/$name/", [System.StringComparison]::OrdinalIgnoreCase)) {
-            return $true
-        }
-    }
-    return $false
-}
-
 function Get-LegacyTrackedPaths {
     $previous = [Console]::OutputEncoding
     try {
@@ -69,7 +48,8 @@ function Get-LegacyTrackedPaths {
         $path = $_
         if ($path.StartsWith('.claude/', [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
         if ($path.StartsWith('.agents/skills/', [System.StringComparison]::OrdinalIgnoreCase)) {
-            return -not (Test-KeptAgentSkillPath $path)
+            # Project-owned non-Hub Skills are never visibility targets.
+            return $false
         }
         return (
             $path.StartsWith('.codex/agents/', [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -113,15 +93,6 @@ function Remove-LegacyWorkspaceContent {
         Assert-SafeRemovalPath $path
         if (Test-Path -LiteralPath $path) {
             Remove-Item -LiteralPath $path -Recurse -Force
-        }
-    }
-    if (Test-Path -LiteralPath $agentSkillsRoot) {
-        $legacyAgentDirectories = @(Get-ChildItem -LiteralPath $agentSkillsRoot -Force -Directory | Where-Object {
-            -not $keptAgentSkillNames.Contains($_.Name)
-        })
-        foreach ($directory in $legacyAgentDirectories) {
-            Assert-SafeRemovalPath $directory.FullName
-            Remove-Item -LiteralPath $directory.FullName -Recurse -Force
         }
     }
 }

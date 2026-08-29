@@ -1,50 +1,56 @@
 export { createHub } from './adapters/create-hub.js'
+export * from './contracts/index.js'
+export * from './core/policies.js'
+export {
+  createHubApplication,
+  createMemoryRequestLedger,
+  createMemorySessions,
+  createSessionTask,
+  isApplicationSuccess
+} from './application/index.js'
+export type {
+  ApplicationRuntimePort,
+  HubQueryPort,
+  HubApplication,
+  HubApplicationOptions,
+  InvocationTraceEvent,
+  InvocationTracePort,
+  SharedUseCasePorts,
+  RequestLedgerEntry,
+  RequestLedgerPort,
+  SessionPort,
+  SessionCancelRequest,
+  SessionRunnerCancelRequest,
+  SessionRunnerEventsRequest,
+  SessionRunnerPort,
+  SessionRunnerResumeRequest,
+  SessionRunnerStartRequest,
+  SessionRunnerStatusRequest,
+  WorktreeRegistryPort
+} from './application/index.js'
+export { createLocalHost, openLocalHost } from './local/create-local-host.js'
+export type { CreateLocalHostOptions, LocalHost } from './local/create-local-host.js'
+export {
+  coherentDataRootEnvironment,
+  LEGACY_DATA_ROOT_ENV,
+  localDataRootsEqual,
+  LocalDataRootError,
+  PRIMARY_DATA_ROOT_ENV,
+  resolveLocalDataRoot
+} from './local/data-root.js'
+export type { LocalDataRootEnvironment, ResolveLocalDataRootOptions } from './local/data-root.js'
 export {
   API_PORT,
-  cloneRootFromCommonDir,
-  decide,
-  enqueueSession,
   evaluateDoctor,
-  extractCodexSessionId,
-  extractSuggestion,
-  finalizeSession,
-  findSession,
-  gameRepoOf,
-  getStatus,
-  ingest,
-  isClientCheckout,
-  isEphemeralPath,
-  KEPT_AGENT_SKILLS,
-  listSessions,
-  listSkills,
-  listWorktrees,
-  markSessionSpawned,
   mergeUserPath,
-  parseWorktreePorcelain,
-  repairLinks,
-  repairPlan,
   pathHasDir,
-  presentSession,
   PRODUCT_ALIAS,
   PRODUCT_COMMAND,
   PRODUCT_NAME,
-  reapSessions,
   removeFromUserPath,
   renderShims,
-  RESIDENT_SKILLS,
   resolveInstallDir,
   resolveInstallPaths,
-  sessionExitFile,
   TASK_NAME,
   toGitBashPath
-} from './core/index.js'
-export type {
-  GitWorktreeRef,
-  HubContext,
-  HubSession,
-  HubState,
-  InboxItem,
-  SkillNode,
-  WorktreeInfo,
-  WorktreeList
-} from './core/index.js'
+} from './local/lifecycle/install-domain.js'

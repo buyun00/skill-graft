@@ -1,1 +1,12 @@
 overlay/hooks/* text eol=lf
+# Panel build inputs feed the canonical release build ID.
+panel/*.json text eol=lf
+panel/*.mjs text eol=lf
+panel/*.ts text eol=lf
+panel/**/*.css text eol=lf
+panel/**/*.json text eol=lf
+panel/**/*.mjs text eol=lf
+panel/**/*.ts text eol=lf
+panel/**/*.tsx text eol=lf
+# Generated release assets are compared and packed byte-for-byte.
+web/** -text

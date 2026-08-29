@@ -15,15 +15,10 @@ export const metadata: Metadata = {
   description: "本机技能控制中心",
 };
 
-const themeBoot = `(function(){try{var t=JSON.parse(localStorage.getItem("gg-theme")||"{}");document.documentElement.setAttribute("data-theme",(t.mode==="dark"||t.mode==="light")?t.mode:"light");}catch(e){document.documentElement.setAttribute("data-theme","light");}})();`;
-
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="zh-CN" className="h-full antialiased" data-theme="light">
-      <head>
-        <script dangerouslySetInnerHTML={{ __html: themeBoot }} />
-      </head>
-      <body className={`${inter.variable} min-h-full bg-page`}>
+    <html lang="zh-CN">
+      <body className={inter.variable}>
         <Providers>{children}</Providers>
       </body>
     </html>
