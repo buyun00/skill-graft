@@ -1,5 +1,245 @@
 {
   "version": 1,
-  "lastIngest": null,
-  "items": []
+  "lastIngest": {
+    "ref": "refs/remotes/origin/main",
+    "old": "71e3e5ad5e730b4514195b04c7f88b51658b8848",
+    "new": "851d15eea9913c1cb635b51b675d52e95b853fec",
+    "gameRepo": "E:/ozdqp-main-ntfs"
+  },
+  "items": [
+    {
+      "id": "2ac2ad5533dedd81",
+      "name": "集群日志调试",
+      "unit": ".claude/skills/集群日志调试",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "a1242c033ce7b8d455346c7de5a78f15e449e62d",
+      "newCommit": "6de1778030840722c1e25542ef33470a97910eeb",
+      "inboxPath": "skills/inbox/集群日志调试",
+      "createdAt": "2026-08-20T09:09:17.798Z",
+      "updatedAt": "2026-08-20T09:09:17.798Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "ea07b933f4fd11ac",
+      "name": "Git规范",
+      "unit": ".agents/skills/Git规范",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "58e407f3d20c116dcdd1e6e7b938ed3e10337158",
+      "newCommit": "debc0ba0c62fd7548c1ac8b3cb5e23962ac66575",
+      "inboxPath": "skills/inbox/Git规范",
+      "createdAt": "2026-08-21T06:48:17.378Z",
+      "updatedAt": "2026-08-21T06:48:17.378Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "2a12f981e394790a",
+      "name": "Git规范",
+      "unit": ".codex/skills/Git规范",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "58e407f3d20c116dcdd1e6e7b938ed3e10337158",
+      "newCommit": "debc0ba0c62fd7548c1ac8b3cb5e23962ac66575",
+      "inboxPath": "skills/inbox/Git规范",
+      "createdAt": "2026-08-21T06:48:17.527Z",
+      "updatedAt": "2026-08-21T06:48:17.527Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "81cedcff6a2c5236",
+      "name": "AGENTS.md",
+      "unit": "AGENTS.md",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "58e407f3d20c116dcdd1e6e7b938ed3e10337158",
+      "newCommit": "debc0ba0c62fd7548c1ac8b3cb5e23962ac66575",
+      "inboxPath": "skills/inbox/AGENTS.md",
+      "createdAt": "2026-08-21T06:48:17.609Z",
+      "updatedAt": "2026-08-21T06:48:17.609Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "2f25fbc1c416d051",
+      "name": "MuMuAPK冒烟",
+      "unit": ".claude/skills/MuMuAPK冒烟",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "a88842e346be8fa0fa196257369518649885b230",
+      "newCommit": "3ea0d54aac0b652c7cae30417a7df1f156ec348e",
+      "inboxPath": "skills/inbox/MuMuAPK冒烟",
+      "createdAt": "2026-08-24T01:45:03.002Z",
+      "updatedAt": "2026-08-24T01:45:03.002Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "ece15d63ceb09a42",
+      "name": "hall-ui-dev",
+      "unit": ".claude/skills/hall-ui-dev",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "a88842e346be8fa0fa196257369518649885b230",
+      "newCommit": "3ea0d54aac0b652c7cae30417a7df1f156ec348e",
+      "inboxPath": "skills/inbox/hall-ui-dev",
+      "createdAt": "2026-08-24T01:45:03.204Z",
+      "updatedAt": "2026-08-24T01:45:03.204Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "19f44365c8ab19ef",
+      "name": "规则-复盘-协议与通信",
+      "unit": ".codex/skills/规则-复盘-协议与通信",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "a88842e346be8fa0fa196257369518649885b230",
+      "newCommit": "3ea0d54aac0b652c7cae30417a7df1f156ec348e",
+      "inboxPath": "skills/inbox/规则-复盘-协议与通信",
+      "createdAt": "2026-08-24T01:45:03.672Z",
+      "updatedAt": "2026-08-24T01:45:03.672Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "24c1accd8b588f8b",
+      "name": "CLAUDE.md",
+      "unit": "CLAUDE.md",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "a88842e346be8fa0fa196257369518649885b230",
+      "newCommit": "3ea0d54aac0b652c7cae30417a7df1f156ec348e",
+      "inboxPath": "skills/inbox/CLAUDE.md",
+      "createdAt": "2026-08-24T01:45:03.769Z",
+      "updatedAt": "2026-08-24T01:45:03.769Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "d070989069dc6c63",
+      "name": "hall-ui-dev",
+      "unit": ".claude/skills/hall-ui-dev",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "0a0d2cd9eadb6ed349308ef148921b40bc1fab94",
+      "newCommit": "90d00ebcd56f8bfea77e1e005f104b765422a562",
+      "inboxPath": "skills/inbox/hall-ui-dev",
+      "createdAt": "2026-08-24T03:35:22.109Z",
+      "updatedAt": "2026-08-24T03:35:22.109Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "c08db42ddd3e644d",
+      "name": "Git规范",
+      "unit": ".claude/skills/Git规范",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "350c195c6e5be5aa9cc979996d1d175040c82bda",
+      "newCommit": "2f95e937a8b39cf110ab1c0975c946c91f29797a",
+      "inboxPath": "skills/inbox/Git规范",
+      "createdAt": "2026-08-24T07:01:38.168Z",
+      "updatedAt": "2026-08-24T07:01:38.168Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "b37a184148a98ad5",
+      "name": "CLAUDE.md",
+      "unit": "CLAUDE.md",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "350c195c6e5be5aa9cc979996d1d175040c82bda",
+      "newCommit": "2f95e937a8b39cf110ab1c0975c946c91f29797a",
+      "inboxPath": "skills/inbox/CLAUDE.md",
+      "createdAt": "2026-08-24T07:01:38.224Z",
+      "updatedAt": "2026-08-24T07:01:38.224Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "bfe66bab83bd90af",
+      "name": "新增配置",
+      "unit": ".claude/skills/新增配置",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "017f704c7d5acb9574dccab7185122a6cd979cf1",
+      "newCommit": "d096d7b0bc3a8634d5ae14930d9d6210c7e0cb85",
+      "inboxPath": "skills/inbox/新增配置",
+      "createdAt": "2026-08-25T02:35:30.050Z",
+      "updatedAt": "2026-08-25T02:35:30.050Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    },
+    {
+      "id": "a90f869cf0b5c8bb",
+      "name": "清理遗留代码",
+      "unit": ".claude/skills/清理遗留代码",
+      "status": "queued",
+      "sourceRef": "refs/remotes/origin/main",
+      "oldCommit": "017f704c7d5acb9574dccab7185122a6cd979cf1",
+      "newCommit": "d096d7b0bc3a8634d5ae14930d9d6210c7e0cb85",
+      "inboxPath": "skills/inbox/清理遗留代码",
+      "createdAt": "2026-08-25T02:35:31.726Z",
+      "updatedAt": "2026-08-25T02:35:31.726Z",
+      "suggestion": {
+        "action": "",
+        "target": "",
+        "reason": "",
+        "confidence": ""
+      }
+    }
+  ]
 }
